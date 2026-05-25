@@ -1,0 +1,11 @@
+{
+  "environment": "aws",
+  "mode": "centralized",
+  "dataset_path": "dataset_completo",
+  "hyperparameters": {
+    "n_estimators": 100,
+    "max_depth": null,
+    "class_weight": null,
+    "max_samples": 1.0
+  }
+}
