@@ -7,7 +7,7 @@ class Hyperparameters(BaseModel):
     
     n_estimators: int #Numero di alberi che compongono la foresta
     max_depth: Optional[int] = None  #Profondità massima degli alberi
-    class_weight: Optional[str] = None #Ponderazione delle classi, può essere 'balanced' per bilanciare le classi in base alla frequenza o 'balanced_subsample' per bilanciare le classi in ogni campione
+    class_weight: Optional[str]  #Ponderazione delle classi, può essere 'balanced' per bilanciare le classi in base alla frequenza o 'balanced_subsample' per bilanciare le classi in ogni campione
     max_samples: float #Percentuale di campioni da utilizzare per addestrare ogni albero, può essere un valore compreso tra 0 e 1 o un intero che rappresenta il numero di campioni
 
 class TrainingRequest(BaseModel):

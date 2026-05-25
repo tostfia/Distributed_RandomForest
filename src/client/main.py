@@ -4,6 +4,7 @@ import sys
 
 from src.shared.sharedmodels.models import Hyperparameters, TrainingRequest
 from src.shared.mock_aws.sqs import sqs_queue
+from src.shared.mock_aws.statemanager import initiate_request
 
 def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()
@@ -76,6 +77,10 @@ def main():
             hyperparameters=hp_obj
         )
 
+        # 1. Registriamo prima lo stato "QUEUED" su DynamoDB tramite lo StateManager
+        initiate_request(job_id=request.job_id, dataset_path=request.dataset_path)
+
+        # 2. Solo dopo aver scritto sul DB, inviamo il payload a SQS
         sqs_queue.send_message(request.model_dump())
         print("[CLIENT] Richiesta di addestramento inoltrata correttamente all'Orchestrator.")
         

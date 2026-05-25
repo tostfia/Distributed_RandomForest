@@ -1,5 +1,5 @@
 {
-  "environment": "aws",
+  "environment": "local",
   "mode": "centralized",
   "dataset_path": "dataset_completo",
   "hyperparameters": {
