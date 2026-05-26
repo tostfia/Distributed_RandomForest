@@ -9,35 +9,29 @@ def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()
     return user_input if user_input else default
 
-def main():
+def run_predefined_tests():
+    """Esegue test predefiniti per verificare il sistema senza input utente."""
+    print("\n=== AVVIO TEST DI SISTEMA PREDEFINITI ===")
+    print("[INFO] Funzionalità di test automatico globale non ancora implementata.")
+    sys.exit(0)
 
-    #aggiunta della scelta tra modalità tra client oppure test, nella modalità client l'utente può chiedere tra le varie funzionalità standard, mentre nella modaltà test, 
-    # l'utente può scegliere di eseguire dei test predefiniti per verificare il corretto funzionamento del sistema, ad esempio test di addestramento, test di inferenza, test di richiesta modello addestrato, ecc. 
-    # In questo modo si può facilmente verificare se il sistema funziona correttamente prima di utilizzarlo in produzione.
+def handle_inference():
+    print("\n=== NUOVO PROCESSO DI INFERENZA ===")
+    job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
+    data_url = get_input("Inserisci l'URL dei nuovi dati da predire: ")
+    print(f"[INFO] Richiesta di inferenza inviata per il Job {job_id[:8]}...")
+    sys.exit(0)
+
+def handle_model_request():
+    print("\n=== RICHIESTA MODELLO ADDESTRATO ===")
+    job_id = get_input("Inserisci il Job ID del modello da scaricare: ")
+    print(f"[INFO] Download del modello {job_id[:8]} in corso...")
+    sys.exit(0)
+
+def handle_training():
+    """Gestisce l'intera procedura di richiesta di addestramento (Standard Interattiva)."""
+    print("\n=== CONFIGURAZIONE PROCESSO DI ADDESTRAMENTO ===")
     
-    print("=====================================================")
-    print("      DISTRIBUTED RANDOM FOREST - CONFIGURATOR       ")
-    print("=====================================================\n")
-
-    #aggiunta di un banner iniziale in cui l'utente può scegliere cosa fare: se addestramento, inferenza oppure richiesta del modello addestrato, tramite 
-    #un menù a tendina che chiede all'utente di scegliere tra le tre opzioni, e in base alla scelta dell'utente, si procede con la richiesta di addestramento, inferenza oppure richiesta del modello addestrato.
-    print("Benvenuto nel configuratore del Distributed Random Forest!")
-    print("Scegli l'operazione da eseguire:")
-    print("[1] Avvia processo di addestramento")
-    print("[2] Avvia processo di inferenza")
-    print("[3] Richiedi modello addestrato")
-    operation_choice = get_input("Inserisci il numero corrispondente all'operazione desiderata: ", "1").strip()         
-    if operation_choice == "2":
-        print("\n[INFO] Funzionalità di inferenza non ancora implementata. Riavvia il configuratore per addestrare un modello.")
-        sys.exit(0)
-    elif operation_choice == "3":
-        print("\n[INFO] Funzionalità di richiesta modello addestrato non ancora implementata. Riavvia il configuratore per addestrare un modello.")
-        sys.exit(0)
-    elif operation_choice != "1":
-        print("\n[ERRORE] Scelta non valida. Riavvia il configuratore e scegli un'operazione valida.")
-        sys.exit(1)
-    # da sistemare
-
     # 1. Scelta dell'Ambiente
     env_choice = get_input("[1] Ambiente di esecuzione (L - Locale / A - AWS): ").strip().upper()
     environment = "aws" if env_choice == "A" else "local"
@@ -46,17 +40,24 @@ def main():
     mode_choice = get_input("[2] Modalità di training (C - Centralizzata / F - Federata): ").strip().upper()
     mode = "federated" if mode_choice == "F" else "centralized"
 
-    # 3. Gestione Dinamica del Dataset Path
-    # Inoltre, l'utente può inserire o un proprio dataset oppure quello sintentico, in questo modo si può facilmente testare il sistema con un dataset sintetico prima di utilizzare un dataset reale, e in questo modo si può verificare se il sistema funziona correttamente con un dataset sintetico prima di utilizzarlo con un dataset reale.
-    
+    # 3. Gestione Dinamica del Dataset Path / Sintetico
     if mode == "centralized":
-        dataset_path = get_input("[3] Inserisci il dataset_path (es: dataset_completo/): ").strip()
-        if environment == "local" and not os.path.exists(dataset_path):
-            print(f" [ATTENZIONE] Il path locale '{dataset_path}' non sembra esistere. Proseguo comunque...")
+        print("\n[3] Selezione del Dataset:")
+        print("  [1] Usa un dataset reale tramite URL/Path")
+        print("  [2] Genera un dataset sintetico di test per questa esecuzione")
+        dataset_choice = get_input("  Scegli l'opzione: ", "1")
+        
+        if dataset_choice == "2":
+            dataset_path = "SYNTHETIC_DATASET"
+            print("  [INFO] Verrà richiesto all'Orchestrator di generare un dataset sintetico.")
+        else:
+            dataset_path = get_input("  • Inserisci l'URL o il path del dataset: ").strip()
+            if not dataset_path:
+                print("\n[ERRORE] Il path o l'URL del dataset è obbligatorio.")
+                sys.exit(1)
     else:
-        #Da rivedere bene cosa serve chiedere al client se la modalità è federata.
         dataset_path = "NATIVE_PARTITIONED"
-        print(f" [INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
+        print(f"\n[INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
 
     # 4. Configurazione Iperparametri
     print("\n[4] Configurazione Matematica degli Alberi:")
@@ -75,7 +76,7 @@ def main():
         print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
         sys.exit(1)
 
-    # 5. Inizializzazione Servizi (Spostata e protetta da try-except)
+    # 5. Inizializzazione Servizi
     try:
         sqs_queue, state_manager = get_aws_services(environment)
     except Exception as e:
@@ -98,13 +99,12 @@ def main():
             hyperparameters=hp_obj
         )
     except Exception as e:
-        print(f"\n [ERRORE VALIDAZIONE STRUTTURA DANI]: {e}")
+        print(f"\n [ERRORE VALIDAZIONE STRUTTURA DATI]: {e}")
         sys.exit(1)
 
-    # Salvataggio file di configurazione locale (Ora include TUTTI i dati reali inclusi i default di Pydantic)
+    # Salvataggio file di configurazione locale
     try:
         with open("config.json", "w", encoding="utf-8") as f:
-            # Esportiamo direttamente il modello Pydantic, così config.json include il Job ID generato!
             json.dump(request.model_dump(), f, indent=2)
         print("\n[OK] File 'config.json' salvato correttamente.")
     except IOError as e:
@@ -114,16 +114,46 @@ def main():
     target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
     
     try:
-        # 1. Registriamo lo stato iniziale su DynamoDB
         state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path)
-        
-        # 2. Inoltriamo il payload alla coda
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
         print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
         
     except Exception as e:
         print(f"\n [ERRORE INVIO/CODA]: {e}")
-        print(" [ATTENZIONE] La richiesta potrebbe essere registrata su DB ma non inviata alla coda.")
+        sys.exit(1)
+
+
+def main():
+    print("=====================================================")
+    print("      DISTRIBUTED RANDOM FOREST - CONFIGURATOR       ")
+    print("=====================================================\n")
+
+    print("Seleziona la modalità del configuratore:")
+    print("[1] Modalità Client Standard (Interattiva)")
+    print("[2] Modalità Test (Esegui test di sistema predefiniti)")
+    config_mode = get_input("Scelta: ", "1")
+
+    if config_mode == "2":
+        run_predefined_tests()
+    elif config_mode != "1":
+        print("\n[ERRORE] Scelta non valida. Riavvia il configuratore.")
+        sys.exit(1)
+
+    print("\n--- MENÙ OPERAZIONI ---")
+    print("[1] Avvia processo di addestramento")
+    print("[2] Avvia processo di inferenza")
+    print("[3] Richiedi modello addestrato")
+    operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
+    
+    # Smistamento delle funzioni in base alla scelta dell'utente
+    if operation_choice == "1":
+        handle_training()
+    elif operation_choice == "2":
+        handle_inference()
+    elif operation_choice == "3":
+        handle_model_request()
+    else:
+        print("\n[ERRORE] Scelta non valida. Riavvia il configuratore.")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -68,5 +68,14 @@
     "last_orchestrator": "Orchestrator-Centralizzato-29930",
     "base_random_state": 42,
     "alberi_addestrati": 0
+  },
+  "9954318b-06a0-4296-a8f4-46e614952338": {
+    "status": "QUEUED",
+    "dataset_path": "dataset_completo/",
+    "timestamp": 1779814964.6095133,
+    "retries": 0,
+    "last_orchestrator": null,
+    "alberi_addestrati": 0,
+    "base_random_state": 42
   }
 }

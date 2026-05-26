@@ -1,5 +1,18 @@
 {
-  "centralized_queue": [],
+  "centralized_queue": [
+    {
+      "job_id": "9954318b-06a0-4296-a8f4-46e614952338",
+      "environment": "local",
+      "mode": "centralized",
+      "dataset_path": "dataset_completo/",
+      "hyperparameters": {
+        "n_estimators": 10,
+        "max_depth": null,
+        "class_weight": null,
+        "max_samples": 0.2
+      }
+    }
+  ],
   "federated_queue": [],
   "in_flight": {
     "MB_RECEIPT_51d63273": {
