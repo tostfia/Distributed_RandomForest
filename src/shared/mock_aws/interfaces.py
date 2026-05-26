@@ -30,8 +30,16 @@ class StateManagerInterface(ABC):
         pass
 
     @abstractmethod
-    def update_request_status(self, job_id: str, status: str, orchestrator_id: str, retries: int = 0) -> None:
-        """Aggiorna lo stato di avanzamento e traccia l'orchestratore corrente."""
+    def update_request_status(
+        self, 
+        job_id: str, 
+        status: str, 
+        orchestrator_id: str, 
+        retries: int = 0,
+        base_random_state: int = 42,  # <--- AGGIORNATO: Supporto al seed di failover
+        alberi_addestrati: int = 0    # <--- AGGIORNATO: Supporto al progresso del checkpoint
+    ) -> None:
+        """Aggiorna lo stato di avanzamento tracciando l'orchestratore, i tentativi e i checkpoint."""
         pass
 
     @abstractmethod

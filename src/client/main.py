@@ -22,7 +22,7 @@ def main():
     mode_choice = get_input("[2] Modalità di training (C - Centralizzata / F - Federata): ").strip().upper()
     mode = "federated" if mode_choice == "F" else "centralized"
 
-    # 3. Gestione Dinamica del Dataset Path in base alla Modalità
+    # 3. Gestione Dinamica del Dataset Path
     if mode == "centralized":
         dataset_path = get_input("[3] Inserisci il dataset_path (es: dataset_completo/): ").strip()
         if environment == "local" and not os.path.exists(dataset_path):
@@ -48,55 +48,55 @@ def main():
         print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
         sys.exit(1)
 
-    # Struttura della configurazione
-    config_data = {
-        "environment": environment,
-        "mode": mode,
-        "dataset_path": dataset_path,
-        "hyperparameters": {
-            "n_estimators": n_estimators,
-            "max_depth": max_depth,
-            "class_weight": class_weight,
-            "max_samples": max_samples
-        }
-    }
+    # 5. Inizializzazione Servizi (Spostata e protetta da try-except)
+    try:
+        sqs_queue, state_manager = get_aws_services(environment)
+    except Exception as e:
+        print(f"\n[ERRORE] Impossibile inizializzare i servizi per l'ambiente '{environment}': {e}")
+        sys.exit(1)
 
-    # Salvataggio file di configurazione locale
+    # 6. Validazione Pydantic
+    try:
+        hp_obj = Hyperparameters(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            class_weight=class_weight,
+            max_samples=max_samples
+        )
+        
+        request = TrainingRequest(
+            environment=environment,
+            mode=mode,
+            dataset_path=dataset_path,
+            hyperparameters=hp_obj
+        )
+    except Exception as e:
+        print(f"\n [ERRORE VALIDAZIONE STRUTTURA DANI]: {e}")
+        sys.exit(1)
+
+    # Salvataggio file di configurazione locale (Ora include TUTTI i dati reali inclusi i default di Pydantic)
     try:
         with open("config.json", "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+            # Esportiamo direttamente il modello Pydantic, così config.json include il Job ID generato!
+            json.dump(request.model_dump(), f, indent=2)
         print("\n[OK] File 'config.json' salvato correttamente.")
     except IOError as e:
         print(f"Impossibile salvare 'config.json' in locale: {e}")
 
-    # 5. CARICAMENTO POLIMORFO DEI SERVIZI (Dependency Injection via Factory)
-    sqs_queue, state_manager = get_aws_services(config_data["environment"])
-
-    # 6. Validazione Pydantic ed Invio del pacchetto
+    # 7. Invio del pacchetto e gestione dello stato
+    target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
+    
     try:
-        hp_obj = Hyperparameters(**config_data["hyperparameters"])
-        
-        request = TrainingRequest(
-            environment=config_data["environment"],
-            mode=config_data["mode"],
-            dataset_path=config_data["dataset_path"],
-            hyperparameters=hp_obj
-        )
-
-        # -----------------------------------------------------------------
-        # MODIFICA: Selezione dinamica della coda specialistica
-        target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
-        # -----------------------------------------------------------------
-
-        # 1. Registriamo lo stato iniziale (QUEUED) su DynamoDB sfruttando l'oggetto polimorfo
+        # 1. Registriamo lo stato iniziale su DynamoDB
         state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path)
-
-        # 2. Inoltriamo il payload alla coda specifica usando l'interfaccia aggiornata
+        
+        # 2. Inoltriamo il payload alla coda
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
         print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
         
     except Exception as e:
-        print(f"\n [ERRORE VALIDAZIONE/INVIO]: {e}")
+        print(f"\n [ERRORE INVIO/CODA]: {e}")
+        print(" [ATTENZIONE] La richiesta potrebbe essere registrata su DB ma non inviata alla coda.")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -5,5 +5,23 @@
     "timestamp": 1779732994.5520124,
     "retries": 0,
     "last_orchestrator": "Orchestrator-Centralizzato-A"
+  },
+  "c174bc6f-f99a-4bb5-8171-e1bc79b4e3bd": {
+    "status": "COMPLETED",
+    "dataset_path": "dataset_completo/",
+    "timestamp": 1779786722.127646,
+    "retries": 0,
+    "last_orchestrator": "Orchestrator-Centralizzato-A",
+    "base_random_state": 42,
+    "alberi_addestrati": 10
+  },
+  "be76a65a-fb82-4d00-a0ef-7f32e9297ee9": {
+    "status": "COMPLETED",
+    "dataset_path": "dataset_completo/",
+    "timestamp": 1779786757.1381874,
+    "retries": 0,
+    "last_orchestrator": "Orchestrator-Centralizzato-A",
+    "base_random_state": 42,
+    "alberi_addestrati": 12
   }
 }

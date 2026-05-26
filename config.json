@@ -1,0 +1,12 @@
+{
+  "job_id": "be76a65a-fb82-4d00-a0ef-7f32e9297ee9",
+  "environment": "local",
+  "mode": "centralized",
+  "dataset_path": "dataset_completo/",
+  "hyperparameters": {
+    "n_estimators": 12,
+    "max_depth": null,
+    "class_weight": null,
+    "max_samples": 0.2
+  }
+}
