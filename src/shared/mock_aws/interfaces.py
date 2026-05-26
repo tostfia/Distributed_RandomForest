@@ -36,8 +36,8 @@ class StateManagerInterface(ABC):
         status: str, 
         orchestrator_id: str, 
         retries: int = 0,
-        base_random_state: int = 42,  # <--- AGGIORNATO: Supporto al seed di failover
-        alberi_addestrati: int = 0    # <--- AGGIORNATO: Supporto al progresso del checkpoint
+        base_random_state: int = 42,  # Supporto al seed di failover
+        alberi_addestrati: int = 0    # Supporto al progresso del checkpoint
     ) -> None:
         """Aggiorna lo stato di avanzamento tracciando l'orchestratore, i tentativi e i checkpoint."""
         pass
