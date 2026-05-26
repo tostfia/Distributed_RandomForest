@@ -5,7 +5,6 @@ from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterf
 def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
     Factory polimorfa per il disaccoppiamento dell'infrastruttura cloud.
-    
     In base all'ambiente richiesto ('aws' o 'local'), istanzia e restituisce
     i componenti corretti (Mock basati su file o Client reali basati su boto3).
     """

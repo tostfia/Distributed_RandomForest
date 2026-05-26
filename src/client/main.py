@@ -10,9 +10,33 @@ def get_input(prompt: str, default: str = "") -> str:
     return user_input if user_input else default
 
 def main():
+
+    #aggiunta della scelta tra modalità tra client oppure test, nella modalità client l'utente può chiedere tra le varie funzionalità standard, mentre nella modaltà test, 
+    # l'utente può scegliere di eseguire dei test predefiniti per verificare il corretto funzionamento del sistema, ad esempio test di addestramento, test di inferenza, test di richiesta modello addestrato, ecc. 
+    # In questo modo si può facilmente verificare se il sistema funziona correttamente prima di utilizzarlo in produzione.
+    
     print("=====================================================")
     print("      DISTRIBUTED RANDOM FOREST - CONFIGURATOR       ")
     print("=====================================================\n")
+
+    #aggiunta di un banner iniziale in cui l'utente può scegliere cosa fare: se addestramento, inferenza oppure richiesta del modello addestrato, tramite 
+    #un menù a tendina che chiede all'utente di scegliere tra le tre opzioni, e in base alla scelta dell'utente, si procede con la richiesta di addestramento, inferenza oppure richiesta del modello addestrato.
+    print("Benvenuto nel configuratore del Distributed Random Forest!")
+    print("Scegli l'operazione da eseguire:")
+    print("[1] Avvia processo di addestramento")
+    print("[2] Avvia processo di inferenza")
+    print("[3] Richiedi modello addestrato")
+    operation_choice = get_input("Inserisci il numero corrispondente all'operazione desiderata: ", "1").strip()         
+    if operation_choice == "2":
+        print("\n[INFO] Funzionalità di inferenza non ancora implementata. Riavvia il configuratore per addestrare un modello.")
+        sys.exit(0)
+    elif operation_choice == "3":
+        print("\n[INFO] Funzionalità di richiesta modello addestrato non ancora implementata. Riavvia il configuratore per addestrare un modello.")
+        sys.exit(0)
+    elif operation_choice != "1":
+        print("\n[ERRORE] Scelta non valida. Riavvia il configuratore e scegli un'operazione valida.")
+        sys.exit(1)
+    # da sistemare
 
     # 1. Scelta dell'Ambiente
     env_choice = get_input("[1] Ambiente di esecuzione (L - Locale / A - AWS): ").strip().upper()
@@ -23,11 +47,14 @@ def main():
     mode = "federated" if mode_choice == "F" else "centralized"
 
     # 3. Gestione Dinamica del Dataset Path
+    # Inoltre, l'utente può inserire o un proprio dataset oppure quello sintentico, in questo modo si può facilmente testare il sistema con un dataset sintetico prima di utilizzare un dataset reale, e in questo modo si può verificare se il sistema funziona correttamente con un dataset sintetico prima di utilizzarlo con un dataset reale.
+    
     if mode == "centralized":
         dataset_path = get_input("[3] Inserisci il dataset_path (es: dataset_completo/): ").strip()
         if environment == "local" and not os.path.exists(dataset_path):
             print(f" [ATTENZIONE] Il path locale '{dataset_path}' non sembra esistere. Proseguo comunque...")
     else:
+        #Da rivedere bene cosa serve chiedere al client se la modalità è federata.
         dataset_path = "NATIVE_PARTITIONED"
         print(f" [INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
 
