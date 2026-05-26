@@ -1,4 +1,5 @@
 {
-  "queue": [],
+  "centralized_queue": [],
+  "federated_queue": [],
   "in_flight": {}
 }

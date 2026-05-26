@@ -1,30 +1,9 @@
 {
-  "d4358ee9-8d62-4bc1-8989-04e499aab7aa": {
+  "f319b10f-67ec-4d2a-a4f7-d1602d55f42b": {
     "status": "COMPLETED",
     "dataset_path": "dataset_completo/",
-    "timestamp": 1779719297.7608736,
+    "timestamp": 1779732994.5520124,
     "retries": 0,
-    "last_orchestrator": "Orchestrator-Nodo-A"
-  },
-  "983953fc-ec6e-47af-93f4-66eb96957f4a": {
-    "status": "COMPLETED",
-    "dataset_path": "dataset_completo/",
-    "timestamp": 1779720522.2498395,
-    "retries": 0,
-    "last_orchestrator": "Orchestrator-Nodo-A"
-  },
-  "41ef96c5-ee00-4dad-a2aa-d2e902072298": {
-    "status": "COMPLETED",
-    "dataset_path": "dataset_completo/",
-    "timestamp": 1779720652.8992572,
-    "retries": 0,
-    "last_orchestrator": "Orchestrator-Nodo-A"
-  },
-  "fa7ec87f-20c7-4bc4-a877-8cc82ec8db91": {
-    "status": "COMPLETED",
-    "dataset_path": "dataset_completo",
-    "timestamp": 1779720736.9513552,
-    "retries": 0,
-    "last_orchestrator": "Orchestrator-Nodo-A"
+    "last_orchestrator": "Orchestrator-Centralizzato-A"
   }
 }
