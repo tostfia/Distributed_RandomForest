@@ -52,7 +52,7 @@ class MockSQSQueue(SQSQueueInterface):
         print(f"[MOCK SQS] Messaggio registrato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
 
     def receive_message(self, queue_name: str, visibility_timeout: int = 30) -> dict | None:
-        """Fa polling selettivo solo sulla coda specificata dal rispettivo Orchestrator."""
+        """Fa polling selettivo e gestisce istantaneamente il riciclo dei messaggi scaduti."""
         state = self._load_state()
         now = time.time()
         updated = False
@@ -60,21 +60,21 @@ class MockSQSQueue(SQSQueueInterface):
         # 1. Controllo dei timeout specifico per la coda che sta chiamando
         for receipt_handle, data in list(state["in_flight"].items()):
             if data["queue_name"] == queue_name and now >= data["time_out"]:
-                print(f"[MOCK SQS] ⚠️ Visibility Timeout SCADUTO in '{queue_name}'. Il messaggio torna visibile.")
+                print(f"[MOCK SQS] Visibility Timeout SCADUTO in '{queue_name}'. Il messaggio torna visibile.")
                 state[queue_name].append(data["message"])
                 del state["in_flight"][receipt_handle]
                 updated = True
 
-        # Se non ci sono messaggi disponibili nella coda richiesta
+        # CORREZIONE: Se dopo il controllo dei timeout la coda è ANCORA disperatamente vuota, allora esci
         if queue_name not in state or not state[queue_name]:
             if updated: 
-                self._save_state(state)  # Salva se abbiamo ripristinato messaggi scaduti
+                self._save_state(state)  # Salva lo sblocco sul JSON anche se la coda era vuota per davvero
             return None
         
-        # 2. Estrazione FIFO dalla coda specifica
+        # 2. Estrazione FIFO dalla coda specifica (ora prenderà subito il messaggio appena scaduto!)
         msg = state[queue_name].pop(0)
 
-        # 3. GENERAZIONE DEL RECEIPT HANDLE (Opacità del Middleware richiesta dal Prof)
+        # 3. GENERAZIONE DEL RECEIPT HANDLE
         new_receipt_handle = f"MB_RECEIPT_{str(uuid.uuid4())[:8]}"
 
         # Spostamento in-flight ricordando da quale coda proviene il messaggio
