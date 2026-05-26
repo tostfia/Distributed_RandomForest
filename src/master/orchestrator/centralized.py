@@ -24,8 +24,8 @@ def start_centralized_orchestrator(orchestrator_name: str = "Orchestrator-Centra
             dataset_path = payload["dataset_path"]
             hp = payload["hyperparameters"]
 
-            print(f"\n[{orchestrator_name}] 📥 Ricevuto Job Centralizzato. SQS ReceiptHandle: {receipt_handle}")
-            print(f"[{orchestrator_name}] 🔍 ID Applicativo (Job ID): {job_id[:8]}...")
+            print(f"\n[{orchestrator_name}] Ricevuto Job Centralizzato. SQS ReceiptHandle: {receipt_handle}")
+            print(f"[{orchestrator_name}] ID Applicativo (Job ID): {job_id[:8]}...")
 
             # 1. CONTROLLO DELLO STATO (Logica di recupero/failover richiesta dal professore)
             existing_state = state_manager.obtain_request(job_id)

@@ -26,19 +26,19 @@ def main():
     if mode == "centralized":
         dataset_path = get_input("[3] Inserisci il dataset_path (es: dataset_completo/): ").strip()
         if environment == "local" and not os.path.exists(dataset_path):
-            print(f"  ⚠️ [ATTENZIONE] Il path locale '{dataset_path}' non sembra esistere. Proseguo comunque...")
+            print(f" [ATTENZIONE] Il path locale '{dataset_path}' non sembra esistere. Proseguo comunque...")
     else:
         dataset_path = "NATIVE_PARTITIONED"
-        print(f"  ℹ️ [INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
+        print(f" [INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
 
     # 4. Configurazione Iperparametri
     print("\n[4] Configurazione Matematica degli Alberi:")
     try:
-        n_estimators = int(get_input("  • Numero totale di alberi (n_estimators) [100]: ", "100"))
+        n_estimators = int(get_input("  • Numero totale di alberi (n_estimators): ", "100"))
         max_depth_raw = get_input("  • Profondità massima (max_depth - Invio per illimitata): ")
         max_depth = int(max_depth_raw) if max_depth_raw else None
         class_weight = get_input("  • Bilanciamento classi (class_weight es: balanced / Invio per None): ") or None
-        max_samples_raw = get_input("  • Frazione campioni per albero (max_samples) [1.0]: ", "1.0")
+        max_samples_raw = get_input("  • Frazione campioni per albero (max_samples): ", "1.0")
         max_samples = float(max_samples_raw)
         
         if not (0.0 < max_samples <= 1.0):
@@ -93,7 +93,7 @@ def main():
 
         # 2. Inoltriamo il payload alla coda specifica usando l'interfaccia aggiornata
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
-        print(f"[CLIENT] ✅ Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
+        print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
         
     except Exception as e:
         print(f"\n [ERRORE VALIDAZIONE/INVIO]: {e}")
