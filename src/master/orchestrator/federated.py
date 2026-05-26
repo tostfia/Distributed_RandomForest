@@ -6,9 +6,10 @@ from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 
 class FederatedOrchestrator(BaseOrchestrator):
     def __init__(self, environment: str = "local"):
-        # Passiamo alla classe madre i parametri specifici per la modalità Federata
+        # Recuperiamo il Process ID per generare un nome univoco per ogni replica federata
+        pid = os.getpid()
         super().__init__(
-            orchestrator_name="Orchestrator-Federato-Master",
+            orchestrator_name=f"Orchestrator-Federato-{pid}",
             queue_name="federated_queue",
             environment=environment
         )
@@ -16,19 +17,18 @@ class FederatedOrchestrator(BaseOrchestrator):
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
         """Implementazione del coordinamento e dell'aggregazione (Federated Averaging)."""
         
-        # Calcoliamo dinamicamente l'indice del round corrente in base agli alberi fatti
         step_dim = target_alberi - start_alberi
         round_num = (start_alberi // step_dim) + 1
         
-        print(f"   [FEDERATED-MASTER] === AVVIO ROUND {round_num} ===")
-        print(f"   [FEDERATED-MASTER] -> Distribuzione calcolo alberi ({start_alberi} a {target_alberi}) ai nodi remoti... (Seed: {seed})")
+        print(f"   [{self.orchestrator_name}] === AVVIO ROUND {round_num} ===")
+        print(f"   [{self.orchestrator_name}] -> Distribuzione calcolo alberi ({start_alberi} a {target_alberi}) ai nodi remoti... (Seed: {seed})")
         
-        # 1. Simulazione del tempo di calcolo in parallelo sui nodi
-        time.sleep(3) 
+        # 1. AUMENTATO A 45 SECONDI: Simulazione del calcolo sui nodi per darti il tempo di killare il processo
+        time.sleep(45) 
         
         # 2. Simulazione della fase di aggregazione dei modelli locali (Federated Averaging)
-        print(f"   [FEDERATED-MASTER] -> Ricezione dei pesi locali dai nodi completata.")
-        print(f"   [FEDERATED-MASTER] -> Aggregazione e generazione del Modello Globale per il Round {round_num} eseguita.")
+        print(f"   [{self.orchestrator_name}] -> Ricezione dei pesi locali dai nodi completata.")
+        print(f"   [{self.orchestrator_name}] -> Aggregazione e generazione del Modello Globale per il Round {round_num} eseguita.")
         time.sleep(1)
 
 

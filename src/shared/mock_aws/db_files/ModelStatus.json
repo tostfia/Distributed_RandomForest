@@ -23,5 +23,23 @@
     "last_orchestrator": "Orchestrator-Centralizzato-A",
     "base_random_state": 42,
     "alberi_addestrati": 12
+  },
+  "963ff6c9-3c2f-4fe9-8aed-465b9a9afe97": {
+    "status": "COMPLETED",
+    "dataset_path": "dataset_completo/",
+    "timestamp": 1779787060.7742517,
+    "retries": 0,
+    "last_orchestrator": "Orchestrator-Centralizzato-A",
+    "base_random_state": 42,
+    "alberi_addestrati": 12
+  },
+  "e7d0d009-2fc4-41a9-ae86-c896d09a0054": {
+    "status": "COMPLETED",
+    "dataset_path": "dataset_completo/",
+    "timestamp": 1779787110.7877092,
+    "retries": 0,
+    "last_orchestrator": "Orchestrator-Centralizzato-A",
+    "base_random_state": 42,
+    "alberi_addestrati": 10
   }
 }
