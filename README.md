@@ -9,7 +9,7 @@ Questo progetto implementa un sistema distribuito per l'addestramento e l'infere
 Il sistema si basa su un'architettura a nodi che comunicano scambiandosi messaggi strutturati. Prima di avviare i componenti del progetto, è necessario configurare l'ambiente virtuale Python e installare le librerie richieste.
 
 Invece di installare manualmente ogni singolo pacchetto, la procedura è automatizzata: l'installazione delle librerie pydantic (fondamentale per la validazione e lo scambio dei messaggi) e requests (utilizzata per gestire le chiamate di rete) avviene tramite il gestore di pacchetti pip.
-
+u
 ### 1. Creazione e Attivazione dell'Ambiente Virtuale
 
 È fortemente consigliato l'uso di un ambiente virtuale (venv) per isolare le dipendenze del progetto ed evitare conflitti con altre librerie globali sul computer.
