@@ -1,19 +1,41 @@
 import uuid
 
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal, Optional
+
 
 class Hyperparameters(BaseModel):
-    
-    n_estimators: int #Numero di alberi che compongono la foresta
-    max_depth: Optional[int] = None  #Profondità massima degli alberi
-    class_weight: Optional[str]  #Ponderazione delle classi, può essere 'balanced' per bilanciare le classi in base alla frequenza o 'balanced_subsample' per bilanciare le classi in ogni campione
-    max_samples: float #Percentuale di campioni da utilizzare per addestrare ogni albero, può essere un valore compreso tra 0 e 1 o un intero che rappresenta il numero di campioni
+
+    n_estimators: int
+    max_depth: Optional[int] = None
+    class_weight: Optional[str] = None
+    max_samples: float = 1.0
+    bootstrap: bool = True
+    tree_type: Literal["classifier", "regressor"] = "classifier"
+    target_column: Optional[str] = None
+
+    @field_validator("max_samples")
+    @classmethod
+    def check_max_samples(cls, v: float) -> float:
+        if not (0.0 < v <= 1.0):
+            raise ValueError("max_samples deve essere compreso tra 0 (escluso) e 1 (incluso).")
+        return v
+
 
 class TrainingRequest(BaseModel):
-    
-    job_id: str = Field(default_factory=lambda: str(uuid.uuid4())) #Identificatore univoco per ogni richiesta di addestramento, generato automaticamente
-    environment: str #Ambiente di addestramento, ad esempio 'local' o 'cloud'
-    mode: str #Modalità di addestramento, ad esempio 'centralized learning' o 'federated learning'
-    dataset_path: str #Percorso del dataset da utilizzare per l'addestramento
-    hyperparameters: Hyperparameters #Iperparametri per l'addestramento del modello
+
+    job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    environment: str
+    mode: str
+    dataset_path: str
+    hyperparameters: Hyperparameters
+
+
+class TrainingRequestWorker(BaseModel):
+
+    url_dataset: str
+    job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    task_id: str
+    mode: str
+    hyperparameters: Hyperparameters
+    seed: int
