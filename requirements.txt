@@ -1,3 +1,4 @@
 #Librerie utilizzate nel progetto
 pydantic #pip install pydantic
 requests #pip install requests
+rpyc #pip install rpyc

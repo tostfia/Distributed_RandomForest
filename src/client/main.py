@@ -63,15 +63,48 @@ def handle_training():
     print("\n[4] Configurazione Matematica degli Alberi:")
     try:
         n_estimators = int(get_input("  • Numero totale di alberi (n_estimators): ", "100"))
+ 
         max_depth_raw = get_input("  • Profondità massima (max_depth - Invio per illimitata): ")
         max_depth = int(max_depth_raw) if max_depth_raw else None
-        class_weight = get_input("  • Bilanciamento classi (class_weight es: balanced / Invio per None): ") or None
-        max_samples_raw = get_input("  • Frazione campioni per albero (max_samples): ", "1.0")
-        max_samples = float(max_samples_raw)
-        
-        if not (0.0 < max_samples <= 1.0):
-            raise ValueError("max_samples deve essere compreso tra 0 e 1.")
-            
+ 
+        class_weight = get_input(
+            "  • Bilanciamento classi (class_weight es: balanced / Invio per None): "
+        ) or None
+ 
+        if mode == "centralized":
+            bootstrap_raw = get_input("  • Usa bootstrap sampling? (S/N, default S): ", "S").upper()
+            bootstrap = bootstrap_raw != "N"
+ 
+            if bootstrap:
+                max_samples_raw = get_input(
+                    "  • Frazione campioni per albero (max_samples, es: 0.8, default 1.0): ", "1.0"
+                )
+                max_samples = float(max_samples_raw)
+                if not (0.0 < max_samples <= 1.0):
+                    raise ValueError("max_samples deve essere compreso tra 0 e 1.")
+            else:
+                # Senza bootstrap si usa sempre l'intero dataset, max_samples non ha effetto
+                max_samples = 1.0
+                print("  • max_samples: impostato a 1.0 automaticamente (bootstrap disabilitato)")
+        else:
+            bootstrap = False
+            max_samples = 1.0
+            print("  • Bootstrap e max_samples: disabilitati automaticamente (modalità Federata)")
+ 
+        # FIX: aggiunto tree_type — serve a CentralizedWorker per scegliere
+        # DecisionTreeClassifier o DecisionTreeRegressor tramite _get_tree_class()
+        print("  • Tipo di task:")
+        print("    [1] Classificazione (usa DecisionTreeClassifier)")
+        print("    [2] Regressione     (usa DecisionTreeRegressor)")
+        tree_type_raw = get_input("    Scegli: ", "1")
+        tree_type = "classifier" if tree_type_raw == "1" else "regressor"
+ 
+        # FIX: aggiunto target_column — necessario a CentralizedWorker._load_data()
+        target_column = get_input("  • Nome della colonna target nel dataset: ").strip()
+        if not target_column:
+            print("\n[ERRORE] Il nome della colonna target è obbligatorio.")
+            sys.exit(1)
+ 
     except ValueError as e:
         print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
         sys.exit(1)
@@ -90,6 +123,9 @@ def handle_training():
             max_depth=max_depth,
             class_weight=class_weight,
             max_samples=max_samples
+            bootstrap=bootstrap,
+            tree_type=tree_type,
+            target_column=target_column,
         )
         
         request = TrainingRequest(
