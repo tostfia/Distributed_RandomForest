@@ -4,6 +4,8 @@ import os
 import sys
 import time
 from src.shared.factory import get_aws_services
+from src.shared.binding.serviceregistry import ServiceRegistry
+import threading
 
 class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str, environment: str = "local"):
@@ -17,28 +19,57 @@ class BaseOrchestrator(ABC):
             print(f"[{self.orchestrator_name.upper()}] Errore inizializzazione servizi: {e}")
             sys.exit(1)
 
+    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 30):
+        while not stop_event.is_set():
+            try:
+                ServiceRegistry.update_orchestrator_heartbeat(self.orchestrator_name)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat: {e}")
+
+            for _ in range(interval):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+
     def start(self):
         """Metodo Template: gestisce l'intero ciclo di vita del polling e del failover."""
         print("=====================================================")
         print(f"  {self.orchestrator_name.upper()} IN ASCOLTO ({self.environment.upper()})...")
         print("=====================================================\n")
 
-        while True:
-            try:
-                sqs_response = self.sqs_queue.receive_message(queue_name=self.queue_name, visibility_timeout=300)
+        if self.environment == "local":
+            ServiceRegistry.register_orchestrator(self.orchestrator_name)
 
-                if not sqs_response:
-                    time.sleep(5)
-                    continue
+        self._stop_heartbeat = threading.Event()
+        self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
+        self.hb_thread.start()
 
-                receipt_handle = sqs_response["ReceiptHandle"]
-                payload = sqs_response["Body"]
-                
-                self._process_job(payload, receipt_handle)
+        try:
+            while True:
+                try:
+                    sqs_response = self.sqs_queue.receive_message(queue_name=self.queue_name, visibility_timeout=300)
 
-            except Exception as infra_error:
-                print(f"\n[{self.orchestrator_name}] [ERRORE INFRASTRUTTURALE]: {infra_error}")
-                time.sleep(10)
+                    if not sqs_response:
+                        time.sleep(5)
+                        continue
+
+                    receipt_handle = sqs_response["ReceiptHandle"]
+                    payload = sqs_response["Body"]
+                    
+                    self._process_job(payload, receipt_handle)
+
+                except Exception as infra_error:
+                    print(f"\n[{self.orchestrator_name}] [ERRORE INFRASTRUTTURALE]: {infra_error}")
+                    time.sleep(10)
+        except KeyboardInterrupt:
+            print(f"\n[-] Interruzione manuale intercettata sull'orchestrattore {self.orchestrator_name}")
+        finally:
+            print(f"[*] Chiusura dei servizi in corso per {self.orchestrator_name}...")
+            self._stop_heartbeat.set()
+            self.hb_thread.join(timeout=1)
+            if self.environment == "local":
+                ServiceRegistry.deregister_orchestrator(self.orchestrator_name)
+            print(f"[*]Orchestratore rimosso correttamente dalla rete.")
 
     def _process_job(self, payload: dict, receipt_handle: str):
         """Logica di gestione dello stato e orchestrazione del Job."""

@@ -62,20 +62,38 @@
   },
   "2e1f6b7c-306d-48b6-a5d5-9d9be13ff0ee": {
     "status": "PROCESSING",
-    "dataset_path": "dataset_completo/",
-    "timestamp": 1779787992.6326387,
+    "dataset_path": null,
+    "timestamp": 1780505398.2937365,
     "retries": 0,
-    "last_orchestrator": "Orchestrator-Centralizzato-29930",
+    "last_orchestrator": "SYSTEM_ERR",
     "base_random_state": 42,
     "alberi_addestrati": 0
   },
   "9954318b-06a0-4296-a8f4-46e614952338": {
-    "status": "QUEUED",
-    "dataset_path": "dataset_completo/",
-    "timestamp": 1779814964.6095133,
+    "status": "PROCESSING",
+    "dataset_path": null,
+    "timestamp": 1780505398.2913413,
     "retries": 0,
-    "last_orchestrator": null,
-    "alberi_addestrati": 0,
-    "base_random_state": 42
+    "last_orchestrator": "SYSTEM_ERR",
+    "base_random_state": 42,
+    "alberi_addestrati": 0
+  },
+  "ac7da89b-1d8a-47c3-9b75-2d87981cce59": {
+    "status": "PROCESSING",
+    "dataset_path": null,
+    "timestamp": 1780505398.296247,
+    "retries": 0,
+    "last_orchestrator": "SYSTEM_ERR",
+    "base_random_state": 42,
+    "alberi_addestrati": 0
+  },
+  "fd6925dc-6005-4c74-8580-7ac2d86c58d7": {
+    "status": "PROCESSING",
+    "dataset_path": null,
+    "timestamp": 1780505453.3962393,
+    "retries": 0,
+    "last_orchestrator": "SYSTEM_ERR",
+    "base_random_state": 42,
+    "alberi_addestrati": 0
   }
 }

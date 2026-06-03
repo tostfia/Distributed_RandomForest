@@ -1,21 +1,24 @@
 {
-  "centralized_queue": [
-    {
-      "job_id": "9954318b-06a0-4296-a8f4-46e614952338",
-      "environment": "local",
-      "mode": "centralized",
-      "dataset_path": "dataset_completo/",
-      "hyperparameters": {
-        "n_estimators": 10,
-        "max_depth": null,
-        "class_weight": null,
-        "max_samples": 0.2
-      }
-    }
-  ],
+  "centralized_queue": [],
   "federated_queue": [],
   "in_flight": {
-    "MB_RECEIPT_51d63273": {
+    "MB_RECEIPT_fe9e1803": {
+      "queue_name": "centralized_queue",
+      "message": {
+        "job_id": "9954318b-06a0-4296-a8f4-46e614952338",
+        "environment": "local",
+        "mode": "centralized",
+        "dataset_path": "dataset_completo/",
+        "hyperparameters": {
+          "n_estimators": 10,
+          "max_depth": null,
+          "class_weight": null,
+          "max_samples": 0.2
+        }
+      },
+      "time_out": 1780505698.2893462
+    },
+    "MB_RECEIPT_1adaacda": {
       "queue_name": "centralized_queue",
       "message": {
         "job_id": "2e1f6b7c-306d-48b6-a5d5-9d9be13ff0ee",
@@ -29,7 +32,45 @@
           "max_samples": 0.2
         }
       },
-      "time_out": 1779788292.6308568
+      "time_out": 1780505698.2923398
+    },
+    "MB_RECEIPT_c913e586": {
+      "queue_name": "centralized_queue",
+      "message": {
+        "job_id": "ac7da89b-1d8a-47c3-9b75-2d87981cce59",
+        "environment": "local",
+        "mode": "centralized",
+        "dataset_path": "SYNTHETIC_DATASET",
+        "hyperparameters": {
+          "n_estimators": 20,
+          "max_depth": 10,
+          "class_weight": null,
+          "max_samples": 1.0,
+          "bootstrap": true,
+          "tree_type": "classifier",
+          "target_column": "Label"
+        }
+      },
+      "time_out": 1780505698.2947414
+    },
+    "MB_RECEIPT_6308380b": {
+      "queue_name": "centralized_queue",
+      "message": {
+        "job_id": "fd6925dc-6005-4c74-8580-7ac2d86c58d7",
+        "environment": "local",
+        "mode": "centralized",
+        "dataset_path": "SYNTHETIC_DATASET",
+        "hyperparameters": {
+          "n_estimators": 20,
+          "max_depth": 10,
+          "class_weight": null,
+          "max_samples": 1.0,
+          "bootstrap": true,
+          "tree_type": "classifier",
+          "target_column": "Label"
+        }
+      },
+      "time_out": 1780505753.3872435
     }
   }
 }

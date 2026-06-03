@@ -1,12 +1,15 @@
 {
-  "job_id": "9954318b-06a0-4296-a8f4-46e614952338",
+  "job_id": "fd6925dc-6005-4c74-8580-7ac2d86c58d7",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "dataset_completo/",
+  "dataset_path": "SYNTHETIC_DATASET",
   "hyperparameters": {
-    "n_estimators": 10,
-    "max_depth": null,
+    "n_estimators": 20,
+    "max_depth": 10,
     "class_weight": null,
-    "max_samples": 0.2
+    "max_samples": 1.0,
+    "bootstrap": true,
+    "tree_type": "classifier",
+    "target_column": "Label"
   }
 }

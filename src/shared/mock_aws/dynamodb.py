@@ -38,6 +38,8 @@ class MockDynamoDB:
             return 'worker_name'
         elif table_name == 'orchestrators_registry':
             return 'orchestrator_name'
+        elif table_name == 'ModelStatus':
+            return 'job_id'
         else:
             raise ValueError(f"Tabella '{table_name}' non riconosciuta per determinare la chiave primaria.")
 
