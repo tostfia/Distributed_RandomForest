@@ -1,12 +1,9 @@
 from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
-import os 
-import sys 
-import time
-import json
 import numpy as np
 from rpyc import Service
 import rpyc
+from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.factory import get_aws_services
 from src.dataset.dataset_dao import *
 from src.dataset.dataset_dao_factory import *
@@ -38,6 +35,28 @@ class  BaseWorker(Service,ABC):
         self.tree_class_reference = tree_class_reference
         self.max_samples = max_samples
         self.bootstrap = bootstrap
+
+    def _get_my_private_ip(self) -> str:
+        "Rilevamento automaticamente l'IP privato del nodo corrente"
+        if self.environment == "AWS":
+            pass
+            return "0.0.0.0"
+        return "127.0.0.1"
+
+    def start_server(self, port: int, explicit_host: str = None):
+
+        "Avvio il server RPyC"
+        if self.environment == "aws":
+            pass #Agginta del codice da implementare
+
+        host_to_register = explicit_host if explicit_host else "127.0.0.1"
+        host_to_bind = host_to_register
+
+        ServiceRegistry.register_worker(worker_name = self.worker_name, host = host_to_register, port = port)
+
+        ServiceRegistry.start_heartbeat(node_name = self.worker_name, node_type="worker", host=host_to_register, port=port)
+
+
 
     def on_connect(self, conn):
         print(f"[+] Orchestrator connesso: {conn._config['peer']}")

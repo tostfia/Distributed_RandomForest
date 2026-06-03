@@ -31,6 +31,15 @@ class MockDynamoDB:
         path = self._get_table_path(table_name)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+    
+    def _get_primary_key_name(self, table_name: str) -> str:
+        """Restituisce il nome della chiave primaria per una tabella specifica."""
+        if table_name == 'workers_registry':
+            return 'worker_name'
+        elif table_name == 'orchestrators_registry':
+            return 'orchestrator_name'
+        else:
+            raise ValueError(f"Tabella '{table_name}' non riconosciuta per determinare la chiave primaria.")
 
     def put_item(self, table_name: str, key: str, value: dict):
         # Forza la chiave a stringa
@@ -49,7 +58,16 @@ class MockDynamoDB:
         str_key = str(key)
         # Carica la tabella in tempo reale dal file JSON
         table = self._load_table(table_name)
-        return table.get(str_key)
+        raw_item = table.get(str_key)
+
+        if raw_item:
+            pk_name = self._get_primary_key_name(table_name)
+            item_compliant = raw_item.copy()    
+            item_compliant[pk_name] = str_key  
+
+            return {"Item": item_compliant}
+        
+        return {}
 
     def delete_item(self, table_name: str, key: str) -> bool:
         """Rimuove un record dal file JSON (utile per ripulire stati o Service Discovery)."""
@@ -61,6 +79,19 @@ class MockDynamoDB:
             print(f"[Mock DynamoDB] Tabella '{table_name}' -> Eliminato ID: {str_key[:8]}...")
             return True
         return False
+    
+    def scan_table(self, table_name: str) -> dict:
+        """Restituisce tutti i record di una tabella (simulando l'operazione di scan)."""
+        table_data = self._load_table(table_name)
+        items_list = []
+        pk_name = self._get_primary_key_name(table_name)
 
+        for key, value in table_data.items():
+            item_compliant = value.copy()
+            item_compliant[pk_name] = key
+            items_list.append(item_compliant)
+        
+        return {"Items": items_list}
+    
 # Istanza globale
 dynamo_db = MockDynamoDB()
