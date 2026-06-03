@@ -1,5 +1,5 @@
 import os
-import numpy as np  # <--- CORRETTO: Importato numpy (prima causava NameError)
+import numpy as np
 import pandas as pd
 from src.worker.BaseWorker import BaseWorker
 
