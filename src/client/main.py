@@ -122,7 +122,7 @@ def handle_training():
             n_estimators=n_estimators,
             max_depth=max_depth,
             class_weight=class_weight,
-            max_samples=max_samples
+            max_samples=max_samples,
             bootstrap=bootstrap,
             tree_type=tree_type,
             target_column=target_column,
