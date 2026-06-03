@@ -5,7 +5,6 @@ from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
 
 def main():
-    # Controllo dei parametri (ora sono 4 argomenti + il nome del file = 5)
     if len(sys.argv) < 5:
         print("\n[ERRORE] Parametri Insufficienti")
         print("Uso corretto: python -m src.worker.run_worker <NOME_WORKER> <PORTA> <MODO (centralized/federated)> <ENVIRONMENT (local/aws)>")
@@ -13,7 +12,7 @@ def main():
     
     worker_name = sys.argv[1]
     mode = sys.argv[3].lower()
-    environment = sys.argv[4].lower()  # <--- Recupero la variabile environment che mancava
+    environment = sys.argv[4].lower()
 
     try:
         port = int(sys.argv[2])
