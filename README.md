@@ -28,3 +28,6 @@ Una volta attivato l'ambiente virtuale, basterà eseguire il comando pip install
 
 pip install --upgrade pip
 pip install -r requirements.txt
+
+
+##Aggiunta anche di rpyc per la comunicazione
