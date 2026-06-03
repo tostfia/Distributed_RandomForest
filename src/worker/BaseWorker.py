@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
 import numpy as np
-import rpyc  # <--- Importato esplicitamente per il decoratore @rpyc.exposed
+import rpyc
 from rpyc import Service, ThreadedServer
 import threading
 import time
@@ -70,7 +70,7 @@ class BaseWorker(Service, ABC):
 
         try:
             server.start()
-        except KeyboardInterrupt: # CORRETTO: KeyboardInterrupt (con la 'b' minuscola)
+        except KeyboardInterrupt:
             print(f"\n[-][{self.worker_name} Interruzione manuale rilevata]")
         except Exception as e:
             print(f"\n[!] [{self.worker_name}] Errore durante l'esecuzione del server: {str(e)}")
@@ -82,7 +82,6 @@ class BaseWorker(Service, ABC):
                 ServiceRegistry.deregister_worker(self.worker_name)
                 print(f"\n[+] [{self.worker_name}] Server arrestato e worker deregistrato.") 
             except Exception as e:
-                # CORRETTO: Chiusa la stringa e la parentesi del print che erano troncate
                 print(f"\n[!] [{self.worker_name}] Errore durante la deregistrazione: {str(e)}")
 
     def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
@@ -91,7 +90,6 @@ class BaseWorker(Service, ABC):
             try:
                 ServiceRegistry.update_worker_heartbeat(self.worker_name)
             except Exception as e:
-                # CORRETTO: La 'f' va prima delle virgolette
                 print(f"[!] [{self.worker_name}] Errore durante l'invio dell'heartbeat: {str(e)}")
 
             for _ in range(interval):
@@ -102,7 +100,7 @@ class BaseWorker(Service, ABC):
     def on_connect(self, conn):
         print(f"[+] Orchestrator connesso: {conn._config['peer']}")
 
-    def on_disconnect(self, conn):
+    def on_disconnect(self):
         print(f"[-] Orchestrator disconesso")
 
     @abstractmethod

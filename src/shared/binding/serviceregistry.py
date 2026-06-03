@@ -1,7 +1,7 @@
 import time
 from typing import Dict, Any
 
-from src.shared.mock_aws import dynamodb
+from src.shared.mock_aws.dynamodb import dynamo_db as dynamodb
 
 class ServiceRegistry:
     WORKERS_TABLE = 'workers_registry'
