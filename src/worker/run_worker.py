@@ -1,0 +1,49 @@
+import sys
+from sklearn.tree import DecisionTreeClassifier
+
+from src.worker.centralizedWorker import CentralizedWorker
+from src.worker.federatedWorker import FederatedWorker
+
+def main():
+    # Controllo dei parametri (ora sono 4 argomenti + il nome del file = 5)
+    if len(sys.argv) < 5:
+        print("\n[ERRORE] Parametri Insufficienti")
+        print("Uso corretto: python -m src.worker.run_worker <NOME_WORKER> <PORTA> <MODO (centralized/federated)> <ENVIRONMENT (local/aws)>")
+        sys.exit(1)
+    
+    worker_name = sys.argv[1]
+    mode = sys.argv[3].lower()
+    environment = sys.argv[4].lower()  # <--- Recupero la variabile environment che mancava
+
+    try:
+        port = int(sys.argv[2])
+    except ValueError:
+        print("[ERRORE] La porta deve essere un numero intero valido.")
+        sys.exit(1)
+
+    common_params = {
+        "worker_name": worker_name,
+        "queue_name": "centralized_queue" if mode == "centralized" else "federated_queue",
+        "environment": "local" if environment == "local" else "aws",
+        "url_dataset": "local_source_info",  
+        "tree_class_reference": DecisionTreeClassifier,
+        "max_samples": None,  
+        "bootstrap": True if mode == "centralized" else False,  
+    }
+
+    if mode == "centralized":
+        print(f"[*] Istanziazione in corso: comportamento CENTRALIZZATO per {worker_name}")
+        worker = CentralizedWorker(**common_params, target_column="target")
+    elif mode == "federated":
+        print(f"[*] Istanziazione in corso: comportamento FEDERATO per {worker_name}")
+        worker = FederatedWorker(**common_params, target_column="target")
+    else:
+        # Corretto il baco della stringa non chiusa
+        print("[ERRORE] Modalità sconosciuta. Scegli tra 'centralized' e 'federated'")
+        sys.exit(1)
+
+    worker.start_server(port=port)
+
+# Spostato fuori dal main e corretto l'operatore '=='
+if __name__ == "__main__":
+    main()

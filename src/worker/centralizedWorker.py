@@ -7,7 +7,7 @@ import numpy as np
 class CentralizedWorker(BaseWorker):
 
     def __init__(self,
-        worker_name: str,
+        worker_name: str
         queue_name: str,
         environment: str,
         url_dataset: str,
