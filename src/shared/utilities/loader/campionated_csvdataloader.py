@@ -1,9 +1,9 @@
 import pandas as pd
 
-from shared.utilities.loader import DatasetLoaderStrategy
+from shared.utilities.loader.datasetLoader import DatasetLoader
 
 
-class CleanCSVDataLoader(DatasetLoaderStrategy):
+class CleanCSVDataLoader(DatasetLoader):
     """
     Loader minimale per dataset già campionato e preprocessato.
 

@@ -4,7 +4,7 @@ import sys
 
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, TrainingRequest
-from src.baseline.run_baseline import run_baseline
+from src.baseline import run_baseline
 
 def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()

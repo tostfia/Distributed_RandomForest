@@ -2,13 +2,13 @@ import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
 
-from shared.utilities.loader import DatasetLoaderStrategy
+from src.shared.utilities.loader.datasetLoader import DatasetLoader
 
 
 RANDOM_SEED = 123
 
 
-class SyntheticDataLoader(DatasetLoaderStrategy):
+class SyntheticDataLoader(DatasetLoader):
     """
     Generatore di dataset sintetico tramite sklearn.make_classification.
 

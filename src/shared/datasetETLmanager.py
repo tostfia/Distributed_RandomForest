@@ -3,7 +3,7 @@ from typing import Optional
 
 import pandas as pd
 
-from shared.utilities.loader import DatasetLoaderStrategy
+from shared.utilities.loader.datasetLoader import DatasetLoader
 from shared.utilities.preprocessing import CICIDSPreprocessor
 
 
@@ -12,7 +12,7 @@ class DatasetETLManager:
     Coordina la pipeline ETL del dataset.
 
     Extract:
-        usa un DatasetLoaderStrategy.
+        usa un DatasetLoader.
 
     Transform:
         applica opzionalmente un preprocessor.
@@ -25,7 +25,7 @@ class DatasetETLManager:
 
     def __init__(
         self,
-        loader: DatasetLoaderStrategy,
+        loader: DatasetLoader,
         preprocessor: Optional[CICIDSPreprocessor] = None,
     ):
         self.loader = loader

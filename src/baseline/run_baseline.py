@@ -8,7 +8,7 @@ from sklearn.model_selection import KFold, cross_validate
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
-from src.shared.utilities import StratifiedDataSplitter
+from src.shared.utilities.datasplitter import StratifiedDataSplitter
 
 def run_baseline():
     print("=====================================================")

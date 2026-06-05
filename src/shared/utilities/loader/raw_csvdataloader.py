@@ -5,10 +5,9 @@ from typing import List, Sequence, Union
 
 import pandas as pd
 
-from shared.utilities.loader import DatasetLoaderStrategy
+from src.shared.utilities.loader.datasetLoader import DatasetLoader
 
-
-class RawCSVDataLoader(DatasetLoaderStrategy):
+class RawCSVDataLoader(DatasetLoader):
     """
     Loader CSV grezzo per sorgenti locali o S3.
 
