@@ -92,7 +92,6 @@ def handle_training():
             max_samples = 1.0
             print("  • Bootstrap e max_samples: disabilitati automaticamente (modalità Federata)")
  
-        # FIX: aggiunto tree_type — serve a CentralizedWorker per scegliere
         # DecisionTreeClassifier o DecisionTreeRegressor tramite _get_tree_class()
         print("  • Tipo di task:")
         print("    [1] Classificazione (usa DecisionTreeClassifier)")
