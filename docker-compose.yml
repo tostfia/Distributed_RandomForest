@@ -1,28 +1,29 @@
 version: '3.8'
 
-services: 
-    # ==========================================
-    # SERVIZIO: CENTRALIZED WORKER CLUSTER
-    # ==========================================
-    worker-centralizzato-01:
-        build: .
-        container_name: worker-centralizzato-01
-        command: python -m src.worker.run_worker Worker-Centralizzato-01 18861 centralized local
-        ports:
-            - "18861:18861"
-    # ==========================================
-    # SERVIZIO: FEDERATED WORKER CLUSTER
-    # ==========================================
-    worker-federato-01:
-        build: .
-        container_name: worker-federato-01
-        command: python -m src.worker.run_worker Worker-Federato-01 18862 federated local
-        ports:
-            - "18862:18862"
-        environment:
-            - LOCAL_DATASET_PATH=/app/data/private_data.csv
-        volumes:
-            - ./data:/app/data
+services:
+  worker-01:
+    # Immagine: locale di default, o quella di Docker Hub su AWS
+    image: ${IMAGE_NAME:-rf-worker-locale:latest}
+    container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
+    ports:
+      - "18861:18861"
+    volumes:
+      - ./data:/app/data
+    # Il comando si auto-compone in base a come configuri le variabili
+    command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+    restart: on-failure
+
+  worker-02:
+    image: ${IMAGE_NAME:-rf-worker-locale:latest}
+    container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_02
+    ports:
+      - "18862:18862"
+    volumes:
+      - ./data:/app/data
+    command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+    restart: on-failure
+        
+    
        
 
     
