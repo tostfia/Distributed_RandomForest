@@ -78,5 +78,29 @@
       "orchestrator_name": "Orchestrator-Centralizzato-10948"
     },
     "last_heartbeat": 1780505610
+  },
+  "Orchestrator-Centralizzato-25512": {
+    "Item": {
+      "Item": {
+        "Item": {
+          "Item": {
+            "Item": {
+              "status": "AVAILABLE",
+              "last_heartbeat": 1780658704,
+              "orchestrator_name": "Orchestrator-Centralizzato-25512"
+            },
+            "last_heartbeat": 1780658704,
+            "orchestrator_name": "Orchestrator-Centralizzato-25512"
+          },
+          "last_heartbeat": 1780658735,
+          "orchestrator_name": "Orchestrator-Centralizzato-25512"
+        },
+        "last_heartbeat": 1780658765,
+        "orchestrator_name": "Orchestrator-Centralizzato-25512"
+      },
+      "last_heartbeat": 1780658795,
+      "orchestrator_name": "Orchestrator-Centralizzato-25512"
+    },
+    "last_heartbeat": 1780658826
   }
 }

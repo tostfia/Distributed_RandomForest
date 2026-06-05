@@ -32,9 +32,28 @@ pip install -r requirements.txt
 
 ##Aggiunta anche di rpyc per la comunicazione
 
+Prima di lanciare Swarm, dovrai fare:
+* docker build -t tuo-utente-dockerhub/drf-worker:latest .
+* docker push tuo-utente-dockerhub/drf-worker:latest
 
-Aggiunta di docker: 
-    - Per Windows scaricare e installare Docker Desktop.
-    - Per Linux: 
-        sudo apt-get update
-        sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+Poi : 
+# Sul terminale del computer principale (Manager)
+docker swarm init
+
+Avviare il progetto: 
+docker stack deploy -c docker-stack.yml mio-progetto-drf
+
+Controllare lo stato dei servizi: 
+docker service ls
+
+Vedere su quali macchine fisiche stanno girando i singoli worker: 
+docker stack ps mio-progetto-drf
+
+Scalare dinamicamente i nodi:
+docker service scale mio-progetto-drf_worker-federato=3
+
+Leggere i log di un intero servizio distribuito: 
+docker service logs mio-progetto-drf_orchestrator
+
+Rimuove tutto il cluster: 
+docker stack rm mio-progetto-drf

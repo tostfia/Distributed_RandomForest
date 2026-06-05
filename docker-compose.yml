@@ -1,0 +1,28 @@
+version: '3.8'
+
+services: 
+    # ==========================================
+    # SERVIZIO: CENTRALIZED WORKER CLUSTER
+    # ==========================================
+    worker-centralizzato-01:
+        build: .
+        container_name: worker-centralizzato-01
+        command: python -m src.worker.run_worker Worker-Centralizzato-01 18861 centralized local
+        ports:
+            - "18861:18861"
+    # ==========================================
+    # SERVIZIO: FEDERATED WORKER CLUSTER
+    # ==========================================
+    worker-federato-01:
+        build: .
+        container_name: worker-federato-01
+        command: python -m src.worker.run_worker Worker-Federato-01 18862 federated local
+        ports:
+            - "18862:18862"
+        environment:
+            - LOCAL_DATASET_PATH=/app/data/private_data.csv
+        volumes:
+            - ./data:/app/data
+       
+
+    
