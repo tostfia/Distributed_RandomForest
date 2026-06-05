@@ -30,17 +30,19 @@ class ServiceRegistry:
         if environment == "local":
             response = dynamodb.scan_table(cls.WORKERS_TABLE)
         else:
-            ##Comportamento da implementare per il distribuito con AWS
-            pass
+            return {}  # Aggiungere logica per AWS 
         items = response.get("Items", [])
         for item in items:
-            worker_name = item.get("worker_name")
-            last_heartbeat = item.get("last_heartbeat", 0)
+            worker_name = cls._extract_data(item, "worker_name")
+            if not worker_name:
+                continue 
+            last_heartbeat = cls._extract_data(item, "last_heartbeat") or 0
+            
             if current_time - last_heartbeat <= cls.TIME_OUT_SECONDS:
                 available_workers[worker_name] = {
-                    "host": item.get("host"),
-                    "port": item.get("port"),
-                    "status": item.get("status"),
+                    "host": cls._extract_data(item, "host"),
+                    "port": cls._extract_data(item, "port"),
+                    "status": cls._extract_data(item, "status"),
                     "last_heartbeat": last_heartbeat
                 }
         return available_workers
@@ -82,3 +84,14 @@ class ServiceRegistry:
             orchestrator['last_heartbeat'] = int(time.time())
             dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator)
             print(f"[ServiceRegistry] Heartbeat aggiornato per orchestratore '{orchestrator_name}'.")
+
+    @classmethod
+    def _extract_data(cls, data: dict, key: str):
+        """Funzione ricorsiva per trovare una chiave in un dizionario annidato."""
+        if key in data:
+            return data[key]
+        for k, v in data.items():
+            if isinstance(v, dict):
+                res = cls._extract_data(v, key)
+                if res: return res
+        return None

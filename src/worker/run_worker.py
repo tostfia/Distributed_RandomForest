@@ -43,7 +43,7 @@ def main():
         print("[ERRORE] Modalità sconosciuta. Scegli tra 'centralized' e 'federated'")
         sys.exit(1)
     
-    print(f"[+] Avvio Server RPyC per il worker {worker_name} sulla porta {port} (Host registrato: {rpc_host})...")
+    print(f"[+] Avvio Server RPyC per il worker {worker_name} sulla porta {port} (Host registrato: {host})...")
     print(f"[DEBUG] Registrazione worker su: {host}:{port}")
     try:
         

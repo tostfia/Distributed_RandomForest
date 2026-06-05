@@ -50,10 +50,7 @@ class BaseWorker(Service, ABC):
         if self.environment == "aws":
             pass # Aggiunta del codice da implementare
 
-        if not explicit_host or str(explicit_host).strip() == "None" or explicit_host == "":
-            host_to_register = "127.0.0.1"
-        else:
-            host_to_register = explicit_host
+        host_to_register = explicit_host if explicit_host else "127.0.0.1"
 
         host_to_bind = "0.0.0.0" if self.environment.lower() == "local" else host_to_register
 
@@ -102,10 +99,15 @@ class BaseWorker(Service, ABC):
                 time.sleep(1)
     
     def on_connect(self, conn):
-        print(f"[+] Orchestrator connesso: {conn._config['peer']}")
 
-    def on_disconnect(self):
-        print(f"[-] Orchestrator disconesso")
+        peer_info = "Orchestratore"
+        if hasattr(conn, '_config') and 'peer' in conn._config:
+            peer_info = conn._config['peer']
+        print(f"[+] Orchestratore connesso: {peer_info}")
+
+    def on_disconnect(self, conn):
+        # Il parametro 'conn' è obbligatorio qui perché RPyC lo passa sempre
+        print(f"[-] Orchestratore disconnesso")
 
     @abstractmethod
     def _load_data(self, source_info):
