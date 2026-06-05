@@ -22,9 +22,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare  (seed: {seed})...")
 
         #Scansione dei nodi worker attivi 
+        # Nel tuo CentralizedOrchestrator.py
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
-            raise RuntimeError(f"Nessun worker disponibile per eseguire il training step. Carico totale: {total_step_trees} alberi.")
+            # Invece di far fallire tutto subito, potresti mettere il messaggio 
+            # di nuovo in coda con un delay (es. sleep) o loggare un avviso meno critico.
+            print("[!] Attenzione: Nessun worker pronto. Aspetto...")
+            time.sleep(10) 
+            return # Torna al loop principale senza far fallire il job
         
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
@@ -35,7 +40,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
         remainder = total_step_trees % num_workers
 
         #Estrazione iper param e dataset DA RIFARE
-        source_info = payload.get("data_url") or payload.get("dataset_url", "default_dataset.csv")
+        # Cerca la chiave corretta che invia il client
+        source_info = payload.get("dataset_path") or "default_dataset.csv"
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
 

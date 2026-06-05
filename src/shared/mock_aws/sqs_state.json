@@ -1,6 +1,7 @@
 {
   "centralized_queue": [],
   "federated_queue": [],
+<<<<<<< HEAD
   "in_flight": {
     "MB_RECEIPT_166455c5": {
       "queue_name": "centralized_queue",
@@ -22,4 +23,7 @@
       "time_out": 1780674206.4454765
     }
   }
+=======
+  "in_flight": {}
+>>>>>>> 1ce5cae937545767ed1955f2ae249f6d3ab2a593
 }
