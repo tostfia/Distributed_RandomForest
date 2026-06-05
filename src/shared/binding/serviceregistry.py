@@ -70,10 +70,11 @@ class ServiceRegistry:
     @classmethod
     def update_worker_heartbeat(cls, worker_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un worker."""
-        worker = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
-        if worker:
-            worker['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker)
+        response = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
+        worker_data = response.get("Item")
+        if worker_data:
+            worker_data['last_heartbeat'] = int(time.time())
+            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per worker '{worker_name}'.")
     
     @classmethod
