@@ -1,15 +1,15 @@
 {
-  "job_id": "266744d3-019e-4e8d-adf1-3f39483a4584",
+  "job_id": "c72fdc8f-b2cb-446d-a6ca-1e0ea3f2c2ee",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/client/src/sintetic_data.csv",
+  "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/dataset/sintetic_data.csv",
   "hyperparameters": {
-    "n_estimators": 10,
+    "n_estimators": 1,
     "max_depth": null,
     "class_weight": null,
     "max_samples": 1.0,
     "bootstrap": true,
     "tree_type": "classifier",
-    "target_column": "colonna"
+    "target_column": "target"
   }
 }
