@@ -50,8 +50,12 @@ class BaseWorker(Service, ABC):
         if self.environment == "aws":
             pass # Aggiunta del codice da implementare
 
-        host_to_register = explicit_host if explicit_host else "127.0.0.1"
-        host_to_bind = host_to_register
+        if not explicit_host or str(explicit_host).strip() == "None" or explicit_host == "":
+            host_to_register = "127.0.0.1"
+        else:
+            host_to_register = explicit_host
+
+        host_to_bind = "0.0.0.0" if self.environment.lower() == "local" else host_to_register
 
         ServiceRegistry.register_worker(worker_name=self.worker_name, host=host_to_register, port=port)
 
