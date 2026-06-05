@@ -16,6 +16,7 @@ def main():
     environment = sys.argv[4].lower()
 
     try:
+        host = os.environ.get("RPC_HOST", "127.0.0.1")
         port = int(sys.argv[2])
     except ValueError:
         print("[ERRORE] La porta deve essere un numero intero valido.")
@@ -41,11 +42,12 @@ def main():
         # Corretto il baco della stringa non chiusa
         print("[ERRORE] Modalità sconosciuta. Scegli tra 'centralized' e 'federated'")
         sys.exit(1)
-    rpc_host = os.environ.get("RPC_HOST", "127.0.0.1")
+    
     print(f"[+] Avvio Server RPyC per il worker {worker_name} sulla porta {port} (Host registrato: {rpc_host})...")
+    print(f"[DEBUG] Registrazione worker su: {host}:{port}")
     try:
         
-        worker.start_server(port=port, explicit_host=rpc_host) 
+        worker.start_server(port=port, explicit_host=host) 
     except Exception as e:
         print(f"[ERRORE CRITICO ENCOUNTERED]: {e}")
 

@@ -16,6 +16,9 @@ class MockDynamoDB:
         """Legge i dati della tabella dal file JSON corrispondente."""
         path = self._get_table_path(table_name)
         if os.path.exists(path):
+            
+            if os.path.getsize(path) == 0:
+                return {}
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     return json.load(f)
