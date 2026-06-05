@@ -31,3 +31,10 @@ pip install -r requirements.txt
 
 
 ##Aggiunta anche di rpyc per la comunicazione
+
+
+Aggiunta di docker: 
+    - Per Windows scaricare e installare Docker Desktop.
+    - Per Linux: 
+        sudo apt-get update
+        sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
