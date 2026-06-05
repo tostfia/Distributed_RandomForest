@@ -1,5 +1,21 @@
 {
-  "centralized_queue": [],
+  "centralized_queue": [
+    {
+      "job_id": "266744d3-019e-4e8d-adf1-3f39483a4584",
+      "environment": "local",
+      "mode": "centralized",
+      "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/client/src/sintetic_data.csv",
+      "hyperparameters": {
+        "n_estimators": 10,
+        "max_depth": null,
+        "class_weight": null,
+        "max_samples": 1.0,
+        "bootstrap": true,
+        "tree_type": "classifier",
+        "target_column": "colonna"
+      }
+    }
+  ],
   "federated_queue": [],
   "in_flight": {
     "MB_RECEIPT_9c632265": {
