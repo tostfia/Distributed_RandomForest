@@ -4,6 +4,7 @@ import sys
 
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, TrainingRequest
+from src.baseline.run_baseline import run_baseline
 
 def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()
@@ -179,6 +180,7 @@ def main():
     print("[1] Avvia processo di addestramento")
     print("[2] Avvia processo di inferenza")
     print("[3] Richiedi modello addestrato")
+    print("[4] Esegui Baseline Locale")
     operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
     
     # Smistamento delle funzioni in base alla scelta dell'utente
@@ -188,6 +190,8 @@ def main():
         handle_inference()
     elif operation_choice == "3":
         handle_model_request()
+    elif operation_choice == "4":
+        run_baseline()
     else:
         print("\n[ERRORE] Scelta non valida. Riavvia il configuratore.")
         sys.exit(1)

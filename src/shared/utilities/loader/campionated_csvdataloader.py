@@ -7,7 +7,7 @@ class CleanCSVDataLoader(DatasetLoaderStrategy):
     """
     Loader minimale per dataset già campionato e preprocessato.
 
-    Usato dai Worker.
+    Usato dai Worker nella versione base.
 
     Responsabilità:
     - leggere un CSV già pulito da locale o S3;
