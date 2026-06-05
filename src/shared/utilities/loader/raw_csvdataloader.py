@@ -14,7 +14,7 @@ class RawCSVDataLoader(DatasetLoaderStrategy):
 
     Responsabilità:
     - leggere CSV da file system locale o S3;
-    - applicare opzionalmente un campionamento deterministico sequenziale (come da baseline);
+    - applicare un campionamento deterministico sequenziale;
     - restituire un DataFrame grezzo.
     """
 
