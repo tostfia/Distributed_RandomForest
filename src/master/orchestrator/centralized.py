@@ -21,15 +21,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         total_step_trees= target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare  (seed: {seed})...")
 
-        #Scansione dei nodi worker attivi 
-        # Nel tuo CentralizedOrchestrator.py
+        #Scansione dei nodi worker attivi e disponibili (con heartbeat aggiornato)
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
             # Invece di far fallire tutto subito, potresti mettere il messaggio 
             # di nuovo in coda con un delay (es. sleep) o loggare un avviso meno critico.
             print("[!] Attenzione: Nessun worker pronto. Aspetto...")
             time.sleep(10) 
-            return # Torna al loop principale senza far fallire il job
+            return False # Torna al loop principale senza far fallire il job
         
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
@@ -83,7 +82,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     print(f"   [ERRORE CRITICO] Il worker '{w_name}' ha fallito o si è disconnesso: {e}")
                     raise e  # Rilanciando l'errore attiviamo il meccanismo di failover nativo di BaseOrchestrator
 
-        print(f"   [{self.orchestrator_name}] Step centralizzato completato con successo. Raccolti {len(all_trained_trees)} alberi.")
+        # Verifica finale: abbiamo ricevuto alberi?
+        if len(all_trained_trees) > 0:
+            print(f"   [{self.orchestrator_name}] Step centralizzato completato.")
+            return True # <--- MODIFICA: successo!
+        
+        return False
                 
 
 if __name__ == "__main__":

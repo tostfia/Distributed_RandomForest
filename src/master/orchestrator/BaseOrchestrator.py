@@ -117,7 +117,11 @@ class BaseOrchestrator(ABC):
                 prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                 
                 # CHIAMATA AL METODO ASTRATTO (Passiamo anche il seed, fondamentale!)
-                self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
+                successo = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
+
+                if not successo:
+                    print(f"[{self.orchestrator_name}] Risorse insufficienti per Job {job_id[:8]}. In attesa...")
+                    return
                 
                 current_alberi = prossimo_target
                 # Salvataggio del checkpoint integrato con lo StateManager aggiornato
