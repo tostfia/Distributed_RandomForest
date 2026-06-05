@@ -13,20 +13,23 @@ class MockDynamoDB:
         return os.path.join(self.base_dir, f"{table_name}.json")
 
     def _load_table(self, table_name: str) -> dict:
-        """Legge i dati della tabella dal file JSON corrispondente."""
         path = self._get_table_path(table_name)
-        if os.path.exists(path):
-            
-            if os.path.getsize(path) == 0:
-                return {}
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return {}
+
+        import time
+        # Tentiamo di leggere per un numero massimo di volte (es. 5)
+        for attempt in range(5):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except json.JSONDecodeError:
-                # Protezione da letture concorrenti asincrone
-                import time
+                # Aspetta un po' prima di riprovare
                 time.sleep(0.05)
-                return self._load_table(table_name)
+        
+        # Se dopo 5 volte fallisce ancora, restituiamo un dizionario vuoto
+        # per evitare il crash, e logghiamo l'errore
+        print(f"[ERRORE] Impossibile leggere il file {table_name}.json dopo 5 tentativi.")
         return {}
 
     def _save_table(self, table_name: str, data: dict):

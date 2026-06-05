@@ -79,10 +79,17 @@ class ServiceRegistry:
     @classmethod
     def update_orchestrator_heartbeat(cls, orchestrator_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un orchestratore."""
-        orchestrator = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
-        if orchestrator:
-            orchestrator['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator)
+        response = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
+        
+        # Estrai i dati reali dal wrapper "Item"
+        orchestrator_data = response.get("Item")
+        
+        if orchestrator_data:
+            # Aggiorna solo il dizionario dei dati, non il wrapper
+            orchestrator_data['last_heartbeat'] = int(time.time())
+            
+            # Passa solo il dizionario dei dati a put_item
+            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per orchestratore '{orchestrator_name}'.")
 
     @classmethod
