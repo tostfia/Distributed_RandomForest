@@ -95,11 +95,16 @@ class ServiceRegistry:
 
     @classmethod
     def _extract_data(cls, data: dict, key: str):
-        """Funzione ricorsiva per trovare una chiave in un dizionario annidato."""
+        """Versione sicura e piatta (NON ricorsiva) per estrarre chiavi."""
+        if not isinstance(data, dict):
+            return None
+            
+        # Cerchiamo la chiave direttamente nel dizionario corrente
         if key in data:
             return data[key]
-        for k, v in data.items():
-            if isinstance(v, dict):
-                res = cls._extract_data(v, key)
-                if res: return res
+            
+        # Se i dati sono wrappati dentro un "Item", guardiamo lì dentro una sola volta
+        if "Item" in data and isinstance(data["Item"], dict):
+            return data["Item"].get(key)
+            
         return None

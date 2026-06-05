@@ -1,29 +1,5 @@
 {
   "centralized_queue": [],
   "federated_queue": [],
-<<<<<<< HEAD
-  "in_flight": {
-    "MB_RECEIPT_166455c5": {
-      "queue_name": "centralized_queue",
-      "message": {
-        "job_id": "f0afc9b3-cec6-4613-b03c-ea7d05911502",
-        "environment": "local",
-        "mode": "centralized",
-        "dataset_path": "SYNTHETIC_DATASET",
-        "hyperparameters": {
-          "n_estimators": 10,
-          "max_depth": 5,
-          "class_weight": null,
-          "max_samples": 1.0,
-          "bootstrap": true,
-          "tree_type": "classifier",
-          "target_column": "Target"
-        }
-      },
-      "time_out": 1780674206.4454765
-    }
-  }
-=======
   "in_flight": {}
->>>>>>> 1ce5cae937545767ed1955f2ae249f6d3ab2a593
 }
