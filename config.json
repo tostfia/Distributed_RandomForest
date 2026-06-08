@@ -2,6 +2,7 @@
   "job_id": "0eb871d8-2163-4cc0-8b4c-b1fabe9ec677",
   "environment": "local",
   "mode": "centralized",
+  "dataset_type": "synthetic",
   "dataset_path": "SYNTHETIC_DATASET",
   "hyperparameters": {
     "n_estimators": 20,
