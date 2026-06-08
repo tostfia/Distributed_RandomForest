@@ -30,17 +30,19 @@ class ServiceRegistry:
         if environment == "local":
             response = dynamodb.scan_table(cls.WORKERS_TABLE)
         else:
-            ##Comportamento da implementare per il distribuito con AWS
-            pass
+            return {}  # Aggiungere logica per AWS 
         items = response.get("Items", [])
         for item in items:
-            worker_name = item.get("worker_name")
-            last_heartbeat = item.get("last_heartbeat", 0)
+            worker_name = cls._extract_data(item, "worker_name")
+            if not worker_name:
+                continue 
+            last_heartbeat = cls._extract_data(item, "last_heartbeat") or 0
+            
             if current_time - last_heartbeat <= cls.TIME_OUT_SECONDS:
                 available_workers[worker_name] = {
-                    "host": item.get("host"),
-                    "port": item.get("port"),
-                    "status": item.get("status"),
+                    "host": cls._extract_data(item, "host"),
+                    "port": cls._extract_data(item, "port"),
+                    "status": cls._extract_data(item, "status"),
                     "last_heartbeat": last_heartbeat
                 }
         return available_workers
@@ -68,17 +70,41 @@ class ServiceRegistry:
     @classmethod
     def update_worker_heartbeat(cls, worker_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un worker."""
-        worker = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
-        if worker:
-            worker['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker)
+        response = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
+        worker_data = response.get("Item")
+        if worker_data:
+            worker_data['last_heartbeat'] = int(time.time())
+            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per worker '{worker_name}'.")
     
     @classmethod
     def update_orchestrator_heartbeat(cls, orchestrator_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un orchestratore."""
-        orchestrator = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
-        if orchestrator:
-            orchestrator['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator)
+        response = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
+        
+        # Estrai i dati reali dal wrapper "Item"
+        orchestrator_data = response.get("Item")
+        
+        if orchestrator_data:
+            # Aggiorna solo il dizionario dei dati, non il wrapper
+            orchestrator_data['last_heartbeat'] = int(time.time())
+            
+            # Passa solo il dizionario dei dati a put_item
+            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per orchestratore '{orchestrator_name}'.")
+
+    @classmethod
+    def _extract_data(cls, data: dict, key: str):
+        """Versione sicura e piatta (NON ricorsiva) per estrarre chiavi."""
+        if not isinstance(data, dict):
+            return None
+            
+        # Cerchiamo la chiave direttamente nel dizionario corrente
+        if key in data:
+            return data[key]
+            
+        # Se i dati sono wrappati dentro un "Item", guardiamo lì dentro una sola volta
+        if "Item" in data and isinstance(data["Item"], dict):
+            return data["Item"].get(key)
+            
+        return None

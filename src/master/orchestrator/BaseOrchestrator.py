@@ -60,6 +60,9 @@ class BaseOrchestrator(ABC):
 
                 except Exception as infra_error:
                     print(f"\n[{self.orchestrator_name}] [ERRORE INFRASTRUTTURALE]: {infra_error}")
+                    # <--- AGGIUNTA PER FARE DEBUGGING
+                    import traceback          
+                    traceback.print_exc()
                     time.sleep(10)
         except KeyboardInterrupt:
             print(f"\n[-] Interruzione manuale intercettata sull'orchestrattore {self.orchestrator_name}")
@@ -117,7 +120,11 @@ class BaseOrchestrator(ABC):
                 prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                 
                 # CHIAMATA AL METODO ASTRATTO (Passiamo anche il seed, fondamentale!)
-                self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
+                successo = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
+
+                if not successo:
+                    print(f"[{self.orchestrator_name}] Risorse insufficienti per Job {job_id[:8]}. In attesa...")
+                    return
                 
                 current_alberi = prossimo_target
                 # Salvataggio del checkpoint integrato con lo StateManager aggiornato

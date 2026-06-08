@@ -19,15 +19,22 @@ class MockSQSQueue(SQSQueueInterface):
             })
 
     def _load_state(self) -> dict:
-        """Legge lo stato corrente della coda dal file JSON."""
-        try:
-            if os.path.exists(self.file_path):
+        """Legge lo stato corrente della coda dal file JSON (Versione Sicura)."""
+        if not os.path.exists(self.file_path) or os.path.getsize(self.file_path) == 0:
+            return {"centralized_queue": [], "federated_queue": [], "in_flight": {}}
+
+        # Proviamo a leggere il file al massimo 5 volte per gestire la concorrenza
+        for attempt in range(5):
+            try:
                 with open(self.file_path, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except json.JSONDecodeError:
-            # Protezione in caso di lettura concorrente fallita (file temporaneamente vuoto o bloccato)
-            time.sleep(0.05)
-            return self._load_state()
+            except (json.JSONDecodeError, IOError):
+                # Se il file è temporaneamente vuoto o bloccato da un altro processo, aspetta
+                time.sleep(0.05)
+        
+        # Se dopo 5 tentativi il file è ancora corrotto, evitiamo il crash:
+        # stampiamo un avviso e ripuliamo la coda restituendo una struttura vuota
+        print("[MOCK SQS - WARNING] File sqs_state.json corrotto detectato. Reset dello stato della coda.")
         return {"centralized_queue": [], "federated_queue": [], "in_flight": {}}
 
     def _save_state(self, state: dict):

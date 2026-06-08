@@ -7,6 +7,9 @@ services:
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
     ports:
       - "18861:18861"
+    environment:
+      - RPC_HOST=127.0.0.1
+      - RPC_PORT=18861
     volumes:
       - ./data:/app/data
     # Il comando si auto-compone in base a come configuri le variabili
@@ -18,6 +21,9 @@ services:
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_02
     ports:
       - "18862:18862"
+    environment:
+      - RPC_HOST=127.0.0.1
+      - RPC_PORT=18862
     volumes:
       - ./data:/app/data
     command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}

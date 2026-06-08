@@ -69,5 +69,37 @@ class MockStateManager(StateManagerInterface):
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         print(f"[StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id}")
 
+    def register_worker_task(self, job_id: str, worker_id: str, status: str) -> None:
+        """Registra che un worker specifico ha ricevuto una parte del lavoro."""
+        # Creiamo una chiave unica: job_id#worker_id
+        task_id = f"{job_id}#{worker_id}"
+        payload = {
+            "status": status,
+            "timestamp": time.time(),
+            "job_id": job_id,
+            "worker_id": worker_id
+        }
+        # Supponendo che dynamo_db.put_item gestisca anche una tabella 'WorkerTasks'
+        dynamo_db.put_item("WorkerTasks", task_id, payload)
+        print(f"[StateManager] Task registrato: Job {job_id[:8]} -> Worker {worker_id} in stato {status}")
+
+    def update_worker_task_status(self, job_id: str, worker_id: str, status: str) -> None:
+        """Aggiorna lo stato di un worker specifico (chiamato dal worker)."""
+        task_id = f"{job_id}#{worker_id}"
+        current = dynamo_db.get_item("WorkerTasks", task_id) or {}
+        current.update({"status": status, "timestamp": time.time()})
+        dynamo_db.put_item("WorkerTasks", task_id, current)
+        print(f"[StateManager] Worker {worker_id} ha aggiornato status a {status}")
+
+    def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
+        """Controlla se tutti i task per un dato Job sono COMPLETED."""
+        # Qui dovresti interrogare tutti i task che iniziano con job_id#
+        # (Se il tuo mock non supporta query complesse, puoi iterare)
+        all_tasks = dynamo_db.scan("WorkerTasks") # O metodo equivalente
+        job_tasks = [t for t in all_tasks if t.get('job_id') == job_id]
+        
+        completed_tasks = [t for t in job_tasks if t.get('status') == 'COMPLETED']
+        return len(completed_tasks) == expected_count
+
 # Istanza globale esportata per la Factory polimorfa
 state_manager = MockStateManager()

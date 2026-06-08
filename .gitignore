@@ -9,13 +9,6 @@
 data/db_files/
 *.json
 
-# === PYTHON ===
-# Ignora i file di compilazione temporanei di Python
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.pypy/
 
 
 

@@ -72,3 +72,5 @@ class CentralizedWorker(BaseWorker):
     def _get_tree_class(self) -> type:
         """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
         return self.tree_class_reference
+    
+    ##Nell'addestramento --> il worker dovrà confermare l'addestramento andato a buon fine su Dynamo Db
