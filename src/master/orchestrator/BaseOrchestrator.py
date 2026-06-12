@@ -60,6 +60,9 @@ class BaseOrchestrator(ABC):
 
                 except Exception as infra_error:
                     print(f"\n[{self.orchestrator_name}] [ERRORE INFRASTRUTTURALE]: {infra_error}")
+                    # <--- AGGIUNTA PER FARE DEBUGGING
+                    import traceback          
+                    traceback.print_exc()
                     time.sleep(10)
         except KeyboardInterrupt:
             print(f"\n[-] Interruzione manuale intercettata sull'orchestrattore {self.orchestrator_name}")

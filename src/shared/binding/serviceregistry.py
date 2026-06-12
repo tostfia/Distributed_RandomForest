@@ -70,28 +70,41 @@ class ServiceRegistry:
     @classmethod
     def update_worker_heartbeat(cls, worker_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un worker."""
-        worker = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
-        if worker:
-            worker['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker)
+        response = dynamodb.get_item(cls.WORKERS_TABLE, worker_name)
+        worker_data = response.get("Item")
+        if worker_data:
+            worker_data['last_heartbeat'] = int(time.time())
+            dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per worker '{worker_name}'.")
     
     @classmethod
     def update_orchestrator_heartbeat(cls, orchestrator_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un orchestratore."""
-        orchestrator = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
-        if orchestrator:
-            orchestrator['last_heartbeat'] = int(time.time())
-            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator)
+        response = dynamodb.get_item(cls.ORCHESTRATORS_TABLE, orchestrator_name)
+        
+        # Estrai i dati reali dal wrapper "Item"
+        orchestrator_data = response.get("Item")
+        
+        if orchestrator_data:
+            # Aggiorna solo il dizionario dei dati, non il wrapper
+            orchestrator_data['last_heartbeat'] = int(time.time())
+            
+            # Passa solo il dizionario dei dati a put_item
+            dynamodb.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator_data)
             print(f"[ServiceRegistry] Heartbeat aggiornato per orchestratore '{orchestrator_name}'.")
 
     @classmethod
     def _extract_data(cls, data: dict, key: str):
-        """Funzione ricorsiva per trovare una chiave in un dizionario annidato."""
+        """Versione sicura e piatta (NON ricorsiva) per estrarre chiavi."""
+        if not isinstance(data, dict):
+            return None
+            
+        # Cerchiamo la chiave direttamente nel dizionario corrente
         if key in data:
             return data[key]
-        for k, v in data.items():
-            if isinstance(v, dict):
-                res = cls._extract_data(v, key)
-                if res: return res
+            
+        # Se i dati sono wrappati dentro un "Item", guardiamo lì dentro una sola volta
+        if "Item" in data and isinstance(data["Item"], dict):
+            return data["Item"].get(key)
+            
         return None

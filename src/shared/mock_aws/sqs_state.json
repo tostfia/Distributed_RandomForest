@@ -2,13 +2,13 @@
   "centralized_queue": [],
   "federated_queue": [],
   "in_flight": {
-    "MB_RECEIPT_99ebdbf6": {
+    "MB_RECEIPT_2a73e9f1": {
       "queue_name": "centralized_queue",
       "message": {
-        "job_id": "8b8096b6-dd14-4225-84fa-e8a79921183c",
+        "job_id": "fa98ba3b-be8f-41c5-811e-10422075b1df",
         "environment": "local",
         "mode": "centralized",
-        "dataset_path": "/app/data/sintetic_data.csv",
+        "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/dataset/sintetic_data.csv",
         "hyperparameters": {
           "n_estimators": 1,
           "max_depth": null,
@@ -19,26 +19,7 @@
           "target_column": "target"
         }
       },
-      "time_out": 1780678004.3600023
-    },
-    "MB_RECEIPT_8c98bdaf": {
-      "queue_name": "centralized_queue",
-      "message": {
-        "job_id": "80454f27-2867-44af-8218-4e4a8e1c60bb",
-        "environment": "local",
-        "mode": "centralized",
-        "dataset_path": "C:\\Users\\sofia\\IdeaProjects\\Distributed_RandomForest\\src\\dataset\\sintetic_data.csv",
-        "hyperparameters": {
-          "n_estimators": 1,
-          "max_depth": null,
-          "class_weight": null,
-          "max_samples": 1.0,
-          "bootstrap": true,
-          "tree_type": "classifier",
-          "target_column": "target"
-        }
-      },
-      "time_out": 1780678171.396213
+      "time_out": 1780678946.3345053
     }
   }
 }

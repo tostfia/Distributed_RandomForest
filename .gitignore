@@ -9,6 +9,23 @@
 data/db_files/
 *.json
 
+# === PYTHON CACHE / BYTECODE ===
+# File generati automaticamente da Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
 
+# === AMBIENTI VIRTUALI PYTHON ===
+.venv/
+venv/
+env/
 
+# === CACHE TOOLING ===
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# === IDE / EDITOR ===
+.vscode/
+.idea/

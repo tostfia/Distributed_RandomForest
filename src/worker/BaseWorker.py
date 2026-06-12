@@ -29,7 +29,7 @@ def _train_single_tree_processor(args):
 
 class BaseWorker(Service, ABC): 
     def __init__(self, worker_name: str, queue_name: str, environment: str, url_dataset: str, tree_class_reference, max_samples=None, bootstrap: bool = True):
-        super().__init__()
+        super().__init__() # Buona pratica quando si eredita da Service
         self.worker_name = worker_name
         self.environment = environment
         self.queue_name = queue_name
@@ -38,8 +38,6 @@ class BaseWorker(Service, ABC):
         self.max_samples = max_samples
         self.bootstrap = bootstrap
         self._stop_heartbeat = None
-
-        self.exposed_train_subset_forest = self.train_subset_forest
 
     def _get_my_private_ip(self) -> str:
         """Rilevamento automaticamente l'IP privato del nodo corrente"""

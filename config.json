@@ -1,8 +1,8 @@
 {
-  "job_id": "80454f27-2867-44af-8218-4e4a8e1c60bb",
+  "job_id": "fa98ba3b-be8f-41c5-811e-10422075b1df",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "C:\\Users\\sofia\\IdeaProjects\\Distributed_RandomForest\\src\\dataset\\sintetic_data.csv",
+  "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/dataset/sintetic_data.csv",
   "hyperparameters": {
     "n_estimators": 1,
     "max_depth": null,
