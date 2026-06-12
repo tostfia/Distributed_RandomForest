@@ -12,7 +12,7 @@ from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
-from src.shared.utilities.feature_selection import CICIDSFeatureSelector
+from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, environment: str = "local"):
