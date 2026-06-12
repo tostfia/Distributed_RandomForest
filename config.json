@@ -1,11 +1,10 @@
 {
-  "job_id": "fa98ba3b-be8f-41c5-811e-10422075b1df",
+  "job_id": "fd1a6c18-cd3b-466b-a16d-55b3ff235577",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/dataset/sintetic_data.csv",
-  "dataset_type": "real",
+  "dataset_path": "C:\\Users\\emanu\\IdeaProjects\\Distributed_RandomForest\\src\\dataset\\sintetic_data.csv",
   "hyperparameters": {
-    "n_estimators": 1,
+    "n_estimators": 100000,
     "max_depth": null,
     "class_weight": null,
     "max_samples": 1.0,
