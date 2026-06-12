@@ -1,7 +1,9 @@
+from copyreg import pickle
 import os
 import json
 import time
 import rpyc
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
@@ -47,15 +49,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
         all_trained_trees = []
         current_seed_offset= seed
 
+        connessioni_attive = []
+
         #funzione di task per il thread pool: gestisce la singola connessione RPyC
         def _rpc_call(w_name,w_info,n_trees,w_seed):
             print(f" [RPC -> {w_name}] Invio richiesta per {n_trees} alberi su {w_info['host']}:{w_info['port']}...")
             conn = rpyc.connect(w_info["host"], w_info["port"], config= {'allow_pickle': True})
+            connessioni_attive.append(conn)  
             try: 
                 remote_trees = conn.root.train_subset_forest(source_info=source_info, num_trees=n_trees, base_seed=w_seed, max_depth=max_depth)
                 return remote_trees
-            finally:
-                conn.close()
+            except Exception as e:
+                print(f"   [ERRORE RPC] Connessione fallita con {w_name} ({w_info['host']}:{w_info['port']}): {e}")
+                raise e
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             future_to_worker = {}
@@ -75,14 +81,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
             for future in as_completed(future_to_worker):
                 w_name = future_to_worker[future]
                 try:
-                    result_trees = future.result()
+                    result_raw = future.result()
+                    if isinstance(result_raw, bytes):
+                        result_trees = pickle.loads(result_raw)
+                    else:
+                        result_trees = result_raw
                     all_trained_trees.extend(result_trees)
                     print(f"   [RPC <- {w_name}] Ricevuti con successo {len(result_trees)} alberi.")
                 except Exception as e:
                     print(f"   [ERRORE CRITICO] Il worker '{w_name}' ha fallito o si è disconnesso: {e}")
+                    # ─── AGGIUNTA TRACEBACK ESATTO ──────────────────────────────────────
+                    print("\n" + "="*60)
+                    print(f" DETTAGLIO ERRORE (TRACEBACK) PER IL WORKER: {w_name}")
+                    print("="*60)
+                    traceback.print_exc()  # <--- Questa riga stampa l'intera catena di chiamate fino a RPyC
+                    print("="*60 + "\n")
+                    # ───────────────────────────────────────────────────────────────────
                     raise e  # Rilanciando l'errore attiviamo il meccanismo di failover nativo di BaseOrchestrator
 
-        # Verifica finale: abbiamo ricevuto alberi?
+        print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC attive...")
+        for conn in connessioni_attive:
+            try:
+                conn.close()
+            except Exception :
+                pass
         if len(all_trained_trees) > 0:
             print(f"   [{self.orchestrator_name}] Step centralizzato completato.")
             return True # <--- MODIFICA: successo!

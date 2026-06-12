@@ -49,10 +49,9 @@ def handle_training():
         dataset_choice = get_input("  Scegli l'opzione: ", "1")
         
         if dataset_choice == "2":
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            
             # Risali di un livello dalla cartella del client per arrivare alla root
-            dataset_path = os.path.join(base_dir, "..", "dataset", "sintetic_data.csv")
-            dataset_path = os.path.abspath(dataset_path) # Ottieni il path pulito
+            dataset_path = "/app/data/sintetic_data.csv"
             print(f"  [INFO] Utilizzo del dataset sintetico: {dataset_path}")
         else:
             dataset_path = get_input("  • Inserisci l'URL o il path del dataset: ").strip()
