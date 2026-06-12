@@ -1,10 +1,10 @@
 {
-  "job_id": "fd1a6c18-cd3b-466b-a16d-55b3ff235577",
+  "job_id": "557a32fe-74eb-434d-b72e-a31c446b4495",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "C:\\Users\\emanu\\IdeaProjects\\Distributed_RandomForest\\src\\dataset\\sintetic_data.csv",
+  "dataset_path": "/app/data/sintetic_data.csv",
   "hyperparameters": {
-    "n_estimators": 100000,
+    "n_estimators": 3,
     "max_depth": null,
     "class_weight": null,
     "max_samples": 1.0,

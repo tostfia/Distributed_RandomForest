@@ -4,6 +4,12 @@ from sklearn.tree import DecisionTreeClassifier
 
 from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+    print("[MULTIPROCESSING] Metodo 'spawn' attivato per evitare crash RPyC.")
+except RuntimeError:
+    pass
 
 def main():
     if len(sys.argv) < 5:

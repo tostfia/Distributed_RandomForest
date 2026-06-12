@@ -23,14 +23,12 @@ class SyntheticDataLoader(DatasetLoader):
         n_samples: int = 100000,
         n_features: int = 20,
         random_seed: int = RANDOM_SEED,
-        target_column: str = "target"
     ):
         # La proporzione di feature informative è fissa all'80% per garantire un certo grado di complessità.
         self.n_samples = n_samples
         self.n_features = n_features
         self.n_informative = int(n_features * 0.8)
         self.random_seed = random_seed
-        self.target_column = target_column
 
         self._validate_parameters()
 
@@ -60,7 +58,7 @@ class SyntheticDataLoader(DatasetLoader):
         ]
 
         df = pd.DataFrame(X, columns=feature_columns)
-        df[self.target_column] = y.astype(np.int8)
+        df["Label"] = y.astype(np.int8)
 
         unique, counts = np.unique(y, return_counts=True)
 

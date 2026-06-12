@@ -119,7 +119,7 @@ class BaseOrchestrator(ABC):
             while current_alberi < alberi_totali:
                 prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                 
-                # CHIAMATA AL METODO ASTRATTO (Passiamo anche il seed, fondamentale!)
+              
                 successo = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
 
                 if not successo:
