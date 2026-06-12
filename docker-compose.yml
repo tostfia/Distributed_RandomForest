@@ -12,7 +12,7 @@ services:
       - RPC_PORT=18861
     volumes:
       - ./data:/app/data
-    # Il comando si auto-compone in base a come configuri le variabili
+  
     command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     restart: on-failure
 

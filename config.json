@@ -1,28 +1,15 @@
 {
-<<<<<<< HEAD
-  "job_id": "f0afc9b3-cec6-4613-b03c-ea7d05911502",
-=======
-  "job_id": "c72fdc8f-b2cb-446d-a6ca-1e0ea3f2c2ee",
->>>>>>> 1ce5cae937545767ed1955f2ae249f6d3ab2a593
+  "job_id": "80454f27-2867-44af-8218-4e4a8e1c60bb",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "/home/gaiameola/Progetto SDCC-ML/Distributed_RandomForest/src/dataset/sintetic_data.csv",
+  "dataset_path": "C:\\Users\\sofia\\IdeaProjects\\Distributed_RandomForest\\src\\dataset\\sintetic_data.csv",
   "hyperparameters": {
-<<<<<<< HEAD
-    "n_estimators": 10,
-    "max_depth": 5,
-=======
     "n_estimators": 1,
     "max_depth": null,
->>>>>>> 1ce5cae937545767ed1955f2ae249f6d3ab2a593
     "class_weight": null,
     "max_samples": 1.0,
     "bootstrap": true,
     "tree_type": "classifier",
-<<<<<<< HEAD
-    "target_column": "Target"
-=======
     "target_column": "target"
->>>>>>> 1ce5cae937545767ed1955f2ae249f6d3ab2a593
   }
 }
