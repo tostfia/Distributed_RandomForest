@@ -117,8 +117,8 @@ class BaseWorker(Service, ABC):
     def _get_tree_class(self):
         pass
 
-    @rpyc.exposed
-    def train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None):
+    
+    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None):
         print(f"[*] Richiesta ricevuta su BaseWorker: generazione di {num_trees} alberi.")
 
         # 1. Recupero dati e classe dell'albero dalle classi figlie
