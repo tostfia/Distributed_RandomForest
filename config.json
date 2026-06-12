@@ -1,10 +1,10 @@
 {
-  "job_id": "557a32fe-74eb-434d-b72e-a31c446b4495",
+  "job_id": "afb1f17e-8e19-4ecf-ac7a-9bb5b712b4c5",
   "environment": "local",
   "mode": "centralized",
   "dataset_path": "/app/data/sintetic_data.csv",
   "hyperparameters": {
-    "n_estimators": 3,
+    "n_estimators": 2,
     "max_depth": null,
     "class_weight": null,
     "max_samples": 1.0,

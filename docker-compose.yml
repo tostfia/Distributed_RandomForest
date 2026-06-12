@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   worker-01:
     # Immagine: locale di default, o quella di Docker Hub su AWS
@@ -28,8 +26,3 @@ services:
       - ./data:/app/data
     command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     restart: on-failure
-        
-    
-       
-
-    

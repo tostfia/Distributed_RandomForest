@@ -1,4 +1,4 @@
-from copyreg import pickle
+import pickle
 import os
 import json
 import time
@@ -163,22 +163,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
             train_df.to_csv(self.train_data_path, index=False)
             print(f"[{self.orchestrator_name}] Local Mode: Train salvato in '{self.train_data_path}'.")
 
-       
-        
+    
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
         total_step_trees= target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare  (seed: {seed})...")
 
-        #Scansione dei nodi worker attivi e disponibili (con heartbeat aggiornato)
-        available_workers = ServiceRegistry.get_available_workers(self.environment)
-        if not available_workers:
-            # Invece di far fallire tutto subito, potresti mettere il messaggio 
-            # di nuovo in coda con un delay (es. sleep) o loggare un avviso meno critico.
-            print("[!] Attenzione: Nessun worker pronto. Aspetto...")
-            time.sleep(10) 
-            return False # Torna al loop principale senza far fallire il job
-        
+        while True:
+            available_workers = ServiceRegistry.get_available_workers(self.environment)
+            if available_workers:
+                print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
+                break # Esci dal ciclo e inizia il training
+            
+            print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
+            time.sleep(10) # Pausa di 10 secondi prima di scansionare di nuovo
+
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
         print(f"[{self.orchestrator_name}] Worker disponibili: {num_workers} -> {worker_names}")
