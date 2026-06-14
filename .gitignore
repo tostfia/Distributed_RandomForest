@@ -9,6 +9,9 @@
 data/db_files/
 *.json
 
+# Escludi i dataset CSV (sia il dataset originale che quello campionato)
+data/*.csv
+
 # === PYTHON CACHE / BYTECODE ===
 # File generati automaticamente da Python
 __pycache__/
