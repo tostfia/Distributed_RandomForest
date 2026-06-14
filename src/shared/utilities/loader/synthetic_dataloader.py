@@ -23,7 +23,7 @@ class SyntheticDataLoader(DatasetLoader):
         n_samples: int = 100000,
         n_features: int = 20,
         random_seed: int = RANDOM_SEED,
-        target_column: str = "target"
+        target_column: str = "Label"
     ):
         # La proporzione di feature informative è fissa all'80% per garantire un certo grado di complessità.
         self.n_samples = n_samples

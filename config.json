@@ -1,15 +1,15 @@
 {
-  "job_id": "afb1f17e-8e19-4ecf-ac7a-9bb5b712b4c5",
+  "job_id": "453a7b8d-574b-4898-b00f-19f0f2c1e00a",
   "environment": "local",
   "mode": "centralized",
-  "dataset_path": "/app/data/sintetic_data.csv",
+  "dataset_path": "data/dataset_finale_binarizzato.csv",
   "hyperparameters": {
-    "n_estimators": 2,
+    "n_estimators": 1,
     "max_depth": null,
     "class_weight": null,
     "max_samples": 1.0,
     "bootstrap": true,
     "tree_type": "classifier",
-    "target_column": "target"
+    "target_column": "Label"
   }
 }

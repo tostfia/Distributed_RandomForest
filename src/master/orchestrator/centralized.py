@@ -43,7 +43,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         target_column = hp.get("target_column")
 
-        if target_column == "target":
+        if target_column == "Label":
             return "synthetic"
 
         if target_column == "Label":
@@ -61,7 +61,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload, hp)
 
         if dataset_type == "synthetic":
-            target_col = hp.get("target_column", "target")
+            target_col = hp.get("target_column", "Label")
         elif dataset_type == "real":
             target_col = hp.get("target_column", "Label")
         else:

@@ -40,10 +40,10 @@ def main():
 
     if mode == "centralized":
         print(f"[*] Istanziazione in corso: comportamento CENTRALIZZATO per {worker_name}")
-        worker = CentralizedWorker(**common_params, target_column="target")
+        worker = CentralizedWorker(**common_params, target_column="Label")
     elif mode == "federated":
         print(f"[*] Istanziazione in corso: comportamento FEDERATO per {worker_name}")
-        worker = FederatedWorker(**common_params, target_column="target")
+        worker = FederatedWorker(**common_params, target_column="Label")
     else:
         # Corretto il baco della stringa non chiusa
         print("[ERRORE] Modalità sconosciuta. Scegli tra 'centralized' e 'federated'")
