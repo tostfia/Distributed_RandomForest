@@ -200,5 +200,10 @@ class BaseOrchestrator(ABC):
         print(f"  REPORT PRESTAZIONALE DISTRIBUITO - JOB {job_id[:8]}")
         print("═" * 75)
         print(f"  Tempo totale addestramento (T_dist):   {t_dist:.4f} s")
-        print(f"  Worker utilizzati:                     {self._get_active_worker_count()}") # Metodo opzionale
+        print(f"  Worker utilizzati:                     {self._get_active_worker_count()}")
         print("═" * 75 + "\n")
+    
+    def _get_active_worker_count(self):
+        """Conta quanti worker sono attualmente registrati come AVAILABLE."""
+        workers = ServiceRegistry.get_available_workers(self.environment)
+        return len(workers)
