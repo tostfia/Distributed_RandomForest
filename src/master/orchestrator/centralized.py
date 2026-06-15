@@ -23,7 +23,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             queue_name="centralized_queue",
             environment=environment
         )
-        self.current_jib_id=None
+        self.current_job_id=None
         self.train_data_path=None
         self.test_df=None
 

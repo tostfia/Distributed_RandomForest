@@ -58,7 +58,7 @@ class MockSQSQueue(SQSQueueInterface):
         
         print(f"[MOCK SQS] Messaggio registrato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
 
-    def receive_message(self, queue_name: str, visibility_timeout: int = 30) -> dict | None:
+    def receive_message(self, queue_name: str, visibility_timeout: int = 300) -> dict | None:
         """Fa polling selettivo e gestisce istantaneamente il riciclo dei messaggi scaduti."""
         state = self._load_state()
         now = time.time()

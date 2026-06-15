@@ -76,7 +76,12 @@ class BaseOrchestrator(ABC):
 
     def _process_job(self, payload: dict, receipt_handle: str):
         """Logica di gestione dello stato e orchestrazione del Job."""
+        
         job_id = payload["job_id"]
+        status = self.state_manager.get_job_status(job_id)
+        if status == "COMPLETED":
+            print(f"[INFO] Job {job_id[:8]} già completato. Ignoro messaggio duplicato.")
+            return # Esci e permetti la cancellazione dalla coda
         hp = payload["hyperparameters"]
         
         print(f"\n[{self.orchestrator_name}] Ricevuto Job. ID: {job_id[:8]}...")
