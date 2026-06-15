@@ -80,14 +80,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             self.train_data_path = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{self.current_job_id}.csv"
         else:
-            self.train_data_path = f"shared_train_{self.current_job_id}.csv"
+            self.train_data_path = f"./shared_train_{self.current_job_id}.csv"
             
         print(f"[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory per l'ambiente {self.environment.upper()}...")
         
         try:
             # Otteniamo il DAO corretto in base all'ambiente letto dal file .env
-            dao = DatasetDAOFactory.get_dao()
-            dao.save_dataset(train_df, self.train_data_path)
+            dao = DatasetDAOFactory.get_dao(self.environment)
+            dao.save_dataset(path=self.train_data_path, df=train_df)
             print(f"[{self.orchestrator_name}] [OK] Dataset di addestramento pronto e archiviato in: {self.train_data_path}")
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio del dataset tramite DAO: {e}")
