@@ -3,18 +3,24 @@ import json
 import time
 import rpyc
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.shared.binding.serviceregistry import ServiceRegistry
 
+from src.shared.config import SystemConfig  # <-- INCLUSO CONFIG CENTRALE
+from src.shared.binding.serviceregistry import ServiceRegistry
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 
+
 class FederatedOrchestrator(BaseOrchestrator):
-    def __init__(self, environment: str = "local"):
+    def __init__(self):
+        # 1. Recuperiamo l'ambiente direttamente dal file .env tramite SystemConfig
+        self.cfg = SystemConfig()
+        
         # Recuperiamo il Process ID per generare un nome univoco per ogni replica federata
         pid = os.getpid()
+        
+        # Inizializziamo la classe base senza passare l'ambiente (lo legge da sé via config)
         super().__init__(
             orchestrator_name=f"Orchestrator-Federato-{pid}",
-            queue_name="federated_queue",
-            environment=environment
+            queue_name="federated_queue"
         )
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
@@ -36,8 +42,10 @@ class FederatedOrchestrator(BaseOrchestrator):
         
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
-        #DA CAMBIARE
-        source_info = payload.get("data_url") or payload.get("dataset_url", "federated_shared")
+        
+        # CORREZIONE SISTEMATA: Allineamento con il modello Pydantic TrainingRequestWorker ("url_dataset")
+        # In modalità federata, ogni client invia la posizione del dataset specifico per quel round
+        source_info = payload.get("url_dataset") or payload.get("dataset_path") or "federated_shared"
 
         # Funzione di chiamata RPC remota per addestramento locale sul singolo nodo federato
         def _federated_rpc_call(w_name, w_info):
@@ -55,7 +63,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             finally:
                 conn.close()
 
-        # 2. Distribuzione asincrona del round a tutti i nodi scoperti in parallelo
+        # Distribuzione asincrona del round a tutti i nodi scoperti in parallelo
         local_updates = {}
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(_federated_rpc_call, name, available_workers[name]) for name in worker_names]
@@ -69,24 +77,15 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f"   [FAILOVER ROUND] Errore critico durante il round sul nodo federato '{w_name}': {e}")
                     raise e
 
-        # 3. Fase finale di Aggregazione (Simulazione logica del Federated Averaging)
+        # Fase finale di Aggregazione (Simulazione logica del Federated Averaging)
         print(f"   [{self.orchestrator_name}] -> Ricezione dei pesi locali dai nodi completata.")
         print(f"   [{self.orchestrator_name}] -> Aggregazione e generazione del Modello Globale per il Round {round_num} eseguita.")
         time.sleep(0.5)
-            
+        return True
 
 
 if __name__ == "__main__":
-    # Lettura dinamica dell'ambiente configurato nel config.json locale
-    env = "local"
-    if os.path.exists("config.json"):
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-                env = config.get("environment", "local")
-        except Exception:
-            pass  # Fallback su local se il file è corrotto o mancante
-            
-    # Istanziamo e avviamo l'orchestratore federato
-    orchestrator = FederatedOrchestrator(environment=env)
+    # Il blocco main adesso non legge file esterni, si avvia leggendo nativamente l'ambiente da .env
+    print("[BOOT] Avvio del nodo Orchestratore Federato...")
+    orchestrator = FederatedOrchestrator()
     orchestrator.start()

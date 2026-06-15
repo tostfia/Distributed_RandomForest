@@ -57,3 +57,8 @@ docker service logs mio-progetto-drf_orchestrator
 
 Rimuove tutto il cluster: 
 docker stack rm mio-progetto-drf
+
+Dal momento che il progetto supporta differenti modalità operative, si è preferito aggiungere un file di configurazione in cui è possibile scegliere se lavorare in modalità federata oppure centralizzata, in locale oppure tramite aws learner lab. Per questo, a inizio progetto, si deve installare una libreria:  pip install python-dotenv
+
+
+Inoltre, la classe Baseline rappresenta l'addestramento locale standard (non distribuito), nonnché quello realizzato su Colab, introdotto esclusivamente per poter effettuare un conftonto delle prestazioni con quello implementato in modo distribuito. 

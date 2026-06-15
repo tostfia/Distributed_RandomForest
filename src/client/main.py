@@ -2,13 +2,26 @@ import json
 import os
 import sys
 
+from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, TrainingRequest
 from src.baseline.run_baseline import run_baseline
 
+# 1. Inizializziamo la configurazione leggendo dal file .env
+cfg = SystemConfig()
+
+# 2. Inizializziamo i servizi globali UNA volta sola all'avvio dello script
+try:
+    sqs_queue, state_manager = get_aws_services(cfg.env)
+except Exception as e:
+    print(f"\n[ERRORE] Impossibile inizializzare i servizi per l'ambiente '{cfg.env}': {e}")
+    sys.exit(1)
+
+
 def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()
     return user_input if user_input else default
+
 
 def run_predefined_tests():
     """Esegue test predefiniti per verificare il sistema senza input utente."""
@@ -16,12 +29,26 @@ def run_predefined_tests():
     print("[INFO] Funzionalità di test automatico globale non ancora implementata.")
     sys.exit(0)
 
+
 def handle_inference():
-    print("\n=== NUOVO PROCESSO DI INFERENZA ===")
+    print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
     data_url = get_input("Inserisci l'URL dei nuovi dati da predire: ")
-    print(f"[INFO] Richiesta di inferenza inviata per il Job {job_id[:8]}...")
+    
+    inference_request = {
+        "job_id": job_id,
+        "data_url": data_url,
+        "type": "inference_request"
+    }
+
+    try:
+        sqs_queue.send_message(queue_name="inference_queue", message_dict=inference_request)
+        print(f"[INFO] Richiesta di inferenza inviata per il Job {job_id[:8]}...")
+        print("[INFO] Il sistema distribuito sta processando la richiesta e aggregherà i risultati.")
+    except Exception as e:
+        print(f"[ERRORE] Impossibile inviare la richiesta di inferenza: {e}")
     sys.exit(0)
+
 
 def handle_model_request():
     print("\n=== RICHIESTA MODELLO ADDESTRATO ===")
@@ -29,17 +56,13 @@ def handle_model_request():
     print(f"[INFO] Download del modello {job_id[:8]} in corso...")
     sys.exit(0)
 
+
 def handle_training():
-    """Gestisce l'intera procedura di richiesta di addestramento (Standard Interattiva)."""
-    print("\n=== CONFIGURAZIONE PROCESSO DI ADDESTRAMENTO ===")
+    """Gestisce la procedura di richiesta di addestramento basandosi sulla config di boot."""
+    print(f"\n=== CONFIGURAZIONE PROCESSO DI ADDESTRAMENTO ({cfg.mode.upper()}) ===")
     
-    # 1. Scelta dell'Ambiente
-    env_choice = get_input("[1] Ambiente di esecuzione (L - Locale / A - AWS): ").strip().upper()
-    environment = "aws" if env_choice == "A" else "local"
-    
-    # 2. Scelta della Modalità
-    mode_choice = get_input("[2] Modalità di training (C - Centralizzata / F - Federata): ").strip().upper()
-    mode = "federated" if mode_choice == "F" else "centralized"
+    environment = cfg.env
+    mode = cfg.mode
 
     # 3. Gestione Dinamica del Dataset Path / Sintetico
     dataset_type = "real"  # Default
@@ -50,8 +73,6 @@ def handle_training():
         dataset_choice = get_input("  Scegli l'opzione: ", "1")
         
         if dataset_choice == "2":
-            
-            # Risali di un livello dalla cartella del client per arrivare alla root
             dataset_path = "/app/data/sintetic_data.csv"
             dataset_type = "synthetic"
             print(f"  [INFO] Utilizzo del dataset sintetico: {dataset_path}")
@@ -68,27 +89,20 @@ def handle_training():
     print("\n[4] Configurazione Matematica degli Alberi:")
     try:
         n_estimators = int(get_input("  • Numero totale di alberi (n_estimators): ", "100"))
- 
         max_depth_raw = get_input("  • Profondità massima (max_depth - Invio per illimitata): ")
         max_depth = int(max_depth_raw) if max_depth_raw else None
- 
-        class_weight = get_input(
-            "  • Bilanciamento classi (class_weight es: balanced / Invio per None): "
-        ) or None
+        class_weight = get_input("  • Bilanciamento classi (class_weight es: balanced / Invio per None): ") or None
  
         if mode == "centralized":
             bootstrap_raw = get_input("  • Usa bootstrap sampling? (S/N, default S): ", "S").upper()
             bootstrap = bootstrap_raw != "N"
  
             if bootstrap:
-                max_samples_raw = get_input(
-                    "  • Frazione campioni per albero (max_samples, es: 0.8, default 1.0): ", "1.0"
-                )
+                max_samples_raw = get_input("  • Frazione campioni per albero (max_samples, es: 0.8, default 1.0): ", "1.0")
                 max_samples = float(max_samples_raw)
                 if not (0.0 < max_samples <= 1.0):
                     raise ValueError("max_samples deve essere compreso tra 0 e 1.")
             else:
-                # Senza bootstrap si usa sempre l'intero dataset, max_samples non ha effetto
                 max_samples = 1.0
                 print("  • max_samples: impostato a 1.0 automaticamente (bootstrap disabilitato)")
         else:
@@ -96,7 +110,6 @@ def handle_training():
             max_samples = 1.0
             print("  • Bootstrap e max_samples: disabilitati automaticamente (modalità Federata)")
  
-        # DecisionTreeClassifier o DecisionTreeRegressor tramite _get_tree_class()
         print("  • Tipo di task:")
         print("    [1] Classificazione (usa DecisionTreeClassifier)")
         print("    [2] Regressione     (usa DecisionTreeRegressor)")
@@ -110,14 +123,7 @@ def handle_training():
         print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
         sys.exit(1)
 
-    # 5. Inizializzazione Servizi
-    try:
-        sqs_queue, state_manager = get_aws_services(environment)
-    except Exception as e:
-        print(f"\n[ERRORE] Impossibile inizializzare i servizi per l'ambiente '{environment}': {e}")
-        sys.exit(1)
-
-    # 6. Validazione Pydantic
+    # 5. Validazione Pydantic
     try:
         hp_obj = Hyperparameters(
             n_estimators=n_estimators,
@@ -148,7 +154,7 @@ def handle_training():
     except IOError as e:
         print(f"Impossibile salvare 'config.json' in locale: {e}")
 
-    # 7. Invio del pacchetto e gestione dello stato
+    # 6. Invio del pacchetto e gestione dello stato
     target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
     
     try:
@@ -161,9 +167,31 @@ def handle_training():
         sys.exit(1)
 
 
+def handle_baseline_selection():
+    """Interfaccia di instradamento per l'esecuzione della baseline locale."""
+    print("\n=== PREPARAZIONE BASELINE LOCALE ===")
+    
+    # Se config.json non esiste, creiamo un mini-config al volo per dire alla baseline cosa fare
+    if not os.path.exists("config.json"):
+        print("[INFO] Nessun file config.json rilevato. Configurazione rapida del dataset per la baseline:")
+        print("  [1] Esegui su Dataset Reale")
+        print("  [2] Esegui su Dataset Sintetico")
+        choice = get_input("  Scelta: ", "1")
+        
+        dtype = "synthetic" if choice == "2" else "real"
+        dummy_config = {"dataset_type": dtype, "hyperparameters": {"n_estimators": 100}}
+        
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(dummy_config, f)
+            
+    # Avvia il codice della baseline che abbiamo corretto nel passaggio precedente
+    run_baseline()
+
+
 def main():
     print("=====================================================")
     print("      DISTRIBUTED RANDOM FOREST - CONFIGURATOR       ")
+    print(f"      CLUSTER_MODE: {cfg.mode.upper()} | INFRA: {cfg.env.upper()}")
     print("=====================================================\n")
 
     print("Seleziona la modalità del configuratore:")
@@ -178,13 +206,12 @@ def main():
         sys.exit(1)
 
     print("\n--- MENÙ OPERAZIONI ---")
-    print("[1] Avvia processo di addestramento")
-    print("[2] Avvia processo di inferenza")
+    print("[1] Avvia processo di addestramento distribuito")
+    print("[2] Avvia processo di inferenza distribuito")
     print("[3] Richiedi modello addestrato")
-    print("[4] Esegui Baseline Locale")
+    print("[4] Esegui Baseline Locale (Singolo Nodo Sequenziale)")
     operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
     
-    # Smistamento delle funzioni in base alla scelta dell'utente
     if operation_choice == "1":
         handle_training()
     elif operation_choice == "2":
@@ -192,10 +219,11 @@ def main():
     elif operation_choice == "3":
         handle_model_request()
     elif operation_choice == "4":
-        run_baseline()
+        handle_baseline_selection()
     else:
         print("\n[ERRORE] Scelta non valida. Riavvia il configuratore.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
