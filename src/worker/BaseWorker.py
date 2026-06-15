@@ -9,6 +9,10 @@ import pickle
 
 from src.shared.binding.serviceregistry import ServiceRegistry
 
+# Aggiungi questo metodo astratto in BaseWorker
+@abstractmethod
+def is_regression(self):
+    pass
 
 # addestramento di un singolo albero
 def _train_single_tree_processor(args):
@@ -17,7 +21,7 @@ def _train_single_tree_processor(args):
     n_samples = X.shape[0]
 
     if bootstrap:
-        size = max_samples if max_samples is not None else n_samples
+        size = int(max_samples * n_samples) if max_samples else n_samples
         indices = np.random.choice(n_samples, size=size, replace=True)
         X_train, y_train = X[indices], y[indices]
     else: 

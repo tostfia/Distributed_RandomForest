@@ -1,6 +1,6 @@
 import os
 import sys
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
@@ -20,6 +20,7 @@ def main():
     worker_name = sys.argv[1]
     mode = sys.argv[3].lower()
     environment = sys.argv[4].lower()
+    tree_type = sys.argv[5].lower() if len(sys.argv) > 5 else "classifier" #Opzione di Default
 
     try:
         host = os.environ.get("RPC_HOST", "127.0.0.1")
@@ -33,7 +34,7 @@ def main():
         "queue_name": "centralized_queue" if mode == "centralized" else "federated_queue",
         "environment": "local" if environment == "local" else "aws",
         "url_dataset": "local_source_info",  
-        "tree_class_reference": DecisionTreeClassifier,
+        "tree_class_reference": DecisionTreeClassifier if tree_type == "classifier" else DecisionTreeRegressor,
         "max_samples": None,  
         "bootstrap": True if mode == "centralized" else False,  
     }
@@ -56,9 +57,6 @@ def main():
         worker.start_server(port=port, explicit_host=host) 
     except Exception as e:
         print(f"[ERRORE CRITICO ENCOUNTERED]: {e}")
-
-
-    
 
 # Spostato fuori dal main e corretto l'operatore '=='
 if __name__ == "__main__":

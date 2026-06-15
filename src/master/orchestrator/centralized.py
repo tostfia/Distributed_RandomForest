@@ -4,7 +4,9 @@ import json
 import time
 import rpyc
 import traceback
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -171,11 +173,43 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 conn.close()
             except Exception :
                 pass
+
+        # --- RICOMPOSIZIONE E SALVATAGGIO per la creazione della Foresta Globale ---
         if len(all_trained_trees) > 0:
-            print(f"   [{self.orchestrator_name}] Step centralizzato completato.")
-            return True
-        
-        return False
+            print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale...")
+            
+            # Recuperiamo il tipo di task dal payload inviato dal client
+            hp = payload.get("hyperparameters", {})
+            tree_type = hp.get("tree_type", "classifier") # Default a classifier
+            
+            try:
+                # 1. Scelta dinamica tra Classifier e Regressor
+                if tree_type == "classifier":
+                    global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
+                    # Setup classi per classificazione
+                    global_model.classes_ = np.array([0, 1]) 
+                    global_model.n_classes_ = 2
+                else:
+                    global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
+                
+                # 2. Iniezione alberi addestrati
+                global_model.estimators_ = all_trained_trees
+                
+                # 3. Salvataggio
+                model_path = f"model_{self.current_job_id}.pkl"
+                with open(model_path, "wb") as f:
+                    pickle.dump(global_model, f)
+                
+                print(f"   [{self.orchestrator_name}] Modello {tree_type} salvato in '{model_path}'.")
+                return True
+                
+            except Exception as e:
+                print(f"   [ERRORE AGGREGAZIONE] Impossibile creare il modello {tree_type}: {e}")
+                traceback.print_exc()
+                return False
+
+        # Caso in cui la lista all_trained_trees è vuota
+        print(f"   [{self.orchestrator_name}] Nessun albero ricevuto. Fallimento.")
                 
 
 if __name__ == "__main__":

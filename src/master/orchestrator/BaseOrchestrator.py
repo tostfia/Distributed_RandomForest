@@ -116,15 +116,16 @@ class BaseOrchestrator(ABC):
             alberi_addestrati=alberi_gia_fatti
         )
 
+        start_dist = time.perf_counter()
+
         try:
             alberi_totali = hp.get("n_estimators", 100)
             step_alberi = 20
             current_alberi = alberi_gia_fatti
 
             while current_alberi < alberi_totali:
-                prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                 
-              
+                prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                 successo = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
 
                 if not successo:
@@ -134,10 +135,14 @@ class BaseOrchestrator(ABC):
                 current_alberi = prossimo_target
                 # Salvataggio del checkpoint integrato con lo StateManager aggiornato
                 self._save_checkpoint(job_id, current_alberi, retries, base_random_state)
-
+        
+            # --- FINE MISURAZIONE TEMPI ---
+            t_dist = time.perf_counter() - start_dist 
             self.state_manager.complete_request(job_id=job_id, orchestrator_id=self.orchestrator_name)
             self.sqs_queue.delete_message(receipt_handle)
             self._clean_checkpoint(job_id)
+
+            self._generate_performance_report(job_id, t_dist)
             print(f"[{self.orchestrator_name}] Job {job_id[:8]} completato con successo.")
 
         except Exception as eval_error:
@@ -188,3 +193,12 @@ class BaseOrchestrator(ABC):
             path = f"checkpoints/checkpoint_{job_id}.json"
             if os.path.exists(path):
                 os.remove(path)
+    
+    def _generate_performance_report(self, job_id: str, t_dist: float):
+        """Metodo per il profiling delle performance distribuite."""
+        print("\n" + "═" * 75)
+        print(f"  REPORT PRESTAZIONALE DISTRIBUITO - JOB {job_id[:8]}")
+        print("═" * 75)
+        print(f"  Tempo totale addestramento (T_dist):   {t_dist:.4f} s")
+        print(f"  Worker utilizzati:                     {self._get_active_worker_count()}") # Metodo opzionale
+        print("═" * 75 + "\n")

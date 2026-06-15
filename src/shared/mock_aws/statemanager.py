@@ -100,6 +100,14 @@ class MockStateManager(StateManagerInterface):
         
         completed_tasks = [t for t in job_tasks if t.get('status') == 'COMPLETED']
         return len(completed_tasks) == expected_count
+    
+    def get_job_status(self, job_id: str) -> Optional[str]:
+        """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
+        response = dynamo_db.get_item(TABLE_NAME, job_id)
+        item = response.get("Item") if isinstance(response, dict) and "Item" in response else response
+        if item and isinstance(item, dict):
+            return item.get("status")
+        return None
 
 # Istanza globale esportata per la Factory polimorfa
 state_manager = MockStateManager()

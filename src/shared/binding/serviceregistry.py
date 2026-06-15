@@ -75,7 +75,6 @@ class ServiceRegistry:
         if worker_data:
             worker_data['last_heartbeat'] = int(time.time())
             dynamodb.put_item(cls.WORKERS_TABLE, worker_name, worker_data)
-            print(f"[ServiceRegistry] Heartbeat aggiornato per worker '{worker_name}'.")
     
     @classmethod
     def update_orchestrator_heartbeat(cls, orchestrator_name: str):

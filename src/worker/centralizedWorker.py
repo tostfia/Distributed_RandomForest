@@ -21,6 +21,7 @@ class CentralizedWorker(BaseWorker):
         target_column: str,
         max_samples: float = None,
         bootstrap: bool = True,
+        tree_type: str = "classifier"
     ):
         super().__init__(
             worker_name=worker_name,
@@ -32,12 +33,16 @@ class CentralizedWorker(BaseWorker):
             bootstrap=bootstrap,
         )
         self.target_column = target_column
+        self.tree_type = tree_type
         self.dao = DatasetDAOFactory.get_dao(self.environment)
         
         print(
             f"[CentralizedWorker] Inizializzato in ambiente: {self.environment} "
             f"con DAO: {type(self.dao).__name__}"
         )
+    
+    def is_regression(self) -> bool:
+        return self.tree_type == "regressor"
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
         """Carica il dataset centralizzato e lo trasforma in matrici NumPy compatibili.
@@ -61,7 +66,10 @@ class CentralizedWorker(BaseWorker):
 
         # Conversione esplicita in matrici NumPy stabili per Scikit-Learn
         X = X_df.to_numpy(dtype=np.float64)
-        y = y_df.to_numpy(dtype=np.int64)
+        if self.tree_type == "regressor":
+            y = y_df.to_numpy(dtype=np.float64)
+        else:
+            y = y_df.to_numpy(dtype=np.int64)
         
         print(
             f"[Centralized] Dati convertiti in matrice NumPy: "
