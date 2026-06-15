@@ -42,6 +42,7 @@ def handle_training():
     mode = "federated" if mode_choice == "F" else "centralized"
 
     # 3. Gestione Dinamica del Dataset Path / Sintetico
+    dataset_type = "real"  # Default
     if mode == "centralized":
         print("\n[3] Selezione del Dataset:")
         print("  [1] Usa un dataset reale tramite URL/Path")
@@ -52,6 +53,7 @@ def handle_training():
             
             # Risali di un livello dalla cartella del client per arrivare alla root
             dataset_path = "/app/data/sintetic_data.csv"
+            dataset_type = "synthetic"
             print(f"  [INFO] Utilizzo del dataset sintetico: {dataset_path}")
         else:
             dataset_path = get_input("  • Inserisci l'URL o il path del dataset: ").strip()
@@ -101,11 +103,8 @@ def handle_training():
         tree_type_raw = get_input("    Scegli: ", "1")
         tree_type = "classifier" if tree_type_raw == "1" else "regressor"
  
-        # FIX: aggiunto target_column — necessario a CentralizedWorker._load_data()
-        target_column = get_input("  • Nome della colonna target nel dataset: ").strip()
-        if not target_column:
-            print("\n[ERRORE] Il nome della colonna target è obbligatorio.")
-            sys.exit(1)
+        target_column = "Label" 
+        print(f"  [INFO] Colonna target impostata automaticamente a: {target_column}")
  
     except ValueError as e:
         print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
@@ -134,6 +133,7 @@ def handle_training():
             environment=environment,
             mode=mode,
             dataset_path=dataset_path,
+            dataset_type=dataset_type,
             hyperparameters=hp_obj
         )
     except Exception as e:

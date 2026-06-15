@@ -1,8 +1,9 @@
 {
-  "job_id": "453a7b8d-574b-4898-b00f-19f0f2c1e00a",
+  "job_id": "dd428c5c-41b0-4008-bece-4ef8c2c968df",
   "environment": "local",
   "mode": "centralized",
   "dataset_path": "data/dataset_finale_binarizzato.csv",
+  "dataset_type": "real",
   "hyperparameters": {
     "n_estimators": 1,
     "max_depth": null,

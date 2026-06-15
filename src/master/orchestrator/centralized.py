@@ -27,145 +27,67 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.train_data_path=None
         self.test_df=None
 
-    def _resolve_dataset_type(self, payload: dict, hp: dict) -> str:
+    def _resolve_dataset_type(self, payload: dict) -> str:
         """
-        Determina se il dataset è reale o sintetico.
-
-        Priorità:
-        1. dataset_type nel payload/config;
-        2. target_column negli hyperparameters;
-        3. fallback su real.
+        Determina il tipo di dataset basandosi esclusivamente sull'informazione 
+        esplicita inviata dal Client nel payload.
         """
+        # Il client ora invia 'dataset_type' ("real" o "synthetic")
         dataset_type = payload.get("dataset_type")
-
-        if dataset_type is not None:
+        
+        if dataset_type:
             return str(dataset_type).strip().lower()
-
-        target_column = hp.get("target_column")
-
-        if target_column == "Label":
-            return "synthetic"
-
-        if target_column == "Label":
-            return "real"
-
+            
+        # Fallback di sicurezza: se per qualche motivo manca, default a 'real'
         return "real"
     
     def _prepare_data(self, payload: dict, base_seed: int):
-        print(f"\n[{self.orchestrator_name}] Avvio fase di estrazione e pre-processing (ETL)...")
-        start_time = time.perf_counter()
-
+        self.current_job_id = payload.get("job_id", "unknown_job") # Salva l'ID!
         dataset_path = payload.get("dataset_path")
-        hp = payload.get("hyperparameters", {})
+        dataset_type = self._resolve_dataset_type(payload)
+        target_col = "Label" # Standardizzato
 
-        dataset_type = self._resolve_dataset_type(payload, hp)
+        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type}")
 
+        # --- ESTRAZIONE ---
         if dataset_type == "synthetic":
-            target_col = hp.get("target_column", "Label")
-        elif dataset_type == "real":
-            target_col = hp.get("target_column", "Label")
-        else:
-            raise ValueError(
-                f"dataset_type non valido: {dataset_type}. Usa 'real' oppure 'synthetic'."
-            )
-        # ---------------------------------------------------------
-        # ESTRAZIONE E PREPROCESSING
-        # ---------------------------------------------------------
-        if dataset_type == "synthetic":
-            print(
-                f"[{self.orchestrator_name}] -> Generazione Dataset Sintetico "
-                f"con seed {base_seed}..."
-            )
-
-            loader = SyntheticDataLoader(
-                n_samples=100000,
-                random_seed=base_seed,
-                target_column=target_col
-            )
-
+            loader = SyntheticDataLoader(n_samples=100000, random_seed=base_seed, target_column=target_col)
             df_clean = loader.load()
-
-        elif dataset_type == "real":
-            if not dataset_path:
-                raise ValueError("dataset_path mancante per dataset reale.")
-
-            print(f"[{self.orchestrator_name}] -> Estrazione Dataset Reale da: {dataset_path}")
-            loader = RawCSVDataLoader(
-                data_url=dataset_path,
-                sample_fraction=0.01,
-                dataset_seed=base_seed
-            )
-
+        else:
+            if not dataset_path: raise ValueError("dataset_path mancante.")
+            loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
             df_raw = loader.load()
-
-            print(f"[{self.orchestrator_name}] -> Esecuzione pulizia CICIDSPreprocessor...")
-
-            preprocessor = CICIDSPreprocessor(
-                target_column=target_col
-            )
-
+            preprocessor = CICIDSPreprocessor(target_column=target_col)
             df_clean = preprocessor.process(df_raw)
 
-        etl_time = time.perf_counter() - start_time
-
-        print(f"[{self.orchestrator_name}] ETL completato in "f"{etl_time:.2f}s. Dimensione: {df_clean.shape}")
-        print(f"\nDistribuzione target '{target_col}':")
-        print(df_clean[target_col].value_counts())
-
-        print(f"\nDistribuzione target '{target_col}' percentuale:")
-        print(df_clean[target_col].value_counts(normalize=True) * 100)
-        # ---------------------------------------------------------
-        # SPLIT TRAIN/TEST
-        # ---------------------------------------------------------
-        print(f"\n[{self.orchestrator_name}] Partizionamento stratificato in Train e Test...")
-
-        if dataset_type == "real":
-            test_size = 0.2
-        else:
-            test_size = 0.1
-
-        splitter = StratifiedDataSplitter(
-            target_column=target_col,
-            test_size=test_size,
-            random_state=base_seed
-        )
-
+        # --- SPLIT (Logica unificata) ---
+        test_size = 0.1 if dataset_type == "synthetic" else 0.2
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=test_size, random_state=base_seed)
         train_df, test_df = splitter.split(df_clean)
 
-        # ---------------------------------------------------------
-        # FEATURE SELECTION SOLO PER DATASET REALE
-        # ---------------------------------------------------------
+        # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
-            print(f"\n[{self.orchestrator_name}] Feature Selection sul solo Train Set...")
-            feature_selector = CICIDSFeatureSelector(
-                target_column=target_col,
-                correlation_threshold=0.05
-            )
+            fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
+            train_df = fs.fit_transform(train_df)
+            test_df = fs.transform(test_df)
 
-            train_df = feature_selector.fit_transform(train_df)
-            test_df = feature_selector.transform(test_df)
-
-            print(f" • Dimensione Train dopo Feature Selection: {train_df.shape}")
-            print(f" • Dimensione Test dopo Feature Selection:  {test_df.shape}")
-
+        # --- SALVATAGGIO ---
         self.test_df = test_df
-        file_name = f"shared_train_{self.current_job_id}.csv"
+        self.train_data_path = f"shared_train_{self.current_job_id}.csv"
+        
         if self.environment == "aws":
-            bucket_name = os.getenv("S3_TEMP_BUCKET", "il-mio-bucket-sdcc")
-            self.train_data_path = f"s3://{bucket_name}/processed_jobs/{file_name}"
-
-            print(f"[{self.orchestrator_name}] AWS Mode: Upload del Train Set su S3 in corso...")
-            train_df.to_csv(self.train_data_path, index=False)
-            print(f"[{self.orchestrator_name}] Dati caricati con successo su: {self.train_data_path}")
-
+            # ... logica S3 ...
+            pass 
         else:
-            self.train_data_path = file_name
             train_df.to_csv(self.train_data_path, index=False)
-            print(f"[{self.orchestrator_name}] Local Mode: Train salvato in '{self.train_data_path}'.")
+            print(f"[{self.orchestrator_name}] Dati pronti: {self.train_data_path}")
 
-    
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
+        
+        if self.train_data_path is None:
+            self._prepare_data(payload, seed)
+        
         total_step_trees= target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare  (seed: {seed})...")
 
@@ -186,15 +108,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
         trees_per_worker = total_step_trees // num_workers
         remainder = total_step_trees % num_workers
 
-        #Estrazione iper param e dataset DA RIFARE
-        # Cerca la chiave corretta che invia il client
-        source_info = payload.get("dataset_path") or "default_dataset.csv"
+        source_info = self.train_data_path 
+        
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
 
         all_trained_trees = []
-        current_seed_offset= seed
-
+        current_seed_offset = seed
         connessioni_attive = []
 
         #funzione di task per il thread pool: gestisce la singola connessione RPyC

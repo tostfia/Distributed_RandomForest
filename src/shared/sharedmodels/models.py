@@ -28,6 +28,7 @@ class TrainingRequest(BaseModel):
     environment: str
     mode: str
     dataset_path: str
+    dataset_type:str
     hyperparameters: Hyperparameters
 
 
@@ -37,5 +38,6 @@ class TrainingRequestWorker(BaseModel):
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str
     mode: str
+    dataset_type:str
     hyperparameters: Hyperparameters
     seed: int
