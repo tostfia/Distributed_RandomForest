@@ -3,11 +3,10 @@ import sys
 import multiprocessing
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-from src.shared.config import SystemConfig  # <-- INCLUSO CONFIG CENTRALE
+from src.shared.config import SystemConfig
 from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
 
-# Metodo 'spawn' obbligatorio per evitare crash di memoria con RPyC e multiprocessing
 try:
     multiprocessing.set_start_method('spawn', force=True)
     print("[MULTIPROCESSING] Metodo 'spawn' attivato per evitare crash RPyC.")
