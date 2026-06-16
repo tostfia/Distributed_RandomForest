@@ -62,3 +62,7 @@ Dal momento che il progetto supporta differenti modalità operative, si è prefe
 
 
 Inoltre, la classe Baseline rappresenta l'addestramento locale standard (non distribuito), nonnché quello realizzato su Colab, introdotto esclusivamente per poter effettuare un conftonto delle prestazioni con quello implementato in modo distribuito. 
+
+Nel nostro progetto si è scelto di utilizzare l'SDK per python di AWS, ovvero Boto3 che è possibile installare attraverso il comando: pip install boto3 botocore. 
+
+Inoltre, si procede con l'installazione di aws cli (seguendo le istruzioni della documentazione ufficiale seguendo il link riportato in descrizione a seconda del sistema operativo posseduto: https://docs.aws.amazon.com/it_it/cli/latest/userguide/getting-started-install.html)
