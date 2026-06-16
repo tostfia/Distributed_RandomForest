@@ -166,3 +166,40 @@ class BaseWorker(Service, ABC):
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")
         return pickle.dumps(local_trees)
+    
+    def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None):
+        """
+        Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola 
+        le predizioni parziali sui dati di test.
+        """
+        print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
+        
+        # 1. Ricostruiamo gli alberi inviati dal Master
+        trees = pickle.loads(serialized_trees)
+        print(f"[{self.worker_name}] Decodificati {len(trees)} alberi per il calcolo.")
+
+        # 2. Gestione asimmetrica Centralizzato vs Federato
+        if serialized_X_test is not None:
+            # Caso Centralizzato: i dati arrivano direttamente dall'Orchestratore
+            X_eval = pickle.loads(serialized_X_test)
+            print(f"[{self.worker_name}] Utilizzo del testing set centralizzato fornito dall'Orchestratore.")
+        else:
+            # Caso Federato: i dati di test risiedono localmente sul Worker
+            if getattr(self, 'X_test', None) is None:
+                raise ValueError(
+                    f"[{self.worker_name}] Errore: Nessun dataset di test locale trovato in memoria. "
+                    f"Esegui prima il round di addestramento federato."
+                )
+            X_eval = self.X_test
+            print(f"[{self.worker_name}] Utilizzo del testing set federato locale (Shape: {X_eval.shape}).")
+
+        # 3. Computazione delle predizioni di ogni singolo albero della sotto-foresta
+        # Ogni albero produce un vettore riga di risposte per ciascun campione in X_eval
+        sub_predictions = []
+        for i, tree in enumerate(trees):
+            sub_predictions.append(tree.predict(X_eval))
+            
+        print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
+        
+        # Restituiamo la matrice parziale all'Orchestratore
+        return pickle.dumps(sub_predictions)

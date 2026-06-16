@@ -187,7 +187,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 global_model.estimators_ = all_trained_trees
                 
-                model_path = f"model_{self.current_job_id}.pkl"
+                # Salvataggio isolato all'interno della cartella saved_models
+                TARGET_DIR = "./saved_models"
+                os.makedirs(TARGET_DIR, exist_ok=True)
+                model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
+                
                 with open(model_path, "wb") as f:
                     pickle.dump(global_model, f)
                 
@@ -201,8 +205,147 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         print(f"   [{self.orchestrator_name}] Nessun albero ricevuto. Fallimento.")
         return False
-                
+    
+    def _execute_inference_step(self, payload: dict):
+        """
+        Esegue l'inferenza distribuita in modalità Centralizzata.
+        Scarica/ottiene il testing set centralizzato e lo invia via RPC a tutti i worker
+        insieme a sottoinsiemi della foresta per calcolare la predizione finale aggregata.
+        """
+        job_id = payload.get("job_id")
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
+        target_col = "Label"
 
+        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA ===")
+
+        # Caricamento puntato alla sottocartella saved_models
+        model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Modello globale non trovato in '{model_path}'. "
+                f"Assicurati che il job di addestramento sia completato con successo."
+            )
+
+        print(f"[{self.orchestrator_name}] Caricamento della foresta da {model_path}...")
+        with open(model_path, "rb") as f:
+            global_model = pickle.load(f)
+        
+        all_trees = global_model.estimators_
+        total_trees = len(all_trees)
+        print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
+
+        # 2. Controllo e preparazione del Testing Set centralizzato
+        if self.test_df is None:
+            # Fallback se il Master ha perso la RAM o è subentrato un failover post-training
+            raise ValueError(
+                f"[{self.orchestrator_name}] Errore: Il dataframe di test 'self.test_df' non è "
+                f"presente in memoria. Impossibile procedere con l'inferenza centralizzata."
+            )
+
+        print(f"[{self.orchestrator_name}] Preparazione della matrice di test (Shape: {self.test_df.shape})...")
+        X_test = self.test_df.drop(columns=[target_col]).to_numpy(dtype=np.float64)
+        y_test = self.test_df[target_col].to_numpy()
+
+        # Serializziamo X_test una sola volta per non appesantire i thread RPC
+        serialized_X_test = pickle.dumps(X_test)
+
+        # 3. Scoperta dei Worker disponibili per l'inferenza
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        if not available_workers:
+            raise RuntimeError("Nessun worker disponibile nel Service Registry per gestire la computazione dell'inferenza.")
+
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+        print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
+
+        # Bilanciamento e partizionamento degli alberi tra i worker
+        trees_per_worker = total_trees // num_workers
+        remainder = total_trees % num_workers
+
+        all_worker_predictions = []
+        connessioni_attive = []
+
+        # 4. Funzione di chiamata RPC parallela per l'inferenza
+        def _rpc_inference_call(w_name, w_info, subset_trees_chunk):
+            print(f" [RPC INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi...")
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            connessioni_attive.append(conn)
+            
+            # Richiamiamo il metodo del worker passando il chunk di alberi e il test set centralizzato
+            serialized_chunk = pickle.dumps(subset_trees_chunk)
+            raw_response = conn.root.predict_subset_forest(serialized_chunk, serialized_X_test)
+            
+            return pickle.loads(raw_response)
+
+        # Invio parallelo delle computazioni tramite ThreadPool
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_worker = {}
+            current_tree_idx = 0
+
+            for i, name in enumerate(worker_names):
+                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+                if allocated_trees == 0:
+                    continue
+
+                # Estraiamo la fetta di alberi di competenza del worker i-esimo
+                chunk = all_trees[current_tree_idx : current_tree_idx + allocated_trees]
+                current_tree_idx += allocated_trees
+
+                f = executor.submit(_rpc_inference_call, name, available_workers[name], chunk)
+                future_to_worker[f] = name
+
+            # Raccolta delle risposte parziali
+            for future in as_completed(future_to_worker):
+                w_name = future_to_worker[future]
+                try:
+                    sub_predictions = future.result()  # Lista di predizioni (vettore per ogni albero)
+                    all_worker_predictions.extend(sub_predictions)
+                    print(f"   [RPC INFERENZA <- {w_name}] Ricevute correttamente predizioni parziali.")
+                except Exception as e:
+                    print(f"   [ERRORE CRITICO INFERENZA] Il worker '{w_name}' ha fallito durante la predizione: {e}")
+                    raise e
+
+        # Pulizia delle connessioni aperte
+        print(f"[*] Chiusura di {len(connessioni_attive)} connessioni RPC attive usate per l'inferenza...")
+        for conn in connessioni_attive:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # 5. Aggregazione Globale dei Risultati
+        # Trasformiamo l'output combinato in una matrice numpy (Shape: num_alberi_totali, num_campioni_test)
+        predictions_matrix = np.array(all_worker_predictions)
+        print(f"[{self.orchestrator_name}] Matrice complessiva predizioni generata: {predictions_matrix.shape}")
+
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE FINALE PERFORMANCE MODELLO CENTRALIZZATO (JOB: {job_id[:8]})")
+        print("═" * 75)
+
+        if tree_type == "classifier":
+            # Per i classificatori usiamo il voto di maggioranza (Moda lungo l'asse degli alberi)
+            from scipy.stats import mode
+            final_predictions, _ = mode(predictions_matrix, axis=0)
+            final_predictions = final_predictions.ravel()
+            
+            # Calcolo Accuratezza
+            accuracy = np.mean(final_predictions == y_test)
+            print(f"  Tipo di Modello:                        CLASSIFICATORE")
+            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print(f"  ACCURACY FINALE DISTRIBUITA:            {accuracy * 100:.2f} %")
+        else:
+            # Per i regressori calcoliamo la media delle predizioni di tutti gli alberi
+            final_predictions = np.mean(predictions_matrix, axis=0)
+            
+            # Calcolo MAE (Mean Absolute Error)
+            mae = np.mean(np.abs(final_predictions - y_test))
+            print(f"  Tipo di Modello:                        REGRESSORE")
+            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
+
+        print("═" * 75 + "\n")
+                
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
     orchestrator = CentralizedOrchestrator()

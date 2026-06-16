@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification, make_regression
+from sklearn.model_selection import train_test_split
 
 from src.worker.BaseWorker import BaseWorker
 
@@ -10,7 +11,7 @@ class FederatedWorker(BaseWorker):
     """
     Worker per la gestione dell'addestramento in modalità federata.
     Se invocato in modalità sintetica, genera localmente in memoria il proprio frammento
-    di dati (ispirandosi a scikit-learn). Altrimenti accede a un dataset locale privato sul nodo.
+    di dati. Altrimenti accede a un dataset locale privato sul nodo.
     """
 
     def __init__(
@@ -23,7 +24,6 @@ class FederatedWorker(BaseWorker):
         bootstrap: bool = True,
         tree_type: str = "classifier"
     ):
-        # Passiamo i parametri alla classe base (l'ambiente viene letto in automatico dal .env)
         super().__init__(
             worker_name=worker_name,
             queue_name=queue_name,
@@ -33,12 +33,12 @@ class FederatedWorker(BaseWorker):
         )
         self.target_column = target_column
         self.tree_type = tree_type
-        
-        # Recuperiamo l'eventuale path per i dati reali dal .env o fallback di sicurezza
         self.local_dataset_path = os.getenv("LOCAL_DATASET_PATH", "/data/private_data.csv")
         
-        # Estraiamo un indice numerico univoco dal nome del worker (es. "Worker-0" -> 0) 
-        # come fallback iniziale per differenziare i dataset sintetici locali.
+        # Attributi per preservare il testing set locale per l'inferenza federata
+        self.X_test = None
+        self.y_test = None
+
         self.worker_index = 0
         for char in worker_name.split("-"):
             if char.isdigit():
@@ -55,61 +55,68 @@ class FederatedWorker(BaseWorker):
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
         """
-        Carica i dati per l'addestramento locale.
-        Se source_info inizia con 'NATIVE_PARTITIONED', genera in autonomia un dataset sintetico disgiunto.
+        Carica i dati per l'addestramento locale e conserva una quota di split
+        per la successiva validazione/inferenza distribuita.
         """
+        X_raw, y_raw = None, None
         
         # --- OPZIONE A: GENERAZIONE SINTETICA LOCALE AUTONOMA ---
         if source_info.startswith("NATIVE_PARTITIONED"):
-            
-            # Estraiamo l'indice del worker inviato via RPC (es. "NATIVE_PARTITIONED|1" -> idx = 1)
-            idx_da_stringa = self.worker_index  # Usiamo il fallback del costruttore se non c'è la pipe
+            idx_da_stringa = self.worker_index
             if "|" in source_info:
                 try:
                     idx_da_stringa = int(source_info.split("|")[1])
                 except ValueError:
                     pass
 
-            # Generiamo il seed deterministico per questo specifico frammento di nodo
             seed_locale = 42 + idx_da_stringa
-            print(f"[FederatedWorker] Rilevato addestramento sintetico locale. Generazione in RAM (Index: {idx_da_stringa}, Seed: {seed_locale})...")
+            print(f"[FederatedWorker] Generazione sintetica in RAM (Index: {idx_da_stringa}, Seed: {seed_locale})...")
             
-            n_samples = 25000  # Dimensione del frammento privato di questo nodo
+            n_samples = 25000  
             n_features = 20
             
             if self.is_regression():
-                X, y = make_regression(
+                X_raw, y_raw = make_regression(
                     n_samples=n_samples, n_features=n_features, noise=0.1, random_state=seed_locale
                 )
-                y = y.astype(np.float64)
+                y_raw = y_raw.astype(np.float64)
             else:
-                X, y = make_classification(
+                X_raw, y_raw = make_classification(
                     n_samples=n_samples, n_features=n_features, n_informative=15, n_classes=2, random_state=seed_locale
                 )
-                y = y.astype(np.int64)
+                y_raw = y_raw.astype(np.int64)
+
+        # --- OPZIONE B: CARICAMENTO DA FILE REALE SUL DISCO ---
+        else:
+            print(f"[FederatedWorker] Accesso al file system per dati reali: {self.local_dataset_path}")
+            if not os.path.exists(self.local_dataset_path):
+                raise FileNotFoundError(f"Errore: Il dataset locale '{self.local_dataset_path}' non esiste.")
                 
-            print(f"[FederatedWorker] [OK] Dataset sintetico isolato pronto: X shape = {X.shape}, y shape = {y.shape}")
-            return X, y
+            df = pd.read_csv(self.local_dataset_path)
+            if self.target_column not in df.columns:
+                raise ValueError(f"Colonna target '{self.target_column}' non trovata.")
 
-        # --- OPZIONE B: CARICAMENTO DA FILE REALE SUL DISCO EBS DELLA MACCHINA EC2 ---
-        print(f"[FederatedWorker] Accesso al file system locale per dati reali privati: {self.local_dataset_path}")
-        if not os.path.exists(self.local_dataset_path):
-            raise FileNotFoundError(
-                f"Errore critico: Il dataset locale protetto '{self.local_dataset_path}' non esiste."
-            )
-            
-        df = pd.read_csv(self.local_dataset_path)
-        if self.target_column not in df.columns:
-            raise ValueError(f"Colonna target '{self.target_column}' non trovata nel dataset locale.")
+            y_df = df[self.target_column]
+            X_df = df.drop(columns=[self.target_column])
 
-        y_df = df[self.target_column]
-        X_df = df.drop(columns=[self.target_column])
+            X_raw = X_df.to_numpy(dtype=np.float64)
+            y_raw = y_df.to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
 
-        X = X_df.to_numpy(dtype=np.float64)
-        y = y_df.to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
+        # --- DETACHMENT DEL TESTING SET (20%) ---
+        # Splittiamo i dati in modo che il Worker memorizzi internamente il suo test set privato
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_raw, y_raw, test_size=0.20, random_state=42, stratify=None if self.is_regression() else y_raw
+        )
         
-        print(f"[FederatedWorker] Dati reali caricati dal disco: X shape = {X.shape}, y shape = {y.shape}")
-        return X, y
+        # Salviamo nello stato dell'oggetto per l'interfaccia di inferenza
+        self.X_test = X_test
+        self.y_test = y_test
+        
+        print(f"[FederatedWorker] [SPLIT OK] Dati di Addestramento dedicati: {X_train.shape}")
+        print(f"[FederatedWorker] [SPLIT OK] Dati di Validazione trattenuti in RAM: {self.X_test.shape}")
+        
+        # Restituiamo solo il train set al motore d'addestramento dell'albero della classe base
+        return X_train, y_train
 
     def _get_tree_class(self) -> type:
         return self.tree_class_reference

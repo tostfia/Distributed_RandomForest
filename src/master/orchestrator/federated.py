@@ -71,8 +71,6 @@ class FederatedOrchestrator(BaseOrchestrator):
             conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
             connessioni_attive.append(conn)  
             try: 
-                # FIX: Impacchettiamo l'indice del worker nella stringa source_info (es: "NATIVE_PARTITIONED|1")
-                # Rispettiamo al 100% la firma rigida di BaseWorker senza usare keyword arguments extra.
                 federated_source_info = f"NATIVE_PARTITIONED|{idx_worker}"
 
                 remote_trees = conn.root.train_subset_forest(
@@ -138,7 +136,11 @@ class FederatedOrchestrator(BaseOrchestrator):
                     
                     global_model.estimators_ = all_trained_trees
                     
-                    model_path = f"model_federated_{self.current_job_id}.pkl"
+                    # MODIFICA: Salvataggio isolato all'interno della cartella saved_models
+                    TARGET_DIR = "./saved_models"
+                    os.makedirs(TARGET_DIR, exist_ok=True)
+                    model_path = os.path.join(TARGET_DIR, f"model_federated_{self.current_job_id}.pkl")
+                    
                     with open(model_path, "wb") as f:
                         pickle.dump(global_model, f)
                     
@@ -151,6 +153,150 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         print(f"   [{self.orchestrator_name}] Nessun albero ricevuto dal round federato. Fallimento.")
         return False
+    
+    def _execute_inference_step(self, payload: dict):
+        """
+        Esegue l'inferenza distribuita/valutazione in modalità Federata.
+        Invia a ciascun worker un sottoinsieme di alberi della foresta globale federata,
+        lasciando che i worker computino le predizioni parziali in modo isolato sui loro
+        rispettivi testing set privati salvati in RAM (nessun dato viaggia in rete).
+        """
+        job_id = payload.get("job_id")
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
+
+        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA FEDERATA ===")
+
+        # MODIFICA: Caricamento puntato alla sottocartella saved_models
+        model_path = os.path.join("./saved_models", f"model_federated_{job_id}.pkl")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Modello globale federato non trovato in '{model_path}'. "
+                f"Assicurati che l'addestramento sia terminato."
+            )
+
+        print(f"[{self.orchestrator_name}] Caricamento della foresta federata da {model_path}...")
+        with open(model_path, "rb") as f:
+            global_model = pickle.load(f)
+        
+        all_trees = global_model.estimators_
+        total_trees = len(all_trees)
+        print(f"[{self.orchestrator_name}] Foresta federata caricata. Numero totale di alberi: {total_trees}")
+
+        # 2. Scoperta dei Worker federati attivi
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        if not available_workers:
+            raise RuntimeError("Nessun worker federato disponibile nel Service Registry per l'inferenza.")
+
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+        print(f"[{self.orchestrator_name}] Worker federati pronti per la valutazione: {num_workers} -> {worker_names}")
+
+        # Partizionamento equo degli alberi globali della foresta tra i nodi
+        trees_per_worker = total_trees // num_workers
+        remainder = total_trees % num_workers
+
+        connessioni_attive = []
+        metriche_nodi = []
+
+        # 3. Funzione di chiamata RPC per l'inferenza asimmetrica federata
+        def _rpc_federated_inference_call(w_name, w_info, subset_trees_chunk):
+            print(f" [RPC FED-INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi globali...")
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            connessioni_attive.append(conn)
+
+            # Invochiamo il metodo del worker passando il chunk di alberi MA lasciando serialized_X_test = None
+            # Questo costringe il Worker a usare il proprio `self.X_test` locale trattenuto in RAM
+            serialized_chunk = pickle.dumps(subset_trees_chunk)
+            raw_response = conn.root.predict_subset_forest(serialized_chunk, None)
+            sub_predictions = pickle.loads(raw_response) # Matrice di risposte (shape: num_alberi_chunk, num_campioni_locali)
+
+            # Il worker deve implementare l'accesso esposto alle suas y_test per permetterci di calcolare le metriche di quel nodo
+            if hasattr(conn.root, "get_local_y_test"):
+                raw_y_test = conn.root.get_local_y_test()
+            elif hasattr(conn.root, "y_test"):
+                raw_y_test = conn.root.y_test
+            else:
+                raise AttributeError(f"Il worker {w_name} non espone il set delle label locali y_test necessarie alla validazione delle metriche.")
+            
+            y_test_locale = pickle.loads(raw_y_test) if isinstance(raw_y_test, bytes) else np.array(raw_y_test)
+
+            # Aggregazione locale dei voti di questo specifico nodo (Voto di maggioranza o media delle risposte)
+            matrix_pred_locale = np.array(sub_predictions)
+
+            if tree_type == "classifier":
+                from scipy.stats import mode
+                final_local_pred, _ = mode(matrix_pred_locale, axis=0)
+                final_local_pred = final_local_pred.ravel()
+                acc_locale = np.mean(final_local_pred == y_test_locale)
+                return w_name, "accuracy", acc_locale, len(y_test_locale)
+            else:
+                final_local_pred = np.mean(matrix_pred_locale, axis=0)
+                mae_locale = np.mean(np.abs(final_local_pred - y_test_locale))
+                return w_name, "mae", mae_locale, len(y_test_locale)
+
+        # 4. Esecuzione in parallelo sui Worker via ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_worker = {}
+            current_tree_idx = 0
+
+            for i, name in enumerate(worker_names):
+                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+                if allocated_trees == 0:
+                    continue
+
+                chunk = all_trees[current_tree_idx : current_tree_idx + allocated_trees]
+                current_tree_idx += allocated_trees
+
+                f = executor.submit(_rpc_federated_inference_call, name, available_workers[name], chunk)
+                future_to_worker[f] = name
+
+            # Raccolta e aggregazione delle metriche ricevute dai nodi isolati
+            for future in as_completed(future_to_worker):
+                w_name = future_to_worker[future]
+                try:
+                    name_w, m_type, valore, size_test = future.result()
+                    metriche_nodi.append((valore, size_test))
+                    
+                    val_str = f"{valore * 100:.2f} %" if m_type == "accuracy" else f"{valore:.4f}"
+                    print(f"   [RPC FED-INFERENZA <- {w_name}] Valutazione completata. Risultato Locale ({m_type.upper()}): {val_str} su {size_test} campioni.")
+                except Exception as e:
+                    print(f"   [ERRORE CRITICO FED-INFERENZA] Fallimento computazione sul worker '{w_name}': {e}")
+                    raise e
+
+        # Chiusura pulita dei canali RPC
+        print(f"[*] Chiusura di {len(connessioni_attive)} canali RPC federati...")
+        for conn in connessioni_attive:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # 5. Calcolo della Metrica Globale Federata (Media Pesata in base al numero di campioni di ciascun nodo)
+        total_samples = sum(item[1] for item in metriche_nodi)
+        weighted_metric_sum = sum(item[0] * item[1] for item in metriche_nodi)
+        global_federated_metric = weighted_metric_sum / total_samples if total_samples > 0 else 0
+
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE PERFORMANCE MODELLO FEDERATO GLOBALE (JOB: {job_id[:8]})")
+        print("═" * 75)
+        print(f"  Numero totale nodi federati valutati:  {len(metriche_nodi)}")
+        print(f"  Dimensione aggregata testing set:      {total_samples} campioni totali")
+
+        if tree_type == "classifier":
+            print(f"  Tipo di Modello:                        CLASSIFICATORE")
+            print(f"  ACCURACY MEDIA PESATA SUI NODI:         {global_federated_metric * 100:.2f} %")
+        else:
+            print(f"  Tipo di Modello:                        REGRESSORE")
+            print(f"  MAE MEDIO PESATO SUI NODI:              {global_federated_metric:.4f}")
+
+        print("═" * 75 + "\n")
+
+    def exposed_get_local_y_test(self):
+        """Rende disponibile all'Orchestratore il vettore y_test in formato serializzato."""
+        if self.y_test is None:
+            raise ValueError(f"[{self.orchestrator_name}] Errore: Nessun target vector locale y_test in RAM.")
+        return pickle.dumps(self.y_test)
 
 
 if __name__ == "__main__":

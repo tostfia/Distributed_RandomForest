@@ -40,8 +40,9 @@ class TrainingRequestWorker(BaseModel):
 
 
 class InferenceRequest(BaseModel):
-    """Modello Pydantic per validare le richieste di inferenza nel cluster."""
     inference_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    job_id: str  # L'ID del modello addestrato persistito su DynamoDB/S3 da caricare
-    data_url: str  # Il percorso (locale o S3) dei nuovi dati non etichettati
-    environment: str  # 'local' o 'aws' per capire dove salvare l'output delle predizioni
+    request_type: Literal["INFERENCE"] = "INFERENCE"
+    job_id: str
+    data_url: Optional[str] = None
+    environment: str
+    hyperparameters: Hyperparameters

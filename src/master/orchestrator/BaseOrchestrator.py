@@ -5,7 +5,7 @@ import sys
 import time
 import threading
 
-from src.shared.config import SystemConfig  # <-- INCLUSO CONFIG CENTRALE
+from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services, DatasetDAOFactory
 from src.shared.binding.serviceregistry import ServiceRegistry
 
@@ -78,23 +78,39 @@ class BaseOrchestrator(ABC):
             print(f"[*] Orchestratore rimosso correttamente dalla rete.")
 
     def _process_job(self, payload: dict, receipt_handle: str):
-        """Logica di gestione dello stato e orchestrazione del Job."""
-        job_id = payload["job_id"]
+        """Logica di instradamento del lavoro in base al tipo di richiesta."""
+        job_id = payload.get("job_id")
+        # Estraiamo il tipo di richiesta dal payload, di default assumiamo sia "TRAINING" per retrocompatibilità
+        request_type = payload.get("request_type", "TRAINING").upper()
+
+        if request_type == "INFERENCE":
+            print(f"\n[{self.orchestrator_name}] Ricevuta richiesta di INFERENZA per il Job ID: {job_id[:8]}...")
+            try:
+                # Eseguiamo la predizione distribuita (implementata dalle classi figlie)
+                self._execute_inference_step(payload)
+                # Eliminiamo il messaggio solo a successo ottenuto
+                self.sqs_queue.delete_message(receipt_handle)
+                print(f"[{self.orchestrator_name}] Inferenza per Job {job_id[:8]} completata con successo.")
+            except Exception as inf_error:
+                print(f"[{self.orchestrator_name}] [ERRORE DURANTE INFERENZA]: {inf_error}")
+                import traceback
+                traceback.print_exc()
+            return
+
+        # --- SE NON È INFERENZA, GESTIAMO IL CORRETTO FLUSSO DI TRAINING (VECCHIA LOGICA) ---
         status = self.state_manager.get_job_status(job_id)
         if status == "COMPLETED":
             print(f"[INFO] Job {job_id[:8]} già completato. Ignoro messaggio duplicato.")
+            self.sqs_queue.delete_message(receipt_handle)
             return 
-        hp = payload["hyperparameters"]
-        
-        print(f"\n[{self.orchestrator_name}] Ricevuto Job. ID: {job_id[:8]}...")
-
+            
+        hp = payload.get("hyperparameters", {})
         existing_state = self.state_manager.obtain_request(job_id)
         retries = 0
         base_random_state = 42
         alberi_gia_fatti = 0
 
         if existing_state:
-            # Estrai i dati puliti (gestendo l'eventuale wrapper "Item" del DB)
             item_data = existing_state.get("Item", existing_state)
             current_status = item_data.get("status")
             retries = item_data.get("retries", 0)
@@ -162,6 +178,11 @@ class BaseOrchestrator(ABC):
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
         pass
 
+    # --- NUOVO METODO ASTRATTO PER L'INFERENZA ---
+    @abstractmethod
+    def _execute_inference_step(self, payload: dict):
+        pass
+
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, seed: int):
         checkpoint_data = {"alberi_addestrati": current_alberi}
         
@@ -170,13 +191,10 @@ class BaseOrchestrator(ABC):
             with open(f"checkpoints/checkpoint_{job_id}.json", "w") as f:
                 json.dump(checkpoint_data, f)
         else:
-            # COMPLETATA LOGICA AWS S3 PER I CHECKPOINT
             try:
                 import pandas as pd
                 dao = DatasetDAOFactory.get_dao(self.environment)
-                # Trasformiamo il dizionario del checkpoint in un file DataFrame finto o stringa JSON per il DAO
                 df_cp = pd.DataFrame([checkpoint_data])
-                # Supponendo un path standard sul tuo bucket configurato nel DAO
                 dao.save_dataset(df_cp, f"s3://my-cluster-checkpoints-bucket/checkpoint_{job_id}.csv")
                 print(f"   [S3-CHECKPOINT] Salvato checkpoint ({current_alberi} alberi) su S3.")
             except Exception as e:
@@ -199,7 +217,6 @@ class BaseOrchestrator(ABC):
                 with open(path, "r") as f:
                     return json.load(f).get("alberi_addestrati", db_val)
         else:
-            # Su AWS, DynamoDB fa già da sorgente di verità assoluta per i checkpoint numerici
             return db_val
         return db_val
 
@@ -208,7 +225,6 @@ class BaseOrchestrator(ABC):
             path = f"checkpoints/checkpoint_{job_id}.json"
             if os.path.exists(path):
                 os.remove(path)
-        # Su AWS non serve fare una delete_item distruttiva su S3, basta lo stato COMPLETED su DynamoDB
     
     def _generate_performance_report(self, job_id: str, t_dist: float):
         print("\n" + "═" * 75)

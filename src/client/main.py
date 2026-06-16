@@ -4,7 +4,7 @@ import sys
 
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
-from src.shared.sharedmodels.models import Hyperparameters, TrainingRequest
+from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
@@ -32,28 +32,106 @@ def run_predefined_tests():
 
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
-    job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
-    data_url = get_input("Inserisci l'URL dei nuovi dati da predire: ")
     
-    inference_request = {
-        "job_id": job_id,
-        "data_url": data_url,
-        "type": "inference_request"
-    }
+    # 1. Recupero informazioni di contesto obbligatorie
+    job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
+    if not job_id:
+        print("[ERRORE] Il Job ID è obbligatorio.")
+        sys.exit(1)
+        
+    data_url = None
+    if cfg.mode == "centralized":
+        data_url = get_input("Inserisci l'URL/Path dei nuovi dati di test centralizzati: ").strip()
+        if not data_url:
+            print("[ERRORE] Il percorso dei dati è obbligatorio in modalità centralizzata.")
+            sys.exit(1)
+    else:
+        print("[INFO] Modalità Federata: i nodi utilizzeranno le proprie partizioni locali di test trattenute in RAM.")
+
+    # 2. Tentativo di recupero degli iperparametri del modello (per capire se è classifier o regressor)
+    hp_obj = None
+    if os.path.exists("config.json"):
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                saved_config = json.load(f)
+                if saved_config.get("job_id") == job_id or get_input("Usa iperparametri dell'ultimo training locale? (S/N): ", "S").upper() == "S":
+                    hp_data = saved_config.get("hyperparameters", {})
+                    hp_obj = Hyperparameters(**hp_data)
+                    print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
+        except Exception:
+            pass
+
+    # Se non riusciamo a leggerlo, lo chiediamo rapidamente all'utente
+    if not hp_obj:
+        print("\n[INFO] Impossibile recuperare gli iperparametri in automatico per questo Job ID.")
+        tree_type_raw = get_input("Inserisci il tipo di task originale (1 per Classificazione, 2 per Regressione): ", "1")
+        tree_type = "classifier" if tree_type_raw == "1" else "regressor"
+        hp_obj = Hyperparameters(n_estimators=100, tree_type=tree_type)
+
+    # 3. Validazione tramite il nuovo modello Pydantic InferenceRequest
+    try:
+        inference_request = InferenceRequest(
+            job_id=job_id,
+            data_url=data_url,
+            environment=cfg.env,
+            hyperparameters=hp_obj
+        )
+    except Exception as e:
+        print(f"\n [ERRORE VALIDAZIONE STRUTTURA INFERENZA]: {e}")
+        sys.exit(1)
+
+    # 4. Instradamento sulla coda corretta (Coda unificata per singola modalità)
+    target_queue = "federated_queue" if cfg.mode == "federated" else "centralized_queue"
 
     try:
-        sqs_queue.send_message(queue_name="inference_queue", message_dict=inference_request)
-        print(f"[INFO] Richiesta di inferenza inviata per il Job {job_id[:8]}...")
-        print("[INFO] Il sistema distribuito sta processando la richiesta e aggregherà i risultati.")
+        # Inviamo il model_dump() serializzato sulla coda corretta
+        sqs_queue.send_message(queue_name=target_queue, message_dict=inference_request.model_dump())
+        print(f"\n[OK] Richiesta di inferenza {inference_request.inference_id[:8]} inviata con successo alla coda '{target_queue}'!")
+        print(f"[INFO] L'orchestratore riceverà il messaggio e coordinerà i worker via RPC.")
     except Exception as e:
-        print(f"[ERRORE] Impossibile inviare la richiesta di inferenza: {e}")
+        print(f"[ERRORE] Impossibile inviare la richiesta di inferenza su SQS: {e}")
+        
     sys.exit(0)
 
 
 def handle_model_request():
-    print("\n=== RICHIESTA MODELLO ADDESTRATO ===")
-    job_id = get_input("Inserisci il Job ID del modello da scaricare: ")
-    print(f"[INFO] Download del modello {job_id[:8]} in corso...")
+    print("\n=== RICHIESTA E VERIFICA MODELLO ADDESTRATO ===")
+    job_id = get_input("Inserisci il Job ID del modello da verificare: ").strip()
+    
+    if not job_id:
+        print("[ERRORE] Il Job ID è obbligatorio.")
+        sys.exit(1)
+
+    # Determiniamo il nome del file in base alla modalità attiva (Centralizzata o Federata)
+    if cfg.mode == "federated":
+        model_filename = f"model_federated_{job_id}.pkl"
+    else:
+        model_filename = f"model_{job_id}.pkl"
+
+    print(f"[INFO] Controllando la disponibilità del modello per il Job {job_id[:8]}...")
+
+    # --- CASO AMBIENTE LOCALE ---
+    if cfg.env == "local":
+        if os.path.exists(model_filename):
+            print(f"\n[OK] Modello trovato con successo in locale: '{model_filename}'")
+            print(f"[INFO] L'identificativo è valido. Puoi procedere ad avviare richieste di inferenza usando questo Job ID.")
+        else:
+            print(f"\n[ERRORE] Il file del modello '{model_filename}' non è stato trovato nella directory corrente.")
+            print("[INFO] Assicurati che l'addestramento distribuito locale sia terminato correttamente.")
+            sys.exit(1)
+
+    # --- CASO AMBIENTE AWS (COMMENTATO PER IMPLEMENTAZIONE FUTURA) ---
+    elif cfg.env == "aws":
+        print(f"\n[INFO] Rilevato ambiente AWS. La logica di download da S3 è momentaneamente disattivata.")
+        print(f"[INFO] Nome del file target su S3: {model_filename}")
+        """
+        # TODO: Scommentare ed espandere quando implementerai AWS
+        bucket_name = "my-cluster-datasets-bucket"
+        s3_uri = f"s3://{bucket_name}/models/{model_filename}"
+        # ... logica del DAO e di boto3 ...
+        """
+        sys.exit(0)
+
     sys.exit(0)
 
 
@@ -150,7 +228,7 @@ def handle_training():
     try:
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(request.model_dump(), f, indent=2)
-        print("\n[OK] File 'config.json' salvato correttamente.")
+        print("\n[OK] File 'config.json' saved correctly.")
     except IOError as e:
         print(f"Impossibile salvare 'config.json' in locale: {e}")
 
@@ -170,8 +248,6 @@ def handle_training():
 def handle_baseline_selection():
     """Interfaccia di instradamento per l'esecuzione della baseline locale."""
     print("\n=== PREPARAZIONE BASELINE LOCALE ===")
-    
-    # Se config.json non esiste, creiamo un mini-config al volo per dire alla baseline cosa fare
     if not os.path.exists("config.json"):
         print("[INFO] Nessun file config.json rilevato. Configurazione rapida del dataset per la baseline:")
         print("  [1] Esegui su Dataset Reale")
@@ -184,7 +260,6 @@ def handle_baseline_selection():
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(dummy_config, f)
             
-    # Avvia il codice della baseline che abbiamo corretto nel passaggio precedente
     run_baseline()
 
 
