@@ -105,8 +105,8 @@ def handle_model_request():
     print(f"[INFO] Interrogazione dello Stato per il Job {job_id[:8]} in corso...")
 
     try:
-        # 1. Interroghiamo lo StateManager (DynamoDB o Mock JSON) per capire lo stato reale
-        job_status = state_manager.get_request_status(job_id) # O il metodo corrispondente del tuo state_manager (es. get_status)
+        # 1. Interroghiamo lo StateManager usando il metodo ESATTO definito nel tuo codice
+        job_status = state_manager.get_job_status(job_id)
         
         if not job_status:
             print(f"\n[ATTENZIONE] Nessun record trovato nel database per il Job ID '{job_id}'.")
@@ -115,37 +115,45 @@ def handle_model_request():
 
         print(f"  • Stato attuale nel Cluster: {job_status.upper()}")
 
-        # 2. Gestione ramificata in base allo stato del ciclo di vita
-        if job_status.upper() == "PROCESSING":
-            print(f"\n[IN CORSO] Il modello {job_id[:8]} è ancora in fase di addestramento distribuito.")
-            print("[INFO] L'orchestratore e i worker stanno calcolando gli alberi. Attendi il completamento prima dell'inferenza.")
+        # 2. Gestione ramificata in base allo stato del ciclo di vita del cluster
+        if job_status.upper() == "QUEUED":
+            print(f"\n[IN CODA] Il Job {job_id[:8]} è attualmente in coda su SQS.")
+            print("[INFO] Il messaggio è in attesa che l'Orchestratore si liberi per prenderlo in carico.")
+            return
+
+        elif job_status.upper() == "PROCESSING":
+            print(f"\n[IN CORSO] Il modello {job_id[:8]} è ancora in fase di addestramento distribuito. ")
+            print("[INFO] L'Orchestratore sta coordinando i calcoli paralleli sui nodi Worker via RPC.")
+            print("       Attendi il completamento definitivo prima di lanciare l'inferenza.")
             return
 
         elif job_status.upper() == "FAILED":
-            print(f"\n[FALLITO] L'addestramento per il Job {job_id[:8]} è fallito.")
-            print("[INFO] Controlla i log del nodo Master/Worker per identificare crash o problemi di rete (es. eccezioni RPyC).")
+            print(f"\n[FALLITO] L'addestramento per il Job {job_id[:8]} è fallito sul cluster. ")
+            print("[INFO] Il sistema di failover ha intercettato un'eccezione applicativa o infrastrutturale.")
+            print("       Controlla i log dell'Orchestratore Master per identificare il problema.")
             return
 
         elif job_status.upper() == "COMPLETED":
-            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id[:8]} è terminato con successo!")
+            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id[:8]} è terminato con successo! ")
             
-            # Determiniamo il nome del file atteso
+            # Determiniamo il nome del file atteso in base alla modalità
             model_filename = f"model_federated_{job_id}.pkl" if cfg.mode == "federated" else f"model_{job_id}.pkl"
             
-            # Se siamo in locale, verifichiamo anche la presenza fisica del file per sicurezza extra
+            # 3. Controllo di persistenza fisica (Solo per ambiente LOCAL)
             if cfg.env == "local":
-                model_path = os.path.join("./saved_models", model_filename)
-                if os.path.exists(model_path):
-                    print(f"[OK] File di persistenza rilevato correttamente in: '{model_path}'")
-                    print("[INFO] Il modello è pronto per ricevere richieste di inferenza.")
+                # L'orchestratore salva direttamente nella radice, quindi controlliamo il percorso locale
+                if os.path.exists(model_filename):
+                    print(f"[OK] File binario del modello rilevato correttamente: '{model_filename}'")
+                    print("[INFO] Il modello aggregato è valido. Puoi procedere con le richieste di inferenza (Opzione 2).")
                 else:
-                    print(f"[ATTENZIONE] Il DB dice COMPLETATO, ma il file '{model_filename}' non è presente in './saved_models/'.")
+                    print(f"[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato nella directory corrente.")
+                    print("[INFO] Verifica i permessi di scrittura o che l'Orchestratore non sia stato avviato in un'altra cartella.")
             
             elif cfg.env == "aws":
-                print(f"[INFO] In ambiente AWS, il file si assume caricato nel bucket S3 associato.")
+                print(f"[INFO] In ambiente AWS, il file si assume persistito e scaricabile dal bucket S3 dei modelli.")
                 
     except Exception as e:
-        print(f"\n[ERRORE] Impossibile recuperare lo stato dal Manager: {e}")
+        print(f"\n[ERRORE] Impossibile recuperare lo stato dal database: {e}")
 
     return
 
