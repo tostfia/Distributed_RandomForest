@@ -13,6 +13,8 @@ aws/
 data/db_files/
 *.json
 
+dataset_cache/
+
 # === STORAGE LOCALE CONDIVISO (MOCK CLUSTER) ===
 # Centralizzazione di tabelle JSON, code SQS, config locali e checkpoint
 .local_storage/

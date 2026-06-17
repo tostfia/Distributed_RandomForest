@@ -182,8 +182,7 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset SINTETICO: {dataset_path}")
     else:
         dataset_type = "real"
-        # Forniamo il file del Giovedì di CIC-IDS2018 come URL predefinito per i test dell'ETL
-        default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/Thursday-01-03-2018_TrafficForML_CICFlowMeter.csv"
+        default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
         
         print("  • Inserisci l'URL S3 o il path locale del dataset reale.")
         dataset_path = get_input(f"    (Premi INVIO per il default pubblico): \n    --> ", default_s3_url).strip()
