@@ -1,17 +1,19 @@
 import os
+import pickle
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification, make_regression
 from sklearn.model_selection import train_test_split
 
 from src.worker.BaseWorker import BaseWorker
+from src.shared.factory import DatasetDAOFactory  # Utilizziamo il DAO centralizzato
 
 
 class FederatedWorker(BaseWorker):
-    """
-    Worker per la gestione dell'addestramento in modalità federata.
-    Se invocato in modalità sintetica, genera localmente in memoria il proprio frammento
-    di dati. Altrimenti accede a un dataset locale privato sul nodo.
+    """Worker per la gestione dell'addestramento in modalità federata.
+
+    Interpreta le stringhe sintetiche oppure scarica lo shard reale assegnato
+    dall'Orchestratore salvandolo nella cache del disco rigido locale (EBS su AWS).
     """
 
     def __init__(
@@ -33,7 +35,14 @@ class FederatedWorker(BaseWorker):
         )
         self.target_column = target_column
         self.tree_type = tree_type
-        self.local_dataset_path = os.getenv("LOCAL_DATASET_PATH", "/data/private_data.csv")
+        
+        # Gestione asimmetrica della cache locale in base all'ambiente
+        if self.environment == "aws":
+            self.local_cache_dir = f"/tmp/{worker_name}_cache"
+        else:
+            self.local_cache_dir = f"./{worker_name}_cache"
+            
+        os.makedirs(self.local_cache_dir, exist_ok=True)
         
         # Attributi per preservare il testing set locale per l'inferenza federata
         self.X_test = None
@@ -47,16 +56,20 @@ class FederatedWorker(BaseWorker):
 
         print(
             f"[FederatedWorker] Inizializzato in ambiente: {self.environment.upper()} — "
-            f"Worker Index di fallback: {self.worker_index} — Target: {self.target_column}"
+            f"Directory Cache locale: {self.local_cache_dir} — Target: {self.target_column}"
         )
 
     def is_regression(self) -> bool:
         return self.tree_type == "regressor"
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Carica i dati per l'addestramento locale e conserva una quota di split
+        """Carica i dati per l'addestramento locale e conserva una quota di split
+
         per la successiva validazione/inferenza distribuita.
+
+        Args:
+            source_info (str): Può essere 'NATIVE_PARTITIONED|i' o un path/URL
+              S3 fornito dall'Orchestratore.
         """
         X_raw, y_raw = None, None
         
@@ -86,37 +99,71 @@ class FederatedWorker(BaseWorker):
                 )
                 y_raw = y_raw.astype(np.int64)
 
-        # --- OPZIONE B: CARICAMENTO DA FILE REALE SUL DISCO ---
+            # Per il dataset sintetico facciamo lo split 80/20 standard in RAM al volo
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_raw, y_raw, test_size=0.20, random_state=42, stratify=None if self.is_regression() else y_raw
+            )
+            self.X_test = X_test
+            self.y_test = y_test
+
+        # --- OPZIONE B: DATASET REALE (Lettura dallo Shard distribuito dall'Orchestratore) ---
         else:
-            print(f"[FederatedWorker] Accesso al file system per dati reali: {self.local_dataset_path}")
-            if not os.path.exists(self.local_dataset_path):
-                raise FileNotFoundError(f"Errore: Il dataset locale '{self.local_dataset_path}' non esiste.")
+            print(f"[FederatedWorker] Ricevuto path sorgente dall'Orchestratore: {source_info}")
+            
+            # Utilizziamo il DAO Factory per scaricare e leggere lo shard (funziona sia per S3 che per locale)
+            dao = DatasetDAOFactory.get_dao(self.environment)
+            
+            # Caso AWS Learner Lab: Se il path è su S3, lo scarichiamo localmente sul disco EBS (/tmp)
+            # per simulare l'isolamento hardware ed evitare letture di rete continue.
+            if source_info.startswith("s3://"):
+                filename = os.path.basename(source_info)
+                local_train_path = os.path.join(self.local_cache_dir, filename)
+                local_test_path = os.path.join(self.local_cache_dir, filename.replace("train_", "test_"))
                 
-            df = pd.read_csv(self.local_dataset_path)
-            if self.target_column not in df.columns:
-                raise ValueError(f"Colonna target '{self.target_column}' non trovata.")
+                print(f"[FederatedWorker] Cache Cloud: Download del proprio shard train locale su: {local_train_path}")
+                # Scarichiamo il file di train se non già presente in cache
+                if not os.path.exists(local_train_path):
+                    df_train_cloud = dao.load_dataset(source_info)
+                    df_train_cloud.to_csv(local_train_path, index=False)
+                
+                # Scarichiamo preventivamente il file di test associato per l'inferenza futura
+                if not os.path.exists(local_test_path):
+                    s3_test_url = source_info.replace("train_", "test_")
+                    df_test_cloud = dao.load_dataset(s3_test_url)
+                    df_test_cloud.to_csv(local_test_path, index=False)
+                
+                # Aggiorniamo i puntatori ai file locali sul file system (EBS)
+                path_to_read_train = local_train_path
+                path_to_read_test = local_test_path
+            else:
+                # Caso Locale: i file sono già stati partizionati dall'orchestratore nelle cartelle dei worker
+                path_to_read_train = source_info
+                path_to_read_test = source_info.replace("train_", "test_")
 
-            y_df = df[self.target_column]
-            X_df = df.drop(columns=[self.target_column])
+            # --- CARICAMENTO EFFETTIVO DEI COORTI DAL DISCO LOCALE ---
+            print(f"[FederatedWorker] Caricamento train set da cache locale: {path_to_read_train}")
+            df_train = pd.read_csv(path_to_read_train)
+            X_train = df_train.drop(columns=[self.target_column]).to_numpy(dtype=np.float64)
+            y_train = df_train[self.target_column].to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
 
-            X_raw = X_df.to_numpy(dtype=np.float64)
-            y_raw = y_df.to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
+            print(f"[FederatedWorker] Caricamento e bloccaggio in RAM del test set da cache locale: {path_to_read_test}")
+            df_test = pd.read_csv(path_to_read_test)
+            self.X_test = df_test.drop(columns=[self.target_column]).to_numpy(dtype=np.float64)
+            self.y_test = df_test[self.target_column].to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
 
-        # --- DETACHMENT DEL TESTING SET (20%) ---
-        # Splittiamo i dati in modo che il Worker memorizzi internamente il suo test set privato
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_raw, y_raw, test_size=0.20, random_state=42, stratify=None if self.is_regression() else y_raw
-        )
+        print(f"[FederatedWorker] [ETL OK] Record di addestramento pronti: {X_train.shape}")
+        print(f"[FederatedWorker] [ETL OK] Record di validazione blindati in RAM: {self.X_test.shape}")
         
-        # Salviamo nello stato dell'oggetto per l'interfaccia di inferenza
-        self.X_test = X_test
-        self.y_test = y_test
-        
-        print(f"[FederatedWorker] [SPLIT OK] Dati di Addestramento dedicati: {X_train.shape}")
-        print(f"[FederatedWorker] [SPLIT OK] Dati di Validazione trattenuti in RAM: {self.X_test.shape}")
-        
-        # Restituiamo solo il train set al motore d'addestramento dell'albero della classe base
         return X_train, y_train
 
     def _get_tree_class(self) -> type:
         return self.tree_class_reference
+
+    def exposed_get_local_y_test(self) -> bytes:
+        """Metodo esposto tramite RPC per consentire all'Orchestratore di scaricare
+
+        le etichette reali del testing set locale durante la computazione delle metriche.
+        """
+        if self.y_test is None:
+            raise ValueError(f"[{self.worker_name}] Errore: Nessun target vector locale y_test in RAM.")
+        return pickle.dumps(self.y_test)
