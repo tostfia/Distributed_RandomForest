@@ -6,9 +6,10 @@ import traceback
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.extmath import weighted_mode
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
 
+from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
@@ -62,15 +63,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
             df_raw = loader.load()
             preprocessor = CICIDSPreprocessor(target_column=target_col)
             df_clean = preprocessor.process(df_raw)
-
-        # --- SPLIT STRATIFICATO CORRETTO (Sempre 80/20 Nativo) ---
-        print(f"[{self.orchestrator_name}] Generazione Split (80% Train, 20% Test) via StratifiedShuffleSplit...")
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=base_seed)
-        
-        train_df, test_df = None, None
-        for train_index, test_index in sss.split(df_clean, df_clean[target_col]):
-            train_df = df_clean.iloc[train_index].copy()
-            test_df = df_clean.iloc[test_index].copy()
+    
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
+        train_df, test_df = splitter.split(df_clean)
 
         # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
@@ -308,10 +303,26 @@ class CentralizedOrchestrator(BaseOrchestrator):
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
             final_predictions = final_predictions.ravel()
             
+            # --- CALCOLO METRICHE DETTAGLIATE ALLINEATE A COLAB ---
             accuracy = np.mean(final_predictions == y_test)
+            precision = precision_score(y_test, final_predictions, zero_division=0)
+            recall = recall_score(y_test, final_predictions, zero_division=0)
+            f1 = f1_score(y_test, final_predictions, zero_division=0)
+            cm = confusion_matrix(y_test, final_predictions)
+            
             print(f"  Tipo di Modello:                        CLASSIFICATORE")
             print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print("-" * 75)
             print(f"  ACCURACY FINALE DISTRIBUITA:            {accuracy * 100:.2f} %")
+            print(f"  PRECISION DISTRIBUITA:                  {precision * 100:.2f} %")
+            print(f"  RECALL DISTRIBUITA:                     {recall * 100:.2f} %")
+            print(f"  F1-SCORE DISTRIBUITO:                   {f1 * 100:.2f} %")
+            print("-" * 75)
+            print("  Matrice di Confusione:")
+            print(cm)
+            print("\n  Classification Report Completo:")
+            print(classification_report(y_test, final_predictions, zero_division=0))
+            
         else:
             final_predictions = np.mean(predictions_matrix, axis=0)
             mae = np.mean(np.abs(final_predictions - y_test))

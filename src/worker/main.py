@@ -1,11 +1,11 @@
 import os
 import sys
 import multiprocessing
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from src.shared.config import SystemConfig
 from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor # type: ignore
 
 try:
     multiprocessing.set_start_method('spawn', force=True)

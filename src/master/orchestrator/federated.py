@@ -6,9 +6,10 @@ import traceback
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.extmath import weighted_mode
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
 
+from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.config import SystemConfig
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -70,13 +71,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         preprocessor = CICIDSPreprocessor(target_column=target_col)
         df_clean = preprocessor.process(df_raw)
 
-        # --- SPLIT INTEGRATO STRATIFICATO (80/20) ---
-        print(f"[{self.orchestrator_name}] Splitting dei dati (80% Train, 20% Test) via StratifiedShuffleSplit...")
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=base_seed)
-        train_df, test_df = None, None
-        for train_index, test_index in sss.split(df_clean, df_clean[target_col]):
-            train_df = df_clean.iloc[train_index].copy()
-            test_df = df_clean.iloc[test_index].copy()
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
+        train_df, test_df = splitter.split(df_clean)
 
         # --- FEATURE SELECTION ---
         fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
@@ -201,7 +197,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
                     if tree_type == "classifier":
                         global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                        global_model.classes = np.array([0, 1]) 
+                        global_model.classes_ = np.array([0, 1]) 
                         global_model.n_classes_ = 2
                     else:
                         global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
@@ -254,9 +250,11 @@ class FederatedOrchestrator(BaseOrchestrator):
         remainder = total_trees % num_workers
 
         connessioni_attive = []
-        metriche_nodi = []
+        # Qui terremo traccia delle metriche aggregate pesate
+        acc_pesata_tot, prec_pesata_tot, rec_pesata_tot, f1_pesata_tot, mae_pesato_tot = 0, 0, 0, 0, 0
+        total_global_samples = 0
 
-        # --- FUNZIONE DI INF-CALL MODIFICATA CON RECOVERY DEL TESTING SET IN CACHE ---
+        # --- FUNZIONE DI INF-CALL MODIFICATA CON CALCOLO DI METRICHE AVANZATE SUL NODO ---
         def _rpc_federated_inference_call(w_name, w_info, subset_trees_chunk):
             print(f" [RPC FED-INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi globali...")
             conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
@@ -276,17 +274,26 @@ class FederatedOrchestrator(BaseOrchestrator):
             
             y_test_locale = pickle.loads(raw_y_test) if isinstance(raw_y_test, bytes) else np.array(raw_y_test)
             matrix_pred_locale = np.array(sub_predictions)
+            size_test = len(y_test_locale)
 
             if tree_type == "classifier":
                 uniform_weights = np.ones(matrix_pred_locale.shape[0])
                 final_local_pred, _ = weighted_mode(matrix_pred_locale, uniform_weights, axis=0)
                 final_local_pred = final_local_pred.ravel()
-                acc_locale = np.mean(final_local_pred == y_test_locale)
-                return w_name, "accuracy", acc_locale, len(y_test_locale)
+                
+                # Calcolo metriche locali complete per il singolo worker
+                acc = np.mean(final_local_pred == y_test_locale)
+                prec = precision_score(y_test_locale, final_local_pred, zero_division=0)
+                rec = recall_score(y_test_locale, final_local_pred, zero_division=0)
+                f1_s = f1_score(y_test_locale, final_local_pred, zero_division=0)
+                cm = confusion_matrix(y_test_locale, final_local_pred)
+                rep = classification_report(y_test_locale, final_local_pred, zero_division=0)
+                
+                return w_name, "classifier", size_test, {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1_s, "cm": cm, "report": rep}
             else:
                 final_local_pred = np.mean(matrix_pred_locale, axis=0)
-                mae_locale = np.mean(np.abs(final_local_pred - y_test_locale))
-                return w_name, "mae", mae_locale, len(y_test_locale)
+                mae = np.mean(np.abs(final_local_pred - y_test_locale))
+                return w_name, "regressor", size_test, {"mae": mae}
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             future_to_worker = {}
@@ -306,15 +313,29 @@ class FederatedOrchestrator(BaseOrchestrator):
             for future in as_completed(future_to_worker):
                 w_name = future_to_worker[future]
                 try:
-                # Estraiamo name_w dal risultato del thread e la usiamo!
-                    name_w, m_type, valore, size_test = future.result()
-                    metriche_nodi.append((valore, size_test))
-        
-                    val_str = f"{valore * 100:.2f} %" if m_type == "accuracy" else f"{valore:.4f}"
-        
-                    # Log potenziato usando esplicitamente il nome restituito dal Worker remoto
-                    print(f"   [RPC <- {name_w}] Validazione completata con successo sul nodo.")
-                    print(f"         Risultato Locale ({m_type.upper()}): {val_str} su {size_test} campioni.")
+                    name_w, m_type, size_test, res = future.result()
+                    total_global_samples += size_test
+                    
+                    print(f"\n   [RPC <- {name_w}] Validazione completata sullo Shard Locale ({size_test} campioni).")
+                    print("   " + "-"*60)
+                    
+                    if m_type == "classifier":
+                        # Log del singolo nodo federato
+                        print(f"         Accuracy Locale:      {res['accuracy'] * 100:.2f} %")
+                        print(f"         Precision Locale:     {res['precision'] * 100:.2f} %")
+                        print(f"         Recall Locale:        {res['recall'] * 100:.2f} %")
+                        print(f"         F1-Score Locale:      {res['f1'] * 100:.2f} %")
+                        print("         Matrice Confusione Locale:")
+                        print(res['cm'])
+                        
+                        # Accumulo pesato per la metrica globale finale
+                        acc_pesata_tot += res['accuracy'] * size_test
+                        prec_pesata_tot += res['precision'] * size_test
+                        rec_pesata_tot += res['recall'] * size_test
+                        f1_pesata_tot += res['f1'] * size_test
+                    else:
+                        print(f"         MAE Locale:           {res['mae']:.4f}")
+                        mae_pesato_tot += res['mae'] * size_test
         
                 except Exception as e:
                     print(f"   [ERRORE CRITICO FED-INFERENZA] Fallimento computazione sul worker '{w_name}': {e}")
@@ -324,20 +345,30 @@ class FederatedOrchestrator(BaseOrchestrator):
             try: conn.close()
             except Exception: pass
 
-        total_samples = sum(item[1] for item in metriche_nodi)
-        weighted_metric_sum = sum(item[0] * item[1] for item in metriche_nodi)
-        global_federated_metric = weighted_metric_sum / total_samples if total_samples > 0 else 0
-
         print("\n" + "═" * 75)
         print(f"  VALUTAZIONE PERFORMANCE MODELLO FEDERATO GLOBALE (JOB: {job_id[:8]})")
         print("═" * 75)
 
         if tree_type == "classifier":
+            # Calcolo delle medie globali pesate sulla dimension dei test set dei nodi
+            global_accuracy = (acc_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_precision = (prec_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_recall = (rec_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_f1 = (f1_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            
             print(f"  Tipo di Modello:                        CLASSIFICATORE")
-            print(f"  ACCURACY MEDIA PESATA SUI NODI:         {global_federated_metric * 100:.2f} %")
+            print(f"  Testing Set Globale (Nodi Sommati):     {total_global_samples} campioni")
+            print("-" * 75)
+            print(f"  ACCURACY MEDIA PESATA SUI NODI:         {global_accuracy * 100:.2f} %")
+            print(f"  PRECISION MEDIA PESATA SUI NODI:        {global_precision * 100:.2f} %")
+            print(f"  RECALL MEDIA PESATA SUI NODI:           {global_recall * 100:.2f} %")
+            print(f"  F1-SCORE MEDIA PESATA SUI NODI:         {global_f1 * 100:.2f} %")
         else:
+            global_mae = (mae_pesato_tot / total_global_samples) if total_global_samples > 0 else 0
             print(f"  Tipo di Modello:                        REGRESSORE")
-            print(f"  MAE MEDIO PESATO SUI NODI:              {global_federated_metric:.4f}")
+            print(f"  Testing Set Globale (Nodi Sommati):     {total_global_samples} campioni")
+            print("-" * 75)
+            print(f"  MAE MEDIO PESATO SUI NODI:              {global_mae:.4f}")
 
         print("═" * 75 + "\n")
 
