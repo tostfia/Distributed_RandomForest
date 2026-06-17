@@ -299,16 +299,16 @@ def main():
         print("=====================================================\n")
 
         print("Seleziona la modalità del configuratore:")
-        print("[1] Modalità Client Standard (Interattiva)")
-        print("[2] Modalità Test (Esegui test di sistema predefiniti)")
-        print("[3] Esci dal Client")
+        print("[1] Modalità Client Standard")
+        print("[2] Modalità Test (Esecuzione test di sistema predefiniti)")
+        print("[3] Esci")
         config_mode = get_input("Scelta: ", "1")
 
         if config_mode == "2":
             run_predefined_tests()
             continue
         elif config_mode == "3":
-            print("\nChiusura del Client configuratore. Arrivederci!")
+            print("\nChiusura del Client. Arrivederci!")
             break
         elif config_mode != "1":
             print("\n[ERRORE] Scelta non valida.")
@@ -317,8 +317,8 @@ def main():
         print("\n--- MENÙ OPERAZIONI ---")
         print("[1] Avvia processo di addestramento distribuito")
         print("[2] Avvia processo di inferenza distribuito")
-        print("[3] Verifica stato modello / Job ID")
-        print("[4] Esegui Baseline Locale (Singolo Nodo Sequenziale)")
+        print("[3] Verifica stato modello")
+        print("[4] Esegui Baseline Locale")
         print("[5] Torna al menù precedente")
         operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
         
