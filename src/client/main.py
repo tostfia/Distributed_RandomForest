@@ -167,26 +167,27 @@ def handle_training():
     environment = cfg.env
     mode = cfg.mode
 
-    # 3. Gestione Dinamica del Dataset Path / Sintetico
-    dataset_type = "real"  # Default
-    if mode == "centralized":
-        print("\n[3] Selezione del Dataset:")
-        print("  [1] Usa un dataset reale tramite URL/Path")
-        print("  [2] Genera un dataset sintetico di test per questa esecuzione")
-        dataset_choice = get_input("  Scegli l'opzione: ", "1")
-        
-        if dataset_choice == "2":
+    # 3. SELEZIONE INDIPENDENTE DELLA SORGENTE DATI (Reale vs Sintetico per entrambe le modalità)
+    print("\n[3] Selezione della Sorgente Dati:")
+    print("  [1] Usa il Dataset REALE (URL S3 pubblico ca-central-1)")
+    print("  [2] Genera un dataset SINTETICO per questa esecuzione")
+    dataset_choice = get_input("  Scegli l'opzione: ", "1")
+    
+    if dataset_choice == "2":
+        dataset_type = "synthetic"
+        if mode == "centralized":
             dataset_path = "/app/data/sintetic_data.csv"
-            dataset_type = "synthetic"
-            print(f"  [INFO] Utilizzo del dataset sintetico: {dataset_path}")
         else:
-            dataset_path = get_input("  • Inserisci l'URL o il path del dataset: ").strip()
-            if not dataset_path:
-                print("\n[ERRORE] Il path o l'URL del dataset è obbligatorio.")
-                return
+            dataset_path = "NATIVE_PARTITIONED"
+        print(f"  [INFO] Configurato Dataset SINTETICO: {dataset_path}")
     else:
-        dataset_path = "NATIVE_PARTITIONED"
-        print(f"\n[INFO] Modalità Federata selezionata. I dati si assumono già partizionati sui nodi.")
+        dataset_type = "real"
+        # Forniamo il file del Giovedì di CIC-IDS2018 come URL predefinito per i test dell'ETL
+        default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/Thursday-01-03-2018_TrafficForML_CICFlowMeter.csv"
+        
+        print("  • Inserisci l'URL S3 o il path locale del dataset reale.")
+        dataset_path = get_input(f"    (Premi INVIO per il default pubblico): \n    --> ", default_s3_url).strip()
+        print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
 
     # 4. Configurazione Iperparametri
     print("\n[4] Configurazione Matematica degli Alberi:")
