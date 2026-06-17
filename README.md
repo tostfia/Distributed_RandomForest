@@ -66,3 +66,7 @@ Inoltre, la classe Baseline rappresenta l'addestramento locale standard (non dis
 Nel nostro progetto si è scelto di utilizzare l'SDK per python di AWS, ovvero Boto3 che è possibile installare attraverso il comando: pip install boto3 botocore. 
 
 Inoltre, si procede con l'installazione di aws cli (seguendo le istruzioni della documentazione ufficiale seguendo il link riportato in descrizione a seconda del sistema operativo posseduto: https://docs.aws.amazon.com/it_it/cli/latest/userguide/getting-started-install.html)
+
+Per scaricare il file da s3, bisogna installare le librerie: pip install fsspec s3fs
+
+In realtà poi basta fare: pip install -r requirements.txt, poi per quanto riguarda aws instllazione di: pip install "botocore<1.43.0"
