@@ -178,7 +178,6 @@ class BaseOrchestrator(ABC):
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
         pass
 
-    # --- NUOVO METODO ASTRATTO PER L'INFERENZA ---
     @abstractmethod
     def _execute_inference_step(self, payload: dict):
         pass
@@ -187,9 +186,12 @@ class BaseOrchestrator(ABC):
         checkpoint_data = {"alberi_addestrati": current_alberi}
         
         if self.environment == "local":
-            os.makedirs("checkpoints", exist_ok=True)
-            with open(f"checkpoints/checkpoint_{job_id}.json", "w") as f:
-                json.dump(checkpoint_data, f)
+            local_cp_dir = os.path.join("./.local_storage", "checkpoints")
+            os.makedirs(local_cp_dir, exist_ok=True)
+            
+            cp_path = os.path.join(local_cp_dir, f"checkpoint_{job_id}.json")
+            with open(cp_path, "w", encoding="utf-8") as f:
+                json.dump(checkpoint_data, f, indent=2)
         else:
             try:
                 import pandas as pd
@@ -212,9 +214,9 @@ class BaseOrchestrator(ABC):
     def _load_checkpoint(self, job_id: str, existing_state: dict) -> int:
         db_val = existing_state.get("alberi_addestrati", 0)
         if self.environment == "local":
-            path = f"checkpoints/checkpoint_{job_id}.json"
+            path = os.path.join("./.local_storage", "checkpoints", f"checkpoint_{job_id}.json")
             if os.path.exists(path):
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     return json.load(f).get("alberi_addestrati", db_val)
         else:
             return db_val
@@ -222,7 +224,7 @@ class BaseOrchestrator(ABC):
 
     def _clean_checkpoint(self, job_id: str):
         if self.environment == "local":
-            path = f"checkpoints/checkpoint_{job_id}.json"
+            path = os.path.join("./.local_storage", "checkpoints", f"checkpoint_{job_id}.json")
             if os.path.exists(path):
                 os.remove(path)
     

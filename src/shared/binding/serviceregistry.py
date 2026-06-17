@@ -5,7 +5,6 @@ import boto3
 from src.shared.config import SystemConfig
 from src.shared.mock_aws.dynamodb import dynamo_db as mock_dynamodb
 
-# 1. Inizializziamo la configurazione globale
 cfg = SystemConfig()
 
 class ServiceRegistry:
@@ -57,8 +56,7 @@ class ServiceRegistry:
         current_time = int(time.time())
         available_workers = {}
 
-        # Sfruttiamo il parametro environment passato (o cfg.env)
-        if environment == "local":
+        if cfg.env == "local":
             response = mock_dynamodb.scan_table(cls.WORKERS_TABLE)
             items = response.get("Items", [])
         else:
@@ -152,7 +150,6 @@ class ServiceRegistry:
                 UpdateExpression="set last_heartbeat = :t",
                 ExpressionAttributeValues={':t': int(time.time())}
             )
-        print(f"[ServiceRegistry] Heartbeat aggiornato per orchestratore '{orchestrator_name}'.")
 
     @classmethod
     def _extract_data(cls, data: dict, key: str):
