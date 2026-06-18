@@ -7,7 +7,9 @@ from src.shared.mock_aws.interfaces import SQSQueueInterface
 
 class MockSQSQueue(SQSQueueInterface):
     def __init__(self):
-        storage_dir = os.path.abspath(os.path.join(".", ".local_storage"))
+        # Legge da env, fallback alla cartella locale per retrocompatibilità
+        base = os.environ.get("LOCAL_STORAGE_PATH", os.path.join(".", ".local_storage"))
+        storage_dir = os.path.abspath(base)
         os.makedirs(storage_dir, exist_ok=True)
         
         self.file_path = os.path.join(storage_dir, "sqs_state.json")

@@ -9,7 +9,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.utils.extmath import weighted_mode
 from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
 
-from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
+from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.config import SystemConfig
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry

@@ -1,17 +1,38 @@
 services:
+  orchestrator:
+    image: ${IMAGE_NAME:-rf-worker-locale:latest}
+    container_name: ${EC2_ID:-locale}_orchestrator_${TRAINING_MODE:-centralized}
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ENV_MODE=${ENV_MODE:-local}
+      - TRAINING_MODE=${TRAINING_MODE:-centralized}
+      - EC2_ID=${EC2_ID:-Locale}
+      - LOCAL_STORAGE_PATH=/app/.local_storage   # ← path fisso nel container
+    volumes:
+      - ./data:/app/data
+      - ./.local_storage:/app/.local_storage     
+    command: python -m src.master.orchestrator.main
+    restart: on-failure
+
   worker-01:
-    # Immagine: locale di default, o quella di Docker Hub su AWS
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
     ports:
       - "18861:18861"
     environment:
-      - RPC_HOST=127.0.0.1
+      - PYTHONUNBUFFERED=1
+      - RPC_HOST=worker-01
       - RPC_PORT=18861
+      - RPC_ADVERTISED_HOST=worker-01
+      - ENV_MODE=${ENV_MODE:-local}
+      - TRAINING_MODE=${TRAINING_MODE:-centralized}
+      - LOCAL_STORAGE_PATH=/app/.local_storage  
     volumes:
       - ./data:/app/data
-    # Il comando si auto-compone in base a come configuri le variabili
-    command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+      - ./.local_storage:/app/.local_storage       
+    command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+    depends_on:
+      - orchestrator
     restart: on-failure
 
   worker-02:
@@ -20,9 +41,17 @@ services:
     ports:
       - "18862:18862"
     environment:
-      - RPC_HOST=127.0.0.1
+      - PYTHONUNBUFFERED=1
+      - RPC_HOST=worker-02
       - RPC_PORT=18862
+      - RPC_ADVERTISED_HOST=worker-02
+      - ENV_MODE=${ENV_MODE:-local}
+      - TRAINING_MODE=${TRAINING_MODE:-centralized}
+      - LOCAL_STORAGE_PATH=/app/.local_storage  
     volumes:
       - ./data:/app/data
-    command: python -m src.worker.run_worker Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+      - ./.local_storage:/app/.local_storage      
+    command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+    depends_on:
+      - orchestrator
     restart: on-failure

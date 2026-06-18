@@ -8,8 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.utils.extmath import weighted_mode
 from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
-
-from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
+import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
@@ -64,7 +63,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             preprocessor = CICIDSPreprocessor(target_column=target_col)
             df_clean = preprocessor.process(df_raw)
     
-        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
+        splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
         train_df, test_df = splitter.split(df_clean)
 
         # --- FEATURE SELECTION (Solo Real) ---

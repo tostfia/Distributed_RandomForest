@@ -5,7 +5,8 @@ from typing import Optional
 
 class MockDynamoDB:
     def __init__(self):
-        self.base_dir = os.path.abspath(os.path.join(".", ".local_storage", "db_files"))
+        base = os.environ.get("LOCAL_STORAGE_PATH", os.path.join(".", ".local_storage"))
+        self.base_dir = os.path.abspath(os.path.join(base, "db_files"))
         os.makedirs(self.base_dir, exist_ok=True)
 
     def _get_table_path(self, table_name: str) -> str:
