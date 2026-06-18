@@ -173,8 +173,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         #Scansione dei nodi worker attivi e disponibili (con heartbeat aggiornato)
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
-            # Invece di far fallire tutto subito, potresti mettere il messaggio 
-            # di nuovo in coda con un delay (es. sleep) o loggare un avviso meno critico.
+            
             print("[!] Attenzione: Nessun worker pronto. Aspetto...")
             time.sleep(10) 
             return False # Torna al loop principale senza far fallire il job
