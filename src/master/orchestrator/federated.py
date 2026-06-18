@@ -1,92 +1,379 @@
+import pickle
 import os
-import json
 import time
 import rpyc
+import traceback
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.shared.binding.serviceregistry import ServiceRegistry
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.utils.extmath import weighted_mode
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
 
+from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
+from src.shared.config import SystemConfig
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
+from src.shared.binding.serviceregistry import ServiceRegistry
+from src.shared.factory import DatasetDAOFactory
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
+from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
+from src.shared.utilities.preprocessing import CICIDSPreprocessor
+from src.shared.utilities.featureselection import CICIDSFeatureSelector
+
 
 class FederatedOrchestrator(BaseOrchestrator):
-    def __init__(self, environment: str = "local"):
-        # Recuperiamo il Process ID per generare un nome univoco per ogni replica federata
+    def __init__(self):
+        # 1. Recuperiamo la configurazione dal file .env tramite SystemConfig
+        self.cfg = SystemConfig()
+        
+        # Recuperiamo il Process ID per distinguere le repliche nei log
         pid = os.getpid()
+        
+        # Inizializziamo la classe base in ascolto sulla coda federata
         super().__init__(
             orchestrator_name=f"Orchestrator-Federato-{pid}",
-            queue_name="federated_queue",
-            environment=environment
+            queue_name="federated_queue"
         )
+        self.current_job_id = None
+        self.worker_shards_paths = {}  # Mappa per tracciare i path dei dataset partizionati per ciascun worker
 
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
-        """Implementazione del coordinamento e dell'aggregazione (Federated Averaging)."""
+    def _resolve_dataset_type(self, payload: dict) -> str:
+        dataset_type = payload.get("dataset_type")
+        if dataset_type:
+            return str(dataset_type).strip().lower()
+        return "real"
+
+    def _prepare_data_federated(self, payload: dict, base_seed: int, worker_names: list):
+        """
+        Scarica il dataset dall'URL, lo splitta in 80/20 e lo frammenta in N shard
+        salvandoli direttamente nelle partizioni/cache locali dei rispettivi worker.
+        """
+        self.current_job_id = payload.get("job_id", "unknown_job")
+        dataset_path = payload.get("dataset_path")
+        dataset_type = self._resolve_dataset_type(payload)
+        target_col = "Label"
+        num_workers = len(worker_names)
+
+        print(f"\n[{self.orchestrator_name}] Avvio ETL FEDERATO. Tipo dataset: {dataset_type}")
+
+        # --- ESTRAZIONE (Se Sintetico la partizione nativa avviene a livello worker) ---
+        if dataset_type == "synthetic":
+            print(f"[{self.orchestrator_name}] Dataset sintetico rilevato. La generazione avverrà nativamente sui nodi.")
+            for i, name in enumerate(worker_names):
+                self.worker_shards_paths[name] = f"NATIVE_PARTITIONED|{i}"
+            return
+
+        # --- ESTRAZIONE DATASET REALE (Da URL) ---
+        if not dataset_path: 
+            raise ValueError("dataset_path (URL) mancante nel payload per la modalità reale.")
         
-        step_dim = target_alberi - start_alberi
-        round_num = (start_alberi // step_dim) + 1
+        loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
+        df_raw = loader.load()
+        preprocessor = CICIDSPreprocessor(target_column=target_col)
+        df_clean = preprocessor.process(df_raw)
+
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
+        train_df, test_df = splitter.split(df_clean)
+
+        # --- FEATURE SELECTION ---
+        fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
+        train_df = fs.fit_transform(train_df)
+        test_df = fs.transform(test_df)
+
+        # --- PARTIZIONAMENTO E DISTRIBUZIONE SULLE CACHE DEI WORKER VIA DAO ---
+        print(f"[{self.orchestrator_name}] Partizionamento dei DataFrame in {num_workers} shard bilanciati...")
         
-        print(f"   [{self.orchestrator_name}] === AVVIO ROUND {round_num} ===")
-        print(f"   [{self.orchestrator_name}] -> Distribuzione calcolo alberi ({start_alberi} a {target_alberi}) ai nodi remoti... (Seed: {seed})")
+        # Divisione matematica delle righe dei due set
+        train_shards = np.array_split(train_df, num_workers)
+        test_shards = np.array_split(test_df, num_workers)
+        
+        dao = DatasetDAOFactory.get_dao(self.environment)
+
+        for i, name in enumerate(worker_names):
+            if self.environment == "aws":
+                w_train_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/train_{self.current_job_id}.csv"
+                w_test_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/test_{self.current_job_id}.csv"
+            else:
+                w_train_path = f"./{name}_cache/train_{self.current_job_id}.csv"
+                w_test_path = f"./{name}_cache/test_{self.current_job_id}.csv"
+                os.makedirs(os.path.dirname(w_train_path), exist_ok=True)
+
+            # Salvataggio degli shard
+            dao.save_dataset(path=w_train_path, df=train_shards[i])
+            dao.save_dataset(path=w_test_path, df=test_shards[i])
+            
+            # Tracciamo solo il path di train da passare via RPC; il test verrà caricato implicitamente nell'inferenza
+            self.worker_shards_paths[name] = w_train_path
+            print(f" [{self.orchestrator_name}] Shard inviato alla cache di {name} -> {w_train_path}")
+
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
+        self.current_job_id = payload.get("job_id", "unknown_job")
+        total_step_trees = target_alberi - start_alberi
+        round_num = (start_alberi // total_step_trees) + 1
+        
+        print(f"\n [{self.orchestrator_name}] === AVVIO ROUND FEDERATO RPC {round_num} ===")
+
+        # --- SCOPERTA DEI WORKER ---
+        while True:
+            available_workers = ServiceRegistry.get_available_workers(self.environment)
+            if available_workers:
+                break
+            print(f" [{self.orchestrator_name}] Nessun worker federato disponibile. In Attesa...")
+            time.sleep(10)
+
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+
+        # --- PREPARAZIONE E PARTIZIONAMENTO DATI (Se non ancora effettuato per questo Job) ---
+        if not self.worker_shards_paths:
+            self._prepare_data_federated(payload, seed, worker_names)
+
+        trees_per_worker = total_step_trees // num_workers
+        remainder = total_step_trees % num_workers
+
+        hp = payload.get("hyperparameters", {})
+        max_depth = hp.get("max_depth", None)
+        tree_type = hp.get("tree_type", "classifier")
+
+        all_trained_trees = []
+        current_seed_offset = seed
+        connessioni_attive = []
+
+        # --- FUNZIONE INTERNA DI CHIAMATA RPC ADATTATA ---
+        def _federated_rpc_call(w_name, w_info, n_trees, w_seed):
+            print(f" [RPC -> {w_name}] Invio comando training FEDERATO locale ({n_trees} alberi)...")
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            connessioni_attive.append(conn)  
+            try: 
+                # Il worker riceve il path specifico della propria cache locale/S3
+                federated_source_info = self.worker_shards_paths[w_name]
+
+                remote_trees = conn.root.train_subset_forest(
+                    source_info=federated_source_info, 
+                    num_trees=n_trees, 
+                    base_seed=w_seed, 
+                    max_depth=max_depth
+                )
+                return remote_trees
+            except Exception as e:
+                print(f"   [ERRORE RPC FEDERATO] Connessione o calcolo fallito con {w_name}: {e}")
+                raise e
+
+        # --- DISTRIBUZIONE PARALLELA TRAMITE THREAD POOL ---
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_worker = {}
+            for i, name in enumerate(worker_names):
+                info = available_workers[name]
+                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+
+                if allocated_trees == 0:
+                    continue
+
+                f = executor.submit(_federated_rpc_call, name, info, allocated_trees, current_seed_offset)
+                future_to_worker[f] = name
+                current_seed_offset += allocated_trees
+
+            for future in as_completed(future_to_worker):
+                w_name = future_to_worker[future]
+                try:
+                    result_raw = future.result()
+                    result_trees = pickle.loads(result_raw) if isinstance(result_raw, bytes) else result_raw
+                    all_trained_trees.extend(result_trees)
+                    print(f"   [RPC <- {w_name}] Ricevuti con successo {len(result_trees)} alberi federati.")
+                except Exception as e:
+                    print(f"   [ERRORE CRITICO FEDERATO] Il worker '{w_name}' ha fallito nel round: {e}")
+                    raise e  
+
+        print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC attive...")
+        for conn in connessioni_attive:
+            try: conn.close()
+            except Exception: pass
+
+        # --- RICOMPOSIZIONE E AGGREGAZIONE DEL MODELLO GLOBALE ---
+        if len(all_trained_trees) > 0:
+            if target_alberi == hp.get("n_estimators", 100):
+                print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale federata...")
+                try:
+                    n_features = all_trained_trees[0].n_features_in_
+
+                    if tree_type == "classifier":
+                        global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
+                        global_model.classes_ = np.array([0, 1]) 
+                        global_model.n_classes_ = 2
+                    else:
+                        global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
+                    
+                    global_model.estimators_ = all_trained_trees
+                    global_model.n_features_in_ = n_features
+                    global_model.n_outputs_ = 1
+                    
+                    TARGET_DIR = "./saved_models"
+                    os.makedirs(TARGET_DIR, exist_ok=True)
+                    model_path = os.path.join(TARGET_DIR, f"model_federated_{self.current_job_id}.pkl")
+                    
+                    with open(model_path, "wb") as f:
+                        pickle.dump(global_model, f)
+                    
+                    print(f"   [{self.orchestrator_name}] [OK] Modello finale federato salvato in '{model_path}'.")
+                except Exception as e:
+                    print(f"   [ERRORE AGGREGAZIONE FEDERATA] Impossibile creare il modello finale: {e}")
+                    traceback.print_exc()
+                    return False
+            return True
+
+        return False
+    
+    def _execute_inference_step(self, payload: dict):
+        job_id = payload.get("job_id")
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
+
+        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA FEDERATA ===")
+
+        model_path = os.path.join("./saved_models", f"model_federated_{job_id}.pkl")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Modello globale federato non trovato in '{model_path}'.")
+
+        with open(model_path, "rb") as f:
+            global_model = pickle.load(f)
+        
+        all_trees = global_model.estimators_
+        total_trees = len(all_trees)
 
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
-            raise RuntimeError(f"Nessun worker disponibile per eseguire il training step. Carico totale: {step_dim} alberi.")
-        
+            raise RuntimeError("Nessun worker federato disponibile nel Service Registry per l'inferenza.")
+
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
-        print(f"   [{self.orchestrator_name}] Worker disponibili: {num_workers} -> {worker_names}")
-        
-        hp = payload.get("hyperparameters", {})
-        max_depth = hp.get("max_depth", None)
-        #DA CAMBIARE
-        source_info = payload.get("data_url") or payload.get("dataset_url", "federated_shared")
 
-        # Funzione di chiamata RPC remota per addestramento locale sul singolo nodo federato
-        def _federated_rpc_call(w_name, w_info):
-            print(f"   [FED-ROUND] Nodo '{w_name}' avvia addestramento locale di {step_dim} alberi...")
+        trees_per_worker = total_trees // num_workers
+        remainder = total_trees % num_workers
+
+        connessioni_attive = []
+        # Qui terremo traccia delle metriche aggregate pesate
+        acc_pesata_tot, prec_pesata_tot, rec_pesata_tot, f1_pesata_tot, mae_pesato_tot = 0, 0, 0, 0, 0
+        total_global_samples = 0
+
+        # --- FUNZIONE DI INF-CALL MODIFICATA CON CALCOLO DI METRICHE AVANZATE SUL NODO ---
+        def _rpc_federated_inference_call(w_name, w_info, subset_trees_chunk):
+            print(f" [RPC FED-INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi globali...")
             conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
-            try:
-                # Ogni nodo federato produce i propri stimatori locali sulla sua frazione di dati
-                local_model_shard = conn.root.train_subset_forest(
-                    source_info=source_info, 
-                    num_trees=step_dim,
-                    base_seed=seed,  # Manteniamo lo stesso seed coordinato per mantenere allineati i round
-                    max_depth=max_depth
-                )
-                return w_name, local_model_shard
-            finally:
-                conn.close()
+            connessioni_attive.append(conn)
 
-        # 2. Distribuzione asincrona del round a tutti i nodi scoperti in parallelo
-        local_updates = {}
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(_federated_rpc_call, name, available_workers[name]) for name in worker_names]
+            # Inoltro degli alberi lasciando i dati a None -> Forza il worker a caricare il proprio shard locale di test
+            serialized_chunk = pickle.dumps(subset_trees_chunk)
+            raw_response = conn.root.predict_subset_forest(serialized_chunk, None)
+            sub_predictions = pickle.loads(raw_response) 
+
+            if hasattr(conn.root, "get_local_y_test"):
+                raw_y_test = conn.root.get_local_y_test()
+            elif hasattr(conn.root, "y_test"):
+                raw_y_test = conn.root.y_test
+            else:
+                raise AttributeError(f"Il worker {w_name} non espone y_test.")
             
-            for future in as_completed(futures):
+            y_test_locale = pickle.loads(raw_y_test) if isinstance(raw_y_test, bytes) else np.array(raw_y_test)
+            matrix_pred_locale = np.array(sub_predictions)
+            size_test = len(y_test_locale)
+
+            if tree_type == "classifier":
+                uniform_weights = np.ones(matrix_pred_locale.shape[0])
+                final_local_pred, _ = weighted_mode(matrix_pred_locale, uniform_weights, axis=0)
+                final_local_pred = final_local_pred.ravel()
+                
+                # Calcolo metriche locali complete per il singolo worker
+                acc = np.mean(final_local_pred == y_test_locale)
+                prec = precision_score(y_test_locale, final_local_pred, zero_division=0)
+                rec = recall_score(y_test_locale, final_local_pred, zero_division=0)
+                f1_s = f1_score(y_test_locale, final_local_pred, zero_division=0)
+                cm = confusion_matrix(y_test_locale, final_local_pred)
+                rep = classification_report(y_test_locale, final_local_pred, zero_division=0)
+                
+                return w_name, "classifier", size_test, {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1_s, "cm": cm, "report": rep}
+            else:
+                final_local_pred = np.mean(matrix_pred_locale, axis=0)
+                mae = np.mean(np.abs(final_local_pred - y_test_locale))
+                return w_name, "regressor", size_test, {"mae": mae}
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_worker = {}
+            current_tree_idx = 0
+
+            for i, name in enumerate(worker_names):
+                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+                if allocated_trees == 0:
+                    continue
+
+                chunk = all_trees[current_tree_idx : current_tree_idx + allocated_trees]
+                current_tree_idx += allocated_trees
+
+                f = executor.submit(_rpc_federated_inference_call, name, available_workers[name], chunk)
+                future_to_worker[f] = name
+
+            for future in as_completed(future_to_worker):
+                w_name = future_to_worker[future]
                 try:
-                    w_name, local_trees = future.result()
-                    local_updates[w_name] = local_trees
-                    print(f"   [{self.orchestrator_name}] Update del modello scaricato con successo dal nodo federato '{w_name}'.")
+                    name_w, m_type, size_test, res = future.result()
+                    total_global_samples += size_test
+                    
+                    print(f"\n   [RPC <- {name_w}] Validazione completata sullo Shard Locale ({size_test} campioni).")
+                    print("   " + "-"*60)
+                    
+                    if m_type == "classifier":
+                        # Log del singolo nodo federato
+                        print(f"         Accuracy Locale:      {res['accuracy'] * 100:.2f} %")
+                        print(f"         Precision Locale:     {res['precision'] * 100:.2f} %")
+                        print(f"         Recall Locale:        {res['recall'] * 100:.2f} %")
+                        print(f"         F1-Score Locale:      {res['f1'] * 100:.2f} %")
+                        print("         Matrice Confusione Locale:")
+                        print(res['cm'])
+                        
+                        # Accumulo pesato per la metrica globale finale
+                        acc_pesata_tot += res['accuracy'] * size_test
+                        prec_pesata_tot += res['precision'] * size_test
+                        rec_pesata_tot += res['recall'] * size_test
+                        f1_pesata_tot += res['f1'] * size_test
+                    else:
+                        print(f"         MAE Locale:           {res['mae']:.4f}")
+                        mae_pesato_tot += res['mae'] * size_test
+        
                 except Exception as e:
-                    print(f"   [FAILOVER ROUND] Errore critico durante il round sul nodo federato '{w_name}': {e}")
+                    print(f"   [ERRORE CRITICO FED-INFERENZA] Fallimento computazione sul worker '{w_name}': {e}")
                     raise e
 
-        # 3. Fase finale di Aggregazione (Simulazione logica del Federated Averaging)
-        print(f"   [{self.orchestrator_name}] -> Ricezione dei pesi locali dai nodi completata.")
-        print(f"   [{self.orchestrator_name}] -> Aggregazione e generazione del Modello Globale per il Round {round_num} eseguita.")
-        time.sleep(0.5)
+        for conn in connessioni_attive:
+            try: conn.close()
+            except Exception: pass
+
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE PERFORMANCE MODELLO FEDERATO GLOBALE (JOB: {job_id[:8]})")
+        print("═" * 75)
+
+        if tree_type == "classifier":
+            # Calcolo delle medie globali pesate sulla dimension dei test set dei nodi
+            global_accuracy = (acc_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_precision = (prec_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_recall = (rec_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
+            global_f1 = (f1_pesata_tot / total_global_samples) if total_global_samples > 0 else 0
             
+            print(f"  Tipo di Modello:                        CLASSIFICATORE")
+            print(f"  Testing Set Globale (Nodi Sommati):     {total_global_samples} campioni")
+            print("-" * 75)
+            print(f"  ACCURACY MEDIA PESATA SUI NODI:         {global_accuracy * 100:.2f} %")
+            print(f"  PRECISION MEDIA PESATA SUI NODI:        {global_precision * 100:.2f} %")
+            print(f"  RECALL MEDIA PESATA SUI NODI:           {global_recall * 100:.2f} %")
+            print(f"  F1-SCORE MEDIA PESATA SUI NODI:         {global_f1 * 100:.2f} %")
+        else:
+            global_mae = (mae_pesato_tot / total_global_samples) if total_global_samples > 0 else 0
+            print(f"  Tipo di Modello:                        REGRESSORE")
+            print(f"  Testing Set Globale (Nodi Sommati):     {total_global_samples} campioni")
+            print("-" * 75)
+            print(f"  MAE MEDIO PESATO SUI NODI:              {global_mae:.4f}")
+
+        print("═" * 75 + "\n")
 
 
 if __name__ == "__main__":
-    # Lettura dinamica dell'ambiente configurato nel config.json locale
-    env = "local"
-    if os.path.exists("config.json"):
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-                env = config.get("environment", "local")
-        except Exception:
-            pass  # Fallback su local se il file è corrotto o mancante
-            
-    # Istanziamo e avviamo l'orchestratore federato
-    orchestrator = FederatedOrchestrator(environment=env)
+    print("[BOOT] Avvio del nodo Orchestratore Federato...")
+    orchestrator = FederatedOrchestrator()
     orchestrator.start()

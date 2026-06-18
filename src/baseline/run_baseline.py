@@ -12,26 +12,47 @@ from src.shared.utilities.datasplitter import StratifiedDataSplitter
 
 def run_baseline():
     print("=====================================================")
-    print("      AVVIO BASELINE NON DISTRIBUITA (LOCAL)         ")
+    print("      AVVIO BASELINE NON DISTRIBUITA (SINGOLO NODO)  ")
     print("=====================================================\n")
 
-    # 1. Lettura configurazione dal config.json
+    # 1. Tentativo di lettura dal config.json per i soli iperparametri matematici
     config_path = "config.json"
     config = {}
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError:
+                print("[CONFIG] config.json corrotto o illeggibile. Uso i default della baseline.")
     
-    # Estraiamo i parametri
-    dataset_type = config.get("dataset_type", "real")
-    dataset_url = config.get("dataset_path", "./dataset_completo")
-    dataset_seed = config.get("dataset_seed", 123)
-    
+    # 2. IPERPARAMETRI MATEMATICI (Estratti se presenti, altrimenti default standard di tesi)
     hp = config.get("hyperparameters", {})
     n_estimators = hp.get("n_estimators", 100)
-    max_depth = hp.get("max_depth", 10)
-    max_samples = hp.get("max_samples", 0.2)
+    max_depth = hp.get("max_depth", None)  # None = illimitata, standard per Random Forest completo
     class_weight = hp.get("class_weight", "balanced")
+    
+    # 3. FORZATURA LOGICA CENTRALIZZATA SEQUENZIALE
+    # La baseline allena un Random Forest standard: servono bootstrap e campionamento dei dati.
+    bootstrap = True 
+    max_samples = 0.2  # Campionamento classico al 20% per albero, tipico delle baseline sequenziali grandi
+    
+    # 4. CONFIGURAZIONE DATASET AGNOSTICA
+    # Forziamo il caricamento del file locale sul singolo nodo, ignorando cosa dice il cluster.
+    dataset_seed = config.get("dataset_seed", 123)
+    
+    # Verifichiamo se l'utente nel config precedente stava usando un dataset sintetico o reale
+    if config.get("dataset_type") == "synthetic":
+        dataset_type = "synthetic"
+        dataset_url = "/app/data/sintetic_data.csv"
+        print("[BASELINE] Rilevato target sintetico. Esecuzione su dati sintetici locali.")
+    else:
+        dataset_type = "real"
+        dataset_url = "/app/data/dataset_finale_binarizzato.csv"
+        print("[BASELINE] Esecuzione standard su dataset reale locale.")
+
+    print(f" • Configurazione Modello -> Alberi: {n_estimators} | Profondità: {max_depth} | Bootstrap: {bootstrap} (samples: {max_samples})")
+    print(f" • Configurazione Dati    -> Path: {dataset_url} ({dataset_type.upper()})")
+    print("-" * 53)
     
     # ---------------------------------------------------------
     # FASE 1: ETL (Extract, Transform, Load)
@@ -86,6 +107,7 @@ def run_baseline():
         n_estimators=n_estimators,
         max_depth=max_depth,
         max_samples=max_samples,
+        bootstrap=bootstrap,
         class_weight=class_weight,
         n_jobs=-1, 
         random_state=dataset_seed

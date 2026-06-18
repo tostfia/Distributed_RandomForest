@@ -57,3 +57,16 @@ docker service logs mio-progetto-drf_orchestrator
 
 Rimuove tutto il cluster: 
 docker stack rm mio-progetto-drf
+
+Dal momento che il progetto supporta differenti modalità operative, si è preferito aggiungere un file di configurazione in cui è possibile scegliere se lavorare in modalità federata oppure centralizzata, in locale oppure tramite aws learner lab. Per questo, a inizio progetto, si deve installare una libreria:  pip install python-dotenv
+
+
+Inoltre, la classe Baseline rappresenta l'addestramento locale standard (non distribuito), nonnché quello realizzato su Colab, introdotto esclusivamente per poter effettuare un conftonto delle prestazioni con quello implementato in modo distribuito. 
+
+Nel nostro progetto si è scelto di utilizzare l'SDK per python di AWS, ovvero Boto3 che è possibile installare attraverso il comando: pip install boto3 botocore. 
+
+Inoltre, si procede con l'installazione di aws cli (seguendo le istruzioni della documentazione ufficiale seguendo il link riportato in descrizione a seconda del sistema operativo posseduto: https://docs.aws.amazon.com/it_it/cli/latest/userguide/getting-started-install.html)
+
+Per scaricare il file da s3, bisogna installare le librerie: pip install fsspec s3fs
+
+In realtà poi basta fare: pip install -r requirements.txt, poi per quanto riguarda aws instllazione di: pip install "botocore<1.43.0"

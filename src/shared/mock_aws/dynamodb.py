@@ -1,11 +1,11 @@
 import json
 import os
+import time
 from typing import Optional
 
 class MockDynamoDB:
     def __init__(self):
-        # Definiamo una cartella "db_files" all'interno della cartella del mock
-        self.base_dir = os.path.abspath(os.path.join("data", "db_files"))
+        self.base_dir = os.path.abspath(os.path.join(".", ".local_storage", "db_files"))
         os.makedirs(self.base_dir, exist_ok=True)
 
     def _get_table_path(self, table_name: str) -> str:
@@ -17,26 +17,31 @@ class MockDynamoDB:
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return {}
 
-        import time
         # Tentiamo di leggere per un numero massimo di volte (es. 5)
         for attempt in range(5):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except json.JSONDecodeError:
-                # Aspetta un po' prima di riprovare
+            except (json.JSONDecodeError, PermissionError):
+                # Aspetta un po' prima di riprovare (concorrenza tra processi)
                 time.sleep(0.05)
         
-        # Se dopo 5 volte fallisce ancora, restituiamo un dizionario vuoto
-        # per evitare il crash, e logghiamo l'errore
         print(f"[ERRORE] Impossibile leggere il file {table_name}.json dopo 5 tentativi.")
         return {}
 
     def _save_table(self, table_name: str, data: dict):
-        """Salva i dati aggiornati della tabella nel file JSON."""
+        """Salva i dati aggiornati della tabella nel file JSON con retry concorrenziale."""
         path = self._get_table_path(table_name)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        
+        for attempt in range(5):
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                return
+            except (PermissionError, IOError):
+                time.sleep(0.05)
+        
+        print(f"[ERRORE Critico] Impossibile scrivere la tabella {table_name} su disco.")
     
     def _get_primary_key_name(self, table_name: str) -> str:
         """Restituisce il nome della chiave primaria per una tabella specifica."""
@@ -52,21 +57,17 @@ class MockDynamoDB:
             raise ValueError(f"Tabella '{table_name}' non riconosciuta per determinare la chiave primaria.")
 
     def put_item(self, table_name: str, key: str, value: dict):
-        # Forza la chiave a stringa
         str_key = str(key)
         
-        # Carica la tabella dal file, aggiorna il record e salva su disco
         table = self._load_table(table_name)
         table[str_key] = value
         self._save_table(table_name, table)
         
-        # Log pulito e dinamico a seconda dei dati presenti nel payload
         info = f"Stato: {value.get('status')}" if "status" in value else f"Dati: {list(value.keys())}"
         print(f"[Mock DynamoDB] Tabella '{table_name}' -> Scritto ID: {str_key[:8]}... | {info}")
 
     def get_item(self, table_name: str, key: str) -> Optional[dict]:
         str_key = str(key)
-        # Carica la tabella in tempo reale dal file JSON
         table = self._load_table(table_name)
         raw_item = table.get(str_key)
 
@@ -80,7 +81,7 @@ class MockDynamoDB:
         return {}
 
     def delete_item(self, table_name: str, key: str) -> bool:
-        """Rimuove un record dal file JSON (utile per ripulire stati o Service Discovery)."""
+        """Rimuove un record dal file JSON."""
         str_key = str(key)
         table = self._load_table(table_name)
         if str_key in table:
@@ -91,7 +92,7 @@ class MockDynamoDB:
         return False
     
     def scan_table(self, table_name: str) -> dict:
-        """Restituisce tutti i record di una tabella (simulando l'operazione di scan)."""
+        """Restituisce tutti i record di una tabella."""
         table_data = self._load_table(table_name)
         items_list = []
         pk_name = self._get_primary_key_name(table_name)

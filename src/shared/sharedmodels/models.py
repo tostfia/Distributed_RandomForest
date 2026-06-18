@@ -1,11 +1,9 @@
 import uuid
-
 from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional
 
 
 class Hyperparameters(BaseModel):
-
     n_estimators: int
     max_depth: Optional[int] = None
     class_weight: Optional[str] = None
@@ -23,19 +21,28 @@ class Hyperparameters(BaseModel):
 
 
 class TrainingRequest(BaseModel):
-
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     environment: str
     mode: str
     dataset_path: str
+    dataset_type: str
     hyperparameters: Hyperparameters
 
 
 class TrainingRequestWorker(BaseModel):
-
     url_dataset: str
-    job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    job_id: str
     task_id: str
     mode: str
+    dataset_type: str
     hyperparameters: Hyperparameters
     seed: int
+
+
+class InferenceRequest(BaseModel):
+    inference_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    request_type: Literal["INFERENCE"] = "INFERENCE"
+    job_id: str
+    data_url: Optional[str] = None
+    environment: str
+    hyperparameters: Hyperparameters

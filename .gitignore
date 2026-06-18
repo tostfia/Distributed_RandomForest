@@ -4,10 +4,23 @@
 .env.local
 .env.*.local
 
+# Tooling e pacchetti di installazione AWS (locali)
+awscliv2.zip
+aws/
+
 # === DATI LOCALI / DATABASE FINTO ===
 # Impedisce di caricare su Git i file JSON generati dai test locali di DynamoDB
 data/db_files/
 *.json
+
+dataset_cache/
+
+# === STORAGE LOCALE CONDIVISO (MOCK CLUSTER) ===
+# Centralizzazione di tabelle JSON, code SQS, config locali e checkpoint
+.local_storage/
+
+# Escludi i dataset CSV (sia il dataset originale che quello campionato)
+data/*.csv
 
 # === PYTHON CACHE / BYTECODE ===
 # File generati automaticamente da Python

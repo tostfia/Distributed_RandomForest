@@ -1,26 +1,23 @@
 import os
 from typing import Optional
-
 import pandas as pd
 
-from shared.utilities.loader.datasetLoader import DatasetLoader
-from shared.utilities.preprocessing import CICIDSPreprocessor
+from src.shared.config import SystemConfig
+from src.dataset.dataset_dao_factory import DatasetDAOFactory
+from src.shared.utilities.loader.datasetLoader import DatasetLoader
+from src.shared.utilities.preprocessing import CICIDSPreprocessor
 
 
 class DatasetETLManager:
     """
-    Coordina la pipeline ETL del dataset.
+    Coordina la pipeline ETL del dataset rispettando l'ambiente (.env).
 
     Extract:
-        usa un DatasetLoader.
-
+        Usa un DatasetLoader (Grezzo, Sintetico, ecc.).
     Transform:
-        applica opzionalmente un preprocessor.
-
+        Applica opzionalmente il CICIDSPreprocessor.
     Load:
-        salva il DataFrame risultante su path locale o S3.
-
-    Questa classe è il punto di aggancio con l'Orchestratore.
+        Salva il DataFrame risultante tramite il DAO corretto (Locale o S3).
     """
 
     def __init__(
@@ -30,34 +27,21 @@ class DatasetETLManager:
     ):
         self.loader = loader
         self.preprocessor = preprocessor
+        # Inizializziamo la configurazione di sistema legata all'env
+        self.cfg = SystemConfig()
 
     def run(self, output_url: str) -> str:
         """
         Esegue Extract, Transform e Load.
-
-        Parameters
-        ----------
-        output_url:
-            Path locale o S3 dove salvare il dataset pulito.
-
-        Returns
-        -------
-        str
-            Lo stesso output_url, da passare poi ai Worker.
         """
-
         df = self.run_to_dataframe()
         self._save_dataframe(df, output_url)
-
         return output_url
 
     def run_to_dataframe(self) -> pd.DataFrame:
         """
         Esegue Extract e Transform, restituendo il DataFrame.
-
-        Utile per test locali o notebook.
         """
-
         df = self.loader.load()
 
         if self.preprocessor is not None:
@@ -65,36 +49,29 @@ class DatasetETLManager:
 
         return df
 
-    @staticmethod
     def _save_dataframe(
+        self,
         df: pd.DataFrame,
         output_url: str,
     ) -> None:
         """
-        Salva un DataFrame su file locale o S3.
+        Salva un DataFrame delegando al DAO corretto in base all'ambiente.
         """
-
-        print(f"Salvataggio dataset su: {output_url}")
-
-        storage_options = None
-
-        if output_url.startswith("s3://"):
-            storage_options = {"anon": False}
-        else:
-            output_dir = os.path.dirname(output_url)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
+        print(f"[ETL-Manager] Salvataggio dataset richiesto su: {output_url}")
+        print(f"[ETL-Manager] Infrastruttura rilevata dal .env: {self.cfg.env.upper()}")
 
         try:
-            df.to_csv(
-                output_url,
-                index=False,
-                storage_options=storage_options,
-            )
+            # Sfruttiamo la Factory per ottenere il DAO corretto (LocalFileSystemDAO o AwsS3DAO)
+            dao = DatasetDAOFactory.get_dao(self.cfg.env)
+            
+            # Utilizziamo il metodo del DAO per persistere il file.
+            # Nota: Assicurati che nel tuo DAO ci sia un metodo per salvare (es: save_dataset o to_csv)
+            dao.save_dataset(df, output_url)
+            
         except Exception as exc:
             raise IOError(
-                f"Errore nel salvataggio del dataset su "
+                f"Errore nell'operazione di LOAD dell'ETL su "
                 f"'{output_url}': {exc}"
             )
 
-        print("[OK] Dataset salvato correttamente.")
+        print("[OK] Fase di LOAD completata con successo tramite DAO.")

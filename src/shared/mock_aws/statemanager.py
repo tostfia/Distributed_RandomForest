@@ -93,13 +93,26 @@ class MockStateManager(StateManagerInterface):
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
         """Controlla se tutti i task per un dato Job sono COMPLETED."""
-        # Qui dovresti interrogare tutti i task che iniziano con job_id#
-        # (Se il tuo mock non supporta query complesse, puoi iterare)
-        all_tasks = dynamo_db.scan("WorkerTasks") # O metodo equivalente
+        
+        response = dynamo_db.scan_table("WorkerTasks") 
+        all_tasks = response.get("Items", [])
+        
+        # Filtriamo i task appartenenti a questo specifico Job
         job_tasks = [t for t in all_tasks if t.get('job_id') == job_id]
         
+        # Contiamo quanti hanno finito con successo
         completed_tasks = [t for t in job_tasks if t.get('status') == 'COMPLETED']
+        
+        print(f"[StateManager] Job {job_id[:8]} -> Worker pronti: {len(completed_tasks)}/{expected_count}")
         return len(completed_tasks) == expected_count
+    
+    def get_job_status(self, job_id: str) -> Optional[str]:
+        """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
+        response = dynamo_db.get_item(TABLE_NAME, job_id)
+        item = response.get("Item") if isinstance(response, dict) and "Item" in response else response
+        if item and isinstance(item, dict):
+            return item.get("status")
+        return None
 
 # Istanza globale esportata per la Factory polimorfa
 state_manager = MockStateManager()

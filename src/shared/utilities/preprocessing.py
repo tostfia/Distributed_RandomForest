@@ -13,7 +13,6 @@ class CICIDSPreprocessor:
     - Rimuovere header spuri e prevenire il Data Leakage (metadati).
     - Convertire tipi numerici e gestire i NaN/inf.
     - Binarizzare il target (0 = Benign, 1 = Attack).
-    - Eseguire Feature Selection statica (Varianza = 0 e Correlazione < 0.05).
     """
 
     def __init__(
@@ -21,13 +20,11 @@ class CICIDSPreprocessor:
         target_column: str = "Label",
         drop_metadata_columns: bool = True,
         drop_invalid_rows: bool = True,
-        correlation_threshold: float = 0.05,
         metadata_keywords: Optional[List[str]] = None,
     ):
         self.target_column = target_column
         self.drop_metadata_columns = drop_metadata_columns
         self.drop_invalid_rows = drop_invalid_rows
-        self.correlation_threshold = correlation_threshold
         
         # Parole chiave legate all'infrastruttura di rete
         self.metadata_keywords = metadata_keywords or [
@@ -53,7 +50,7 @@ class CICIDSPreprocessor:
         # 2. Codifica del Target
         df = self._encode_binary_labels(df)
 
-        # 3. Prevenzione Data Leakage
+        # 3. Rimozione Metadati non generalizzabili (Data Leakage)
         if self.drop_metadata_columns:
             df = self._drop_metadata_columns(df)
 
@@ -63,9 +60,6 @@ class CICIDSPreprocessor:
         if self.drop_invalid_rows:
             df = self._drop_invalid_rows(df)
 
-        # 5. Ottimizzazione e Dimensionality Reduction
-        df = self._remove_constant_features(df)
-        df = self._remove_low_correlation_features(df)
 
         print("\n[OK] Preprocessing completato.")
         print(f" • Shape iniziale:    {initial_shape}")
@@ -147,32 +141,3 @@ class CICIDSPreprocessor:
         df[self.target_column] = np.where(labels_as_str == "benign", 0, 1).astype(np.int8)
         return df
 
-    def _remove_constant_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Elimina le colonne con varianza zero (completamente inutili predittivamente)."""
-        df = df.copy()
-        varianze = df.var(numeric_only=True)
-        colonne_costanti = varianze[varianze == 0].index
-        
-        if len(colonne_costanti) > 0:
-            df = df.drop(columns=colonne_costanti, errors="ignore")
-            print(f" • Feature costanti (varianza=0) rimosse: {len(colonne_costanti)}")
-            
-        return df
-
-    def _remove_low_correlation_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Elimina le feature la cui correlazione di Pearson assoluta col target è sotto la soglia."""
-        df = df.copy()
-        
-        # Protezione: si assicura che il target sia effettivamente numerico prima di calcolare
-        if self.target_column in df.columns and pd.api.types.is_numeric_dtype(df[self.target_column]):
-            # Calcola correlazione e isola la riga del target (escludendo il target stesso = 1.0)
-            corr_with_label = df.corr(numeric_only=True)[self.target_column].drop(self.target_column).abs()
-            
-            # Filtra le feature sotto la soglia specificata nel costruttore
-            low_corr_features = corr_with_label[corr_with_label < self.correlation_threshold].index.tolist()
-            
-            if low_corr_features:
-                df = df.drop(columns=low_corr_features, errors="ignore")
-                print(f" • Feature rimosse per bassa correlazione (<{self.correlation_threshold}): {len(low_corr_features)}")
-                
-        return df

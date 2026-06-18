@@ -1,47 +1,34 @@
 import pandas as pd
-
 from shared.utilities.loader.datasetLoader import DatasetLoader
-
+from src.dataset.dataset_dao_factory import DatasetDAOFactory
+from src.shared.config import SystemConfig
 
 class CleanCSVDataLoader(DatasetLoader):
     """
     Loader minimale per dataset già campionato e preprocessato.
-
-    Usato dai Worker nella versione base.
-
-    Responsabilità:
-    - leggere un CSV già pulito da locale o S3;
-    - restituire un DataFrame pronto per il training.
-
+    Sfrutta l'architettura DAO globale per rispettare l'ambiente del file .env.
     """
 
-    def __init__(
-        self,
-        dataset_url: str,
-        s3_anon: bool = False,
-    ):
+    def __init__(self, dataset_url: str):
         self.dataset_url = dataset_url
-        self.s3_anon = s3_anon
+        self.cfg = SystemConfig()
 
-    #Load del dataset in RAM
     def load(self) -> pd.DataFrame:
-        storage_options = None
-
-        if self.dataset_url.startswith("s3://"):
-            storage_options = {"anon": self.s3_anon}
-
+        print(f"[Worker-Loader] Richiesta caricamento dataset tramite DAO. Ambiente: {self.cfg.env.upper()}")
+        
         try:
-            df = pd.read_csv(
-                self.dataset_url,
-                storage_options=storage_options,
-            )
+            # Sfrutta la Factory che legge il file .env (Locale o AWS)
+            # e ottiene il DAO corretto in modo polimorfo
+            dao = DatasetDAOFactory.get_dao(self.cfg.env)
+            df = dao.load_dataset(self.dataset_url)
+            
         except Exception as exc:
             raise IOError(
-                f"Errore nella lettura del dataset pulito "
+                f"Errore nel caricamento del dataset tramite DAO "
                 f"'{self.dataset_url}': {exc}"
             )
 
-        print("[OK] Dataset pulito caricato.")
+        print("[OK] Dataset pulito caricato correttamente dal DAO.")
         print(f" • Righe:   {df.shape[0]}")
         print(f" • Colonne: {df.shape[1]}")
 

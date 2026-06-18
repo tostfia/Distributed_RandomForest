@@ -1,219 +1,141 @@
-from copyreg import pickle
+import pickle
 import os
-import json
 import time
 import rpyc
 import traceback
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.utils.extmath import weighted_mode
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
 
+from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
+from src.shared.config import SystemConfig
+from src.shared.factory import DatasetDAOFactory
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
-from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
-from src.shared.utilities.feature_selection import CICIDSFeatureSelector
+from src.shared.utilities.featureselection import CICIDSFeatureSelector
+
 
 class CentralizedOrchestrator(BaseOrchestrator):
-    def __init__(self, environment: str = "local"):
+    def __init__(self):
+        # 1. Recuperiamo la configurazione dal file .env
+        self.cfg = SystemConfig()
+        
         # Recuperiamo il Process ID per distinguere le repliche nei log
         pid = os.getpid()
+        
+        # Inizializziamo la classe base senza passare l'ambiente (lo legge da sé via config)
         super().__init__(
             orchestrator_name=f"Orchestrator-Centralizzato-{pid}",
-            queue_name="centralized_queue",
-            environment=environment
+            queue_name="centralized_queue"
         )
-        self.current_jib_id=None
-        self.train_data_path=None
-        self.test_df=None
+        self.current_job_id = None
+        self.train_data_path = None
+        self.test_data_path = None
 
-    def _resolve_dataset_type(self, payload: dict, hp: dict) -> str:
-        """
-        Determina se il dataset è reale o sintetico.
-
-        Priorità:
-        1. dataset_type nel payload/config;
-        2. target_column negli hyperparameters;
-        3. fallback su real.
-        """
+    def _resolve_dataset_type(self, payload: dict) -> str:
+        """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
         dataset_type = payload.get("dataset_type")
-
-        if dataset_type is not None:
+        if dataset_type:
             return str(dataset_type).strip().lower()
-
-        target_column = hp.get("target_column")
-
-        if target_column == "target":
-            return "synthetic"
-
-        if target_column == "Label":
-            return "real"
-
         return "real"
     
     def _prepare_data(self, payload: dict, base_seed: int):
-        print(f"\n[{self.orchestrator_name}] Avvio fase di estrazione e pre-processing (ETL)...")
-        start_time = time.perf_counter()
-
+        self.current_job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
-        hp = payload.get("hyperparameters", {})
+        dataset_type = self._resolve_dataset_type(payload)
+        target_col = "Label"
 
-        dataset_type = self._resolve_dataset_type(payload, hp)
+        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type}")
 
+        # --- ESTRAZIONE ---
         if dataset_type == "synthetic":
-            target_col = hp.get("target_column", "target")
-        elif dataset_type == "real":
-            target_col = hp.get("target_column", "Label")
-        else:
-            raise ValueError(
-                f"dataset_type non valido: {dataset_type}. Usa 'real' oppure 'synthetic'."
-            )
-        # ---------------------------------------------------------
-        # ESTRAZIONE E PREPROCESSING
-        # ---------------------------------------------------------
-        if dataset_type == "synthetic":
-            print(
-                f"[{self.orchestrator_name}] -> Generazione Dataset Sintetico "
-                f"con seed {base_seed}..."
-            )
-
-            loader = SyntheticDataLoader(
-                n_samples=100000,
-                random_seed=base_seed,
-                target_column=target_col
-            )
-
+            loader = SyntheticDataLoader(n_samples=100000, random_seed=base_seed, target_column=target_col)
             df_clean = loader.load()
-
-        elif dataset_type == "real":
-            if not dataset_path:
-                raise ValueError("dataset_path mancante per dataset reale.")
-
-            print(f"[{self.orchestrator_name}] -> Estrazione Dataset Reale da: {dataset_path}")
-            loader = RawCSVDataLoader(
-                data_url=dataset_path,
-                sample_fraction=0.01,
-                dataset_seed=base_seed
-            )
-
-            df_raw = loader.load()
-
-            print(f"[{self.orchestrator_name}] -> Esecuzione pulizia CICIDSPreprocessor...")
-
-            preprocessor = CICIDSPreprocessor(
-                target_column=target_col
-            )
-
-            df_clean = preprocessor.process(df_raw)
-
-        etl_time = time.perf_counter() - start_time
-
-        print(f"[{self.orchestrator_name}] ETL completato in "f"{etl_time:.2f}s. Dimensione: {df_clean.shape}")
-        print(f"\nDistribuzione target '{target_col}':")
-        print(df_clean[target_col].value_counts())
-
-        print(f"\nDistribuzione target '{target_col}' percentuale:")
-        print(df_clean[target_col].value_counts(normalize=True) * 100)
-        # ---------------------------------------------------------
-        # SPLIT TRAIN/TEST
-        # ---------------------------------------------------------
-        print(f"\n[{self.orchestrator_name}] Partizionamento stratificato in Train e Test...")
-
-        if dataset_type == "real":
-            test_size = 0.2
         else:
-            test_size = 0.1
-
-        splitter = StratifiedDataSplitter(
-            target_column=target_col,
-            test_size=test_size,
-            random_state=base_seed
-        )
-
+            if not dataset_path: 
+                raise ValueError("dataset_path mancante.")
+            loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
+            df_raw = loader.load()
+            preprocessor = CICIDSPreprocessor(target_column=target_col)
+            df_clean = preprocessor.process(df_raw)
+    
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
         train_df, test_df = splitter.split(df_clean)
 
-        # ---------------------------------------------------------
-        # FEATURE SELECTION SOLO PER DATASET REALE
-        # ---------------------------------------------------------
+        # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
-            print(f"\n[{self.orchestrator_name}] Feature Selection sul solo Train Set...")
-            feature_selector = CICIDSFeatureSelector(
-                target_column=target_col,
-                correlation_threshold=0.05
-            )
+            fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
+            train_df = fs.fit_transform(train_df)
+            test_df = fs.transform(test_df)
 
-            train_df = feature_selector.fit_transform(train_df)
-            test_df = feature_selector.transform(test_df)
-
-            print(f" • Dimensione Train dopo Feature Selection: {train_df.shape}")
-            print(f" • Dimensione Test dopo Feature Selection:  {test_df.shape}")
-
-        self.test_df = test_df
-        file_name = f"shared_train_{self.current_job_id}.csv"
+        # --- SALVATAGGIO COORDINATO DAI DAO (Train + Test per abilitare il failover dell'inferenza) ---
         if self.environment == "aws":
-            bucket_name = os.getenv("S3_TEMP_BUCKET", "il-mio-bucket-sdcc")
-            self.train_data_path = f"s3://{bucket_name}/processed_jobs/{file_name}"
-
-            print(f"[{self.orchestrator_name}] AWS Mode: Upload del Train Set su S3 in corso...")
-            train_df.to_csv(self.train_data_path, index=False)
-            print(f"[{self.orchestrator_name}] Dati caricati con successo su: {self.train_data_path}")
-
+            self.train_data_path = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{self.current_job_id}.csv"
+            self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{self.current_job_id}.csv"
         else:
-            self.train_data_path = file_name
-            train_df.to_csv(self.train_data_path, index=False)
-            print(f"[{self.orchestrator_name}] Local Mode: Train salvato in '{self.train_data_path}'.")
-
-       
+            self.train_data_path = f"./shared_train_{self.current_job_id}.csv"
+            self.test_data_path = f"./shared_test_{self.current_job_id}.csv"
+            
+        print(f"[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         
+        try:
+            dao = DatasetDAOFactory.get_dao(self.environment)
+            dao.save_dataset(path=self.train_data_path, df=train_df)
+            dao.save_dataset(path=self.test_data_path, df=test_df)
+            print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
+        except Exception as e:
+            raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
-        total_step_trees= target_alberi - start_alberi
-        print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare  (seed: {seed})...")
-
-        #Scansione dei nodi worker attivi e disponibili (con heartbeat aggiornato)
-        available_workers = ServiceRegistry.get_available_workers(self.environment)
-        if not available_workers:
-            
-            print("[!] Attenzione: Nessun worker pronto. Aspetto...")
-            time.sleep(10) 
-            return False # Torna al loop principale senza far fallire il job
+        if self.train_data_path is None:
+            self._prepare_data(payload, seed)
         
+        total_step_trees = target_alberi - start_alberi
+        print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
+
+        while True:
+            available_workers = ServiceRegistry.get_available_workers(self.environment)
+            if available_workers:
+                print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
+                break
+            
+            print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
+            time.sleep(10)
+
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
-        print(f"[{self.orchestrator_name}] Worker disponibili: {num_workers} -> {worker_names}")
 
-        # Distribuzione del carico in modo bilanciato tra i worker disponibili
         trees_per_worker = total_step_trees // num_workers
         remainder = total_step_trees % num_workers
-
-        #Estrazione iper param e dataset DA RIFARE
-        # Cerca la chiave corretta che invia il client
-        source_info = payload.get("dataset_path") or "default_dataset.csv"
+        source_info = self.train_data_path 
+        
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
 
         all_trained_trees = []
-        current_seed_offset= seed
-
+        current_seed_offset = seed
         connessioni_attive = []
 
-        #funzione di task per il thread pool: gestisce la singola connessione RPyC
-        def _rpc_call(w_name,w_info,n_trees,w_seed):
+        def _rpc_call(w_name, w_info, n_trees, w_seed):
             print(f" [RPC -> {w_name}] Invio richiesta per {n_trees} alberi su {w_info['host']}:{w_info['port']}...")
-            conn = rpyc.connect(w_info["host"], w_info["port"], config= {'allow_pickle': True})
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
             connessioni_attive.append(conn)  
             try: 
                 remote_trees = conn.root.train_subset_forest(source_info=source_info, num_trees=n_trees, base_seed=w_seed, max_depth=max_depth)
                 return remote_trees
             except Exception as e:
-                print(f"   [ERRORE RPC] Connessione fallita con {w_name} ({w_info['host']}:{w_info['port']}): {e}")
+                print(f"   [ERRORE RPC] Connessione fallita con {w_name}: {e}")
                 raise e
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             future_to_worker = {}
             for i, name in enumerate(worker_names):
                 info = available_workers[name]
-
                 allocated_trees = trees_per_worker + (1 if i < remainder else 0)
 
                 if allocated_trees == 0:
@@ -223,49 +145,195 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 future_to_worker[f] = name
                 current_seed_offset += allocated_trees
 
-            # Raccolta asincrona dei risultati
             for future in as_completed(future_to_worker):
                 w_name = future_to_worker[future]
                 try:
                     result_raw = future.result()
-                    if isinstance(result_raw, bytes):
-                        result_trees = pickle.loads(result_raw)
-                    else:
-                        result_trees = result_raw
+                    result_trees = pickle.loads(result_raw) if isinstance(result_raw, bytes) else result_raw
                     all_trained_trees.extend(result_trees)
                     print(f"   [RPC <- {w_name}] Ricevuti con successo {len(result_trees)} alberi.")
                 except Exception as e:
                     print(f"   [ERRORE CRITICO] Il worker '{w_name}' ha fallito o si è disconnesso: {e}")
-               
-                    print("\n" + "="*60)
-                    print(f" DETTAGLIO ERRORE (TRACEBACK) PER IL WORKER: {w_name}")
-                    print("="*60)
                     traceback.print_exc()  
-                    print("="*60 + "\n")
-                  
                     raise e  
 
         print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC attive...")
         for conn in connessioni_attive:
-            try:
-                conn.close()
-            except Exception :
-                pass
+            try: conn.close()
+            except Exception: pass
+
+        # --- RICOMPOSIZIONE E SALVATAGGIO ---
         if len(all_trained_trees) > 0:
-            print(f"   [{self.orchestrator_name}] Step centralizzato completato.")
-            return True
-        
-        return False
+            print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
+            tree_type = hp.get("tree_type", "classifier")
+            
+            try:
+                # Estraiamo il numero di feature di input dal primo albero valido per blindare il modello
+                n_features = all_trained_trees[0].n_features_in_
                 
+                if tree_type == "classifier":
+                    global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
+                    global_model.classes_ = np.array([0, 1]) 
+                    global_model.n_classes_ = 2
+                else:
+                    global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
+                
+                # Iniezione parametri strutturali per la piena compatibilità esterna
+                global_model.estimators_ = all_trained_trees
+                global_model.n_features_in_ = n_features
+                global_model.n_outputs_ = 1
+                
+                TARGET_DIR = "./saved_models"
+                os.makedirs(TARGET_DIR, exist_ok=True)
+                model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
+                
+                with open(model_path, "wb") as f:
+                    pickle.dump(global_model, f)
+                
+                print(f"   [{self.orchestrator_name}] Modello {tree_type} integrato correttamente in '{model_path}'.")
+                return True
+                
+            except Exception as e:
+                print(f"   [ERRORE AGGREGAZIONE] Impossibile creare il modello {tree_type}: {e}")
+                traceback.print_exc()
+                return False
+
+        print(f"   [{self.orchestrator_name}] Nessun albero ricevuto. Fallimento.")
+        return False
+    
+    def _execute_inference_step(self, payload: dict):
+        job_id = payload.get("job_id")
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
+        target_col = "Label"
+
+        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA ===")
+
+        model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+
+        print(f"[{self.orchestrator_name}] Caricamento della foresta da {model_path}...")
+        with open(model_path, "rb") as f:
+            global_model = pickle.load(f)
+        
+        all_trees = global_model.estimators_
+        total_trees = len(all_trees)
+        print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
+
+        # RECOVERY DEL PATH: Ricostruiamo il path se l'istanza è stata sostituita dal failover
+        if self.test_data_path is None:
+            if self.environment == "aws":
+                self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
+            else:
+                self.test_data_path = f"./shared_test_{job_id}.csv"
+
+        print(f"[{self.orchestrator_name}] Caricamento Testing Set persistito via DAO: {self.test_data_path}")
+        dao = DatasetDAOFactory.get_dao(self.environment)
+        test_df = dao.load_dataset(self.test_data_path)
+
+        print(f"[{self.orchestrator_name}] Preparazione della matrice di test (Shape: {test_df.shape})...")
+        X_test = test_df.drop(columns=[target_col]).to_numpy(dtype=np.float64)
+        y_test = test_df[target_col].to_numpy()
+        serialized_X_test = pickle.dumps(X_test)
+
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        if not available_workers:
+            raise RuntimeError("Nessun worker disponibile nel Service Registry per l'inferenza.")
+
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+        print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
+
+        trees_per_worker = total_trees // num_workers
+        remainder = total_trees % num_workers
+
+        all_worker_predictions = []
+        connessioni_attive = []
+
+        def _rpc_inference_call(w_name, w_info, subset_trees_chunk):
+            print(f" [RPC INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi...")
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            connessioni_attive.append(conn)
+            
+            serialized_chunk = pickle.dumps(subset_trees_chunk)
+            raw_response = conn.root.predict_subset_forest(serialized_chunk, serialized_X_test)
+            return pickle.loads(raw_response)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_worker = {}
+            current_tree_idx = 0
+
+            for i, name in enumerate(worker_names):
+                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+                if allocated_trees == 0:
+                    continue
+
+                chunk = all_trees[current_tree_idx : current_tree_idx + allocated_trees]
+                current_tree_idx += allocated_trees
+
+                f = executor.submit(_rpc_inference_call, name, available_workers[name], chunk)
+                future_to_worker[f] = name
+
+            for future in as_completed(future_to_worker):
+                w_name = future_to_worker[future]
+                try:
+                    sub_predictions = future.result()
+                    all_worker_predictions.extend(sub_predictions)
+                    print(f"   [RPC INFERENZA <- {w_name}] Ricevute correttamente predizioni parziali.")
+                except Exception as e:
+                    print(f"   [ERRORE CRITICO INFERENZA] Il worker '{w_name}' ha fallito: {e}")
+                    raise e
+
+        print(f"[*] Chiusura di {len(connessioni_attive)} connessioni RPC attive...")
+        for conn in connessioni_attive:
+            try: conn.close()
+            except Exception: pass
+
+        predictions_matrix = np.array(all_worker_predictions)
+        print(f"[{self.orchestrator_name}] Matrice complessiva predizioni generata: {predictions_matrix.shape}")
+
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE PRESTAZIONI MODELLO DISTRIBUITO (JOB: {job_id[:8]})")
+        print("═" * 75)
+
+        if tree_type == "classifier":
+            # Calcoliamo il voto di maggioranza esente da bug tramite weighted_mode ad un solo peso uniforme (1.0)
+            uniform_weights = np.ones(predictions_matrix.shape[0])
+            final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
+            final_predictions = final_predictions.ravel()
+            
+            # --- CALCOLO METRICHE DETTAGLIATE ALLINEATE A COLAB ---
+            accuracy = np.mean(final_predictions == y_test)
+            precision = precision_score(y_test, final_predictions, zero_division=0)
+            recall = recall_score(y_test, final_predictions, zero_division=0)
+            f1 = f1_score(y_test, final_predictions, zero_division=0)
+            cm = confusion_matrix(y_test, final_predictions)
+            
+            print(f"  Tipo di Modello:                        CLASSIFICATORE")
+            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print("-" * 75)
+            print(f"  ACCURACY FINALE DISTRIBUITA:            {accuracy * 100:.2f} %")
+            print(f"  PRECISION DISTRIBUITA:                  {precision * 100:.2f} %")
+            print(f"  RECALL DISTRIBUITA:                     {recall * 100:.2f} %")
+            print(f"  F1-SCORE DISTRIBUITO:                   {f1 * 100:.2f} %")
+            print("-" * 75)
+            print("  Matrice di Confusione:")
+            print(cm)
+            print("\n  Classification Report Completo:")
+            print(classification_report(y_test, final_predictions, zero_division=0))
+            
+        else:
+            final_predictions = np.mean(predictions_matrix, axis=0)
+            mae = np.mean(np.abs(final_predictions - y_test))
+            print(f"  Tipo di Modello:                        REGRESSORE")
+            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
+
+        print("═" * 75 + "\n")
+
 
 if __name__ == "__main__":
-    env = "local"
-    if os.path.exists("config.json"):
-        try:
-            with open("config.json", "r", encoding="utf-8") as f:
-                env = json.load(f).get("environment", "local")
-        except Exception:
-            pass
-            
-    orchestrator = CentralizedOrchestrator(environment=env)
+    print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
+    orchestrator = CentralizedOrchestrator()
     orchestrator.start()
