@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
+import os
 import numpy as np
 import rpyc
 from rpyc import Service, ThreadedServer
@@ -65,13 +66,18 @@ class BaseWorker(Service, ABC):
     def start_server(self, port: int, explicit_host: str = None):
         print(f"\n[{self.worker_name}] Inizializzazione Server RPC in ambiente {self.environment.upper()}...")
 
+        advertise_host = os.environ.get("RPC_ADVERTISE_HOST", None)
         # Gestione degli host coerente con l'ambiente del file .env
         if self.environment == "aws":
-            host_to_register = explicit_host if explicit_host else "0.0.0.0"
             host_to_bind = "0.0.0.0"
+            host_to_register = advertise_host if advertise_host else (explicit_host if explicit_host else "0.0.0.0")
         else:
-            host_to_register = explicit_host if explicit_host else "127.0.0.1"
-            host_to_bind = "127.0.0.1"
+            if advertise_host:
+                host_to_bind = "0.0.0.0"
+                host_to_register = advertise_host
+            else:
+                host_to_bind = explicit_host if explicit_host else "127.0.0.1"
+                host_to_register = explicit_host if explicit_host else "127.0.0.1"
 
         # Registrazione del Worker sul Service Registry (Mock o DynamoDB gestito in automatico)
         ServiceRegistry.register_worker(worker_name=self.worker_name, host=host_to_register, port=port)
