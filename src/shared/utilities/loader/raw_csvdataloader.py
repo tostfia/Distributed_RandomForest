@@ -11,7 +11,6 @@ from src.shared.utilities.loader.datasetLoader import DatasetLoader
 class RawCSVDataLoader(DatasetLoader):
     """
     Loader CSV grezzo per sorgenti locali o S3.
-    Supporta una CACHE locale automatica per evitare download ripetuti da S3.
     """
 
     def __init__(
@@ -35,7 +34,7 @@ class RawCSVDataLoader(DatasetLoader):
         sources = self._discover_sources()
         chunks = []
 
-        print("Caricamento dataset CSV grezzo...")
+        print("Caricamento dataset CSV grezzo (Logica speculare a Colab)...")
         print(f" • Sorgenti trovate: {len(sources)}")
         print(f" • Sample fraction:  {self.sample_fraction}")
         print(f" • Dataset seed:     {self.dataset_seed}")
@@ -48,24 +47,22 @@ class RawCSVDataLoader(DatasetLoader):
             skip_logic = None
 
         for source in sources:
-            print(f"   - Lettura sorgente: {source}")
+            print(f"   - Lettura e conversione sorgente: {source}")
 
-            # Leggiamo il file (da S3 o da cache locale a seconda di cosa ha deciso _discover_sources)
+            # Leggiamo il file applicando lo skip_logic e le conversioni
             df_temp = self._read_single_csv(
                 source=source,
                 skip_logic=skip_logic
             )
             chunks.append(df_temp)
 
-            # S3 CACHING LOGIC: Se stavamo leggendo da S3, salviamo il file INTERO (senza skip_logic)
-            # localmente nella cache per la prossima volta, così la baseline e i futuri test saranno fulminei.
+            # S3 CACHING LOGIC: Se stavamo leggendo da S3, salviamo il file INTERO localmente
             if self._is_s3_path(source):
                 filename = os.path.basename(source)
                 local_cache_path = os.path.join(self.cache_dir, filename)
                 if not os.path.exists(local_cache_path):
                     print(f"     [CACHE] Salvo una copia locale di {filename} per i prossimi test...")
                     os.makedirs(self.cache_dir, exist_ok=True)
-                    # Riscarichiamo il file intero e lo salviamo su disco
                     storage_options = {"anon": self.s3_anon}
                     df_full = pd.read_csv(source, low_memory=False, storage_options=storage_options)
                     df_full.to_csv(local_cache_path, index=False)
@@ -83,22 +80,18 @@ class RawCSVDataLoader(DatasetLoader):
 
     def _discover_sources(self) -> List[str]:
         """
-        Determina la lista di sorgenti. Se rileva una richiesta S3 ma i file
-        sono già presenti nella cache locale, devia la lettura sul disco locale.
+        Determina la lista di sorgenti.
         """
         if isinstance(self.data_url, (list, tuple)):
             sources = list(self.data_url)
             
         elif isinstance(self.data_url, str) and self._is_s3_path(self.data_url):
-            
-            # CONTROLLO CACHE: se la cartella esiste e contiene già i 10 file .csv, usiamo quelli!
             if os.path.exists(self.cache_dir) and len(glob.glob(os.path.join(self.cache_dir, "*.csv"))) >= 10:
                 print(f"\n[CACHE HIT] Rilevati file locali in '{self.cache_dir}'. Evito il download da S3.")
                 sources = glob.glob(os.path.join(self.cache_dir, "*.csv"))
             else:
-                # Se la cache è vuota, andiamo su internet
                 if self.data_url.endswith("/"):
-                    print(f"[S3 DISCOVERY] Cache vuota o incompleta. Scansione directory Cloud: {self.data_url}")
+                    print(f"[S3 DISCOVERY] Cache vuota. Scansione directory Cloud: {self.data_url}")
                     try:
                         fs = fsspec.filesystem("s3", anon=self.s3_anon)
                         raw_files = fs.glob(os.path.join(self.data_url.replace("s3://", ""), "*.csv"))
@@ -117,10 +110,8 @@ class RawCSVDataLoader(DatasetLoader):
         else:
             raise TypeError("data_url deve essere una stringa o una sequenza di stringhe.")
 
-        sources = sorted(sources)
-
         if not sources:
-            raise FileNotFoundError(f"Nessuna sorgente CSV trovata in: {self.data_url}")
+            raise FileNotFoundError(f"Nessuna sorgente CSV trouvata in: {self.data_url}")
 
         for source in sources:
             if not self._is_s3_path(source) and not os.path.isfile(source):
@@ -134,14 +125,30 @@ class RawCSVDataLoader(DatasetLoader):
             storage_options = {"anon": self.s3_anon}
 
         try:
-            return pd.read_csv(
+            # 1. pd.read_csv con lo skip_logic basato sul generatore random globale
+            df_temp = pd.read_csv(
                 source,
                 skiprows=skip_logic,
                 low_memory=False,
                 storage_options=storage_options,
             )
+            
+            # 2. [DA COLAB] df_temp.columns = [c.strip() for c in df_temp.columns]
+            df_temp.columns = [c.strip() for c in df_temp.columns]
+
+            # 3. [DA COLAB] if 'label' in df_temp.columns: ...
+            if 'label' in df_temp.columns:
+                df_temp = df_temp.rename(columns={'label': 'Label'})
+
+            # 4. [DA COLAB] pd.to_numeric con errors='coerce' su tutte le colonne tranne 'Label'
+            if not df_temp.empty:
+                cols_to_convert = df_temp.columns.difference(['Label'])
+                df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors='coerce')
+
+            return df_temp
+
         except Exception as exc:
-            raise IOError(f"Errore nella lettura della sorgente '{source}': {exc}")
+            raise IOError(f"Errore nella lettura/conversione della sorgente '{source}': {exc}")
 
     @staticmethod
     def _is_s3_path(path: str) -> bool:

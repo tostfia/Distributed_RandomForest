@@ -2,6 +2,7 @@ services:
   orchestrator:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_orchestrator_${TRAINING_MODE:-centralized}
+    user: "${MY_UID}:${MY_GID}"
     environment:
       - PYTHONUNBUFFERED=1
       - ENV_MODE=${ENV_MODE:-local}
@@ -17,6 +18,7 @@ services:
   worker-01:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
+    user: "${MY_UID}:${MY_GID}"  # ← Mappa il tuo utente locale
     ports:
       - "18861:18861"
     environment:
@@ -38,6 +40,7 @@ services:
   worker-02:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_02
+    user: "${MY_UID}:${MY_GID}"
     ports:
       - "18862:18862"
     environment:

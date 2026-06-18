@@ -107,14 +107,14 @@ class BaseOrchestrator(ABC):
         hp = payload.get("hyperparameters", {})
         existing_state = self.state_manager.obtain_request(job_id)
         retries = 0
-        base_random_state = 42
+        base_random_state = 123
         alberi_gia_fatti = 0
 
         if existing_state:
             item_data = existing_state.get("Item", existing_state)
             current_status = item_data.get("status")
             retries = item_data.get("retries", 0)
-            base_random_state = item_data.get("base_random_state", 42)
+            base_random_state = item_data.get("base_random_state", 123)
             
             if current_status == "PROCESSING":
                 print(f"[{self.orchestrator_name}] [FAILOVER DETECTED] Riprendo il lavoro del nodo fallito.")

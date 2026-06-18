@@ -32,7 +32,6 @@ class CentralizedWorker(BaseWorker):
         self.target_column = target_column
         self.tree_type = tree_type
         
-        # --- FIX BUG: Rimosso self.environment dalle parentesi ---
         self.dao = DatasetDAOFactory.get_dao()
         
         print(

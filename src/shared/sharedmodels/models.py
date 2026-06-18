@@ -27,6 +27,7 @@ class TrainingRequest(BaseModel):
     dataset_path: str
     dataset_type: str
     hyperparameters: Hyperparameters
+    dataset_seed: int = 123  
 
 
 class TrainingRequestWorker(BaseModel):
@@ -36,7 +37,7 @@ class TrainingRequestWorker(BaseModel):
     mode: str
     dataset_type: str
     hyperparameters: Hyperparameters
-    seed: int
+    seed: int = 123  
 
 
 class InferenceRequest(BaseModel):

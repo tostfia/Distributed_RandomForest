@@ -15,8 +15,8 @@ class MockStateManager(StateManagerInterface):
             "timestamp": time.time(),
             "retries": 0,
             "last_orchestrator": None,
-            "alberi_addestrati": 0,  # Inizializzazione esplicita a 0
-            "base_random_state": 42  # Seed di partenza standard
+            "alberi_addestrati": 0,
+            "base_random_state": 123
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}...")
@@ -31,7 +31,7 @@ class MockStateManager(StateManagerInterface):
         status: str, 
         orchestrator_id: str, 
         retries: int = 0, 
-        base_random_state: int = 42, 
+        base_random_state: int = 123, 
         alberi_addestrati: int = 0
     ) -> None:
         """Aggiorna lo stato del job tracciando i progressi dell'addestramento e i failover."""
@@ -63,7 +63,7 @@ class MockStateManager(StateManagerInterface):
             "timestamp": time.time(),
             "retries": current_job.get("retries", 0),
             "last_orchestrator": orchestrator_id,
-            "base_random_state": current_job.get("base_random_state", 42),
+            "base_random_state": current_job.get("base_random_state", 123),
             "alberi_addestrati": current_job.get("alberi_addestrati", 0) # Mantiene l'ultimo checkpoint massimo
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
