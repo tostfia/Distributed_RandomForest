@@ -7,7 +7,7 @@ services:
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - EC2_ID=${EC2_ID:-Locale}
-      - LOCAL_STORAGE_PATH=/app/.local_storage   # ← path fisso nel container
+      - LOCAL_STORAGE_PATH=/app/.local_storage
     volumes:
       - ./data:/app/data
       - ./.local_storage:/app/.local_storage     

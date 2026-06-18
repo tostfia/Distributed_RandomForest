@@ -77,8 +77,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
             self.train_data_path = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{self.current_job_id}.csv"
             self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{self.current_job_id}.csv"
         else:
-            self.train_data_path = f"./shared_train_{self.current_job_id}.csv"
-            self.test_data_path = f"./shared_test_{self.current_job_id}.csv"
+            # Sostituisci le due righe qui sotto:
+            self.train_data_path = f"./.local_storage/shared_train_{self.current_job_id}.csv"
+            self.test_data_path = f"./.local_storage/shared_test_{self.current_job_id}.csv"
             
         print(f"[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         
@@ -225,7 +226,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
             if self.environment == "aws":
                 self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
             else:
-                self.test_data_path = f"./shared_test_{job_id}.csv"
+                # Sostituisci questa riga:
+                self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
 
         print(f"[{self.orchestrator_name}] Caricamento Testing Set persistito via DAO: {self.test_data_path}")
         dao = DatasetDAOFactory.get_dao(self.environment)

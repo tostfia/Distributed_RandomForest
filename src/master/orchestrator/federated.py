@@ -93,8 +93,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                 w_train_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/train_{self.current_job_id}.csv"
                 w_test_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/test_{self.current_job_id}.csv"
             else:
-                w_train_path = f"./{name}_cache/train_{self.current_job_id}.csv"
-                w_test_path = f"./{name}_cache/test_{self.current_job_id}.csv"
+                # Spostiamo le cache dei singoli worker dentro la cartella condivisa da Docker
+                w_train_path = f"./.local_storage/{name}_cache/train_{self.current_job_id}.csv"
+                w_test_path = f"./.local_storage/{name}_cache/test_{self.current_job_id}.csv"
                 os.makedirs(os.path.dirname(w_train_path), exist_ok=True)
 
             # Salvataggio degli shard
