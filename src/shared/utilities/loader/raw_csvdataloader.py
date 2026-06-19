@@ -80,29 +80,29 @@ class RawCSVDataLoader(DatasetLoader):
 
     def _discover_sources(self) -> List[str]:
         """
-        Determina la lista di sorgenti.
+        Determina la lista di sorgenti ordinata alfabeticamente per replicabilità del seed.
         """
         if isinstance(self.data_url, (list, tuple)):
-            sources = list(self.data_url)
+            sources = sorted(list(self.data_url)) 
             
         elif isinstance(self.data_url, str) and self._is_s3_path(self.data_url):
             if os.path.exists(self.cache_dir) and len(glob.glob(os.path.join(self.cache_dir, "*.csv"))) >= 10:
                 print(f"\n[CACHE HIT] Rilevati file locali in '{self.cache_dir}'. Evito il download da S3.")
-                sources = glob.glob(os.path.join(self.cache_dir, "*.csv"))
+                sources = sorted(glob.glob(os.path.join(self.cache_dir, "*.csv"))) 
             else:
                 if self.data_url.endswith("/"):
                     print(f"[S3 DISCOVERY] Cache vuota. Scansione directory Cloud: {self.data_url}")
                     try:
                         fs = fsspec.filesystem("s3", anon=self.s3_anon)
                         raw_files = fs.glob(os.path.join(self.data_url.replace("s3://", ""), "*.csv"))
-                        sources = [f"s3://{f}" for f in raw_files]
+                        sources = sorted([f"s3://{f}" for f in raw_files])
                     except Exception as e:
                         raise IOError(f"Impossibile listare la cartella S3 {self.data_url}: {e}")
                 else:
                     sources = [self.data_url]
                 
         elif isinstance(self.data_url, str) and os.path.isdir(self.data_url):
-            sources = glob.glob(os.path.join(self.data_url, "*.csv"))
+            sources = sorted(glob.glob(os.path.join(self.data_url, "*.csv"))) # 🌟 Ordinato
             
         elif isinstance(self.data_url, str):
             sources = [self.data_url]
@@ -111,7 +111,7 @@ class RawCSVDataLoader(DatasetLoader):
             raise TypeError("data_url deve essere una stringa o una sequenza di stringhe.")
 
         if not sources:
-            raise FileNotFoundError(f"Nessuna sorgente CSV trouvata in: {self.data_url}")
+            raise FileNotFoundError(f"Nessuna sorgente CSV trovata in: {self.data_url}")
 
         for source in sources:
             if not self._is_s3_path(source) and not os.path.isfile(source):
@@ -133,17 +133,12 @@ class RawCSVDataLoader(DatasetLoader):
                 storage_options=storage_options,
             )
             
-            # 2. [DA COLAB] df_temp.columns = [c.strip() for c in df_temp.columns]
+            # 2. Standardizzazione colonne
             df_temp.columns = [c.strip() for c in df_temp.columns]
 
-            # 3. [DA COLAB] if 'label' in df_temp.columns: ...
+            # 3. Uniformiamo il nome del target
             if 'label' in df_temp.columns:
                 df_temp = df_temp.rename(columns={'label': 'Label'})
-
-            # 4. [DA COLAB] pd.to_numeric con errors='coerce' su tutte le colonne tranne 'Label'
-            if not df_temp.empty:
-                cols_to_convert = df_temp.columns.difference(['Label'])
-                df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors='coerce')
 
             return df_temp
 

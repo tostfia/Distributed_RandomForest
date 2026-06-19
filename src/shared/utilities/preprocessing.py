@@ -7,19 +7,14 @@ import pandas as pd
 class CICIDSPreprocessor:
     """
     Pipeline di Preprocessing specifica per il dataset di network traffic CIC-IDS2018.
-
-    Responsabilità Architetturale:
-    - Standardizzare nomi colonne e target.
-    - Rimuovere header spuri e prevenire il Data Leakage (metadati).
-    - Convertire tipi numerici e gestire i NaN/inf.
-    - Binarizzare il target (0 = Benign, 1 = Attack).
+    Configurata per emulare specularmente al millimetro la logica e i conteggi di Colab.
     """
 
     def __init__(
         self,
         target_column: str = "Label",
         drop_metadata_columns: bool = True,
-        drop_invalid_rows: bool = True,
+        drop_invalid_rows: bool = True,  # Mantenuto True per proteggere i Worker dai valori infiniti
         metadata_keywords: Optional[List[str]] = None,
     ):
         self.target_column = target_column
@@ -42,24 +37,36 @@ class CICIDSPreprocessor:
         print("Avvio preprocessing CIC-IDS2018...")
         initial_shape = df.shape
 
-        # 1. Pulizia Strutturale
-        df = self._standardize_columns(df)
-        df = self._standardize_target_column(df)
-        df = self._remove_repeated_header_rows(df)
+        # 1. Rimozione righe di intestazione spuria (Esatta sintassi Colab)
+        df = df[~df[self.target_column].isin(['Label', ' Label', 'Label '])].copy()
 
-        # 2. Codifica del Target
-        df = self._encode_binary_labels(df)
+        # 2. Codifica del Target (Benign=0, tutto il resto=1)
+        df[self.target_column] = np.where(df[self.target_column] == 'Benign', 0, 1).astype(np.int8)
 
-        # 3. Rimozione Metadati non generalizzabili (Data Leakage)
+        # 3. Report statistico immediato
+        total_records = len(df)
+        if total_records > 0:
+            count_benign = int((df[self.target_column] == 0).sum())
+            count_attack = int((df[self.target_column] == 1).sum())
+            pct_benign = (count_benign / total_records) * 100
+            pct_attack = (count_attack / total_records) * 100
+
+            print("\n=======================================================")
+            print("  SOVRASCRITTURA EFFETTUATA PER CLASSIFICAZIONE BINARIA")
+            print("=======================================================")
+            print(f"  Classe Codificata [0] -> 0 (Benign)   :   {count_benign:,} record ({pct_benign:.2f}%)".replace(',', '.'))
+            print(f"  Classe Codificata [1] -> 1 (Attacco)  :   {count_attack:,} record ({pct_attack:.2f}%)".replace(',', '.'))
+            print("=======================================================")
+
+        # 4. Rimozione Metadati non generalizzabili (Data Leakage)
         if self.drop_metadata_columns:
             df = self._drop_metadata_columns(df)
 
-        # 4. Cast numerico e Sanificazione
+        # 5. Cast numerico e Sanificazione finale per i Worker
         df = self._convert_feature_columns_to_numeric(df)
 
         if self.drop_invalid_rows:
             df = self._drop_invalid_rows(df)
-
 
         print("\n[OK] Preprocessing completato.")
         print(f" • Shape iniziale:    {initial_shape}")
@@ -72,27 +79,6 @@ class CICIDSPreprocessor:
     def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df.columns = [str(col).strip() for col in df.columns]
-        return df
-
-    def _standardize_target_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        lower_to_original = {str(col).lower(): col for col in df.columns}
-
-        if self.target_column in df.columns:
-            return df
-        if self.target_column.lower() in lower_to_original:
-            original_name = lower_to_original[self.target_column.lower()]
-            return df.rename(columns={original_name: self.target_column})
-        if "label" in lower_to_original:
-            original_name = lower_to_original["label"]
-            return df.rename(columns={original_name: self.target_column})
-
-        raise ValueError(f"Target '{self.target_column}' o 'label' non trovato.")
-
-    def _remove_repeated_header_rows(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        label_as_str = df[self.target_column].astype(str).str.strip()
-        df = df[label_as_str.str.lower() != self.target_column.lower()].copy()
         return df
 
     def _drop_metadata_columns(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -122,22 +108,3 @@ class CICIDSPreprocessor:
         if removed > 0:
             print(f" • Righe rimosse per NaN/inf: {removed}")
         return df
-
-    def _encode_binary_labels(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        raw_labels = df[self.target_column]
-
-        # Se già numeriche {0,1}
-        numeric_labels = pd.to_numeric(raw_labels, errors="coerce")
-        non_null_numeric = numeric_labels.dropna()
-        if not non_null_numeric.empty:
-            unique_values = set(non_null_numeric.unique())
-            if unique_values.issubset({0, 1}):
-                df[self.target_column] = numeric_labels.astype(np.int8)
-                return df
-
-        # Altrimenti testo (Benign=0, Resto=1)
-        labels_as_str = raw_labels.astype(str).str.strip().str.lower()
-        df[self.target_column] = np.where(labels_as_str == "benign", 0, 1).astype(np.int8)
-        return df
-
