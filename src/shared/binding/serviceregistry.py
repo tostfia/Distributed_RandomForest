@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Dict, Any
 import boto3
@@ -10,7 +11,7 @@ cfg = SystemConfig()
 class ServiceRegistry:
     WORKERS_TABLE = 'workers_registry'
     ORCHESTRATORS_TABLE = 'orchestrators_registry'
-    TIME_OUT_SECONDS = 60
+    TIME_OUT_SECONDS = int(os.environ.get("WORKER_TIMEOUT_SECONDS", 120))  # Timeout per considerare un worker non disponibile
 
     @classmethod
     def _get_db_client(cls):

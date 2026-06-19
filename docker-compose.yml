@@ -1,27 +1,75 @@
 services:
-  orchestrator:
+
+  postgres:
+    image: postgres:15
+    container_name: aurora_mock
+    environment:
+      POSTGRES_DB: rf_locks
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./src/utilities/sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+
+  orchestrator-01:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    container_name: ${EC2_ID:-locale}_orchestrator_${TRAINING_MODE:-centralized}
+    container_name: ${EC2_ID:-locale}_orchestrator_01_${TRAINING_MODE:-centralized}
     user: "${MY_UID}:${MY_GID}"
     environment:
+      - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
-      - EC2_ID=${EC2_ID:-Locale}
+      - EC2_ID=${EC2_ID:-Locale}-01
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - AURORA_HOST
+      - AURORA_PORT
+      - AURORA_DB
+      - AURORA_USER
+      - AURORA_PASSWORD
     volumes:
       - ./data:/app/data
       - ./.local_storage:/app/.local_storage     
     command: python -m src.master.orchestrator.main
+    depends_on:
+      - postgres 
     restart: on-failure
+  
+  orchestrator-02:
+    image: ${IMAGE_NAME:-rf-worker-locale:latest}
+    container_name: ${EC2_ID:-locale}_orchestrator_02_${TRAINING_MODE:-centralized}
+    user: "${MY_UID}:${MY_GID}"
+    environment:
+      - WORKER_HEARTBEAT_TIMEOUT=120
+      - PYTHONUNBUFFERED=1
+      - ENV_MODE=${ENV_MODE:-local}
+      - TRAINING_MODE=${TRAINING_MODE:-centralized}
+      - EC2_ID=${EC2_ID:-Locale}-02
+      - LOCAL_STORAGE_PATH=/app/.local_storage
+      - AURORA_HOST
+      - AURORA_PORT
+      - AURORA_DB
+      - AURORA_USER
+      - AURORA_PASSWORD
+    volumes:
+      - ./data:/app/data
+      - ./.local_storage:/app/.local_storage     
+    command: python -m src.master.orchestrator.main
+    depends_on:
+      - postgres
+    restart: on-failure
+
+  
 
   worker-01:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
-    user: "${MY_UID}:${MY_GID}"  # ← Mappa il tuo utente locale
+    user: "${MY_UID}:${MY_GID}"  
     ports:
       - "18861:18861"
     environment:
+      - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - RPC_HOST=worker-01
       - RPC_PORT=18861
@@ -29,12 +77,18 @@ services:
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - LOCAL_STORAGE_PATH=/app/.local_storage  
+      - AURORA_HOST        
+      - AURORA_PORT
+      - AURORA_DB
+      - AURORA_USER
+      - AURORA_PASSWORD
     volumes:
       - ./data:/app/data
       - ./.local_storage:/app/.local_storage       
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     depends_on:
-      - orchestrator
+      - orchestrator-01
+      - postgres
     restart: on-failure
 
   worker-02:
@@ -44,6 +98,7 @@ services:
     ports:
       - "18862:18862"
     environment:
+      - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - RPC_HOST=worker-02
       - RPC_PORT=18862
@@ -51,10 +106,20 @@ services:
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - LOCAL_STORAGE_PATH=/app/.local_storage  
+      - AURORA_HOST       
+      - AURORA_PORT
+      - AURORA_DB
+      - AURORA_USER
+      - AURORA_PASSWORD
     volumes:
       - ./data:/app/data
       - ./.local_storage:/app/.local_storage      
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     depends_on:
-      - orchestrator
+      - orchestrator-01
+      - postgres
     restart: on-failure
+
+
+  
+  
