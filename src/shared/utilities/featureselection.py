@@ -1,13 +1,11 @@
 from typing import List
 import pandas as pd
+import numpy as np
 
 
 class CICIDSFeatureSelector:
     """
     Feature selector per CIC-IDS2018.
-
-    Calcola le feature da eliminare solo sul training set,
-    poi applica la stessa trasformazione a train e test.
     """
 
     def __init__(
@@ -33,27 +31,40 @@ class CICIDSFeatureSelector:
             col for col in constant_features
             if col != self.target_column
         ]
-
         columns_to_drop.extend(constant_features)
+
+        # STAMPA COMPATIBILE COLAB - STEP 1
+        print("=" * 60)
+        print("   RIMOZIONE FEATURE COSTANTI (QUASI-CONSTANT FEATURES)")
+        print("=" * 60)
+        print(f"Colonne eliminate ({len(constant_features)}): {constant_features}")
+        print("=" * 60)
 
         # 2. Feature con bassa correlazione col target calcolate solo sul train
         corr_with_label = (
             train_df
             .corr(numeric_only=True)[self.target_column]
-            .drop(self.target_column)
+            .drop(self.target_column, errors="ignore")
             .abs()
         )
 
+        # Trattiamo i NaN generati da divisioni per zero residue come bassa correlazione
         low_corr_features = corr_with_label[
-            corr_with_label < self.correlation_threshold
+            (corr_with_label < self.correlation_threshold) | (corr_with_label.isna())
         ].index.tolist()
 
         columns_to_drop.extend(low_corr_features)
 
+        print("=" * 60)
+        print("   FILTRAGGIO FEATURE MEDIANTE SOGLIA DI CORRELAZIONE")
+        print("=" * 60)
+        print(f"Numero feature eliminate: {len(low_corr_features)}")
+        print("=" * 60)
+
         # Rimuove duplicati mantenendo ordine
         self.columns_to_drop_ = list(dict.fromkeys(columns_to_drop))
 
-        print(f" • Feature selezionate per la rimozione: {len(self.columns_to_drop_)}")
+        print(f"\n [FeatureSelector] Totale feature univoche contrassegnate per la rimozione: {len(self.columns_to_drop_)}")
 
         return self
 
@@ -61,7 +72,14 @@ class CICIDSFeatureSelector:
         if self.columns_to_drop_ is None:
             raise RuntimeError("Devi chiamare fit() prima di transform().")
 
-        return df.drop(columns=self.columns_to_drop_, errors="ignore").copy()
+        df_transformed = df.drop(columns=self.columns_to_drop_, errors="ignore").copy()
+        
+        # Estrazione reale delle feature residue direttamente dal dataset aggiornato
+        features_attuali = [col for col in df_transformed.columns if col != self.target_column]
+        print(f" • Features predittive totali rimaste ({len(features_attuali)}): {features_attuali}")
+        print(f" • Dimensione attuale del blocco (X + y): {df_transformed.shape}\n")
+        
+        return df_transformed
 
     def fit_transform(self, train_df: pd.DataFrame) -> pd.DataFrame:
         self.fit(train_df)
