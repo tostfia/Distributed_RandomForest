@@ -49,22 +49,39 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload)
         target_col = "Label"
 
-        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type}")
+        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type} (Ordine Speculare a Colab)")
+
+        # Inizializziamo lo splitter
+        splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(
+            target_column=target_col, test_size=0.2, random_state=base_seed
+        )
 
         # --- ESTRAZIONE ---
         if dataset_type == "synthetic":
             loader = SyntheticDataLoader(n_samples=100000, random_seed=base_seed, target_column=target_col)
-            df_clean = loader.load()
+            train_df, test_df = splitter.split(loader.load())
         else:
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
             loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
             df_raw = loader.load()
+            
+            # Istanziamo il nuovo preprocessor modificato
             preprocessor = CICIDSPreprocessor(target_column=target_col)
-            df_clean = preprocessor.process(df_raw)
-    
-        splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
-        train_df, test_df = splitter.split(df_clean)
+
+            # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO ───
+            df_binarized = preprocessor.binarize_target(df_raw)
+            
+            # ─── FASE 2: SPLIT STRATIFICATO ADESSO SICURO ───
+            print(f"[{self.orchestrator_name}] Esecuzione Split Stratificato...")
+            train_df, test_df = splitter.split(df_binarized)
+
+            # ─── FASE 3 & 4: PREPROCESAMENTO INDIPENDENTE (Metadata + NaN/inf) ───
+            print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TRAIN SET ===")
+            train_df = preprocessor.process(train_df)
+            
+            print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TEST SET ===")
+            test_df = preprocessor.process(test_df)
 
         # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
@@ -72,17 +89,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
             train_df = fs.fit_transform(train_df)
             test_df = fs.transform(test_df)
 
-        # --- SALVATAGGIO COORDINATO DAI DAO (Train + Test per abilitare il failover dell'inferenza) ---
+        # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
             self.train_data_path = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{self.current_job_id}.csv"
             self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{self.current_job_id}.csv"
         else:
-            # Sostituisci le due righe qui sotto:
             self.train_data_path = f"./.local_storage/shared_train_{self.current_job_id}.csv"
             self.test_data_path = f"./.local_storage/shared_test_{self.current_job_id}.csv"
             
-        print(f"[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
-        
+        print(f"\n[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         try:
             dao = DatasetDAOFactory.get_dao(self.environment)
             dao.save_dataset(path=self.train_data_path, df=train_df)

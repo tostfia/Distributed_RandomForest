@@ -1,8 +1,6 @@
 from typing import List, Optional
-
 import numpy as np
 import pandas as pd
-
 
 class CICIDSPreprocessor:
     """
@@ -14,14 +12,13 @@ class CICIDSPreprocessor:
         self,
         target_column: str = "Label",
         drop_metadata_columns: bool = True,
-        drop_invalid_rows: bool = True,  # Mantenuto True per proteggere i Worker dai valori infiniti
+        drop_invalid_rows: bool = True,
         metadata_keywords: Optional[List[str]] = None,
     ):
         self.target_column = target_column
         self.drop_metadata_columns = drop_metadata_columns
         self.drop_invalid_rows = drop_invalid_rows
         
-        # Parole chiave legate all'infrastruttura di rete
         self.metadata_keywords = metadata_keywords or [
             "timestamp",
             "flow id",
@@ -30,20 +27,21 @@ class CICIDSPreprocessor:
             "mac",
         ]
 
-    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+    def binarize_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Esegue l'intera pipeline di trasformazione sequenziale.
+        FASE 1 DI COLAB: Rimozione righe spurie e binarizzazione del target (Benign=0, rest=1).
+        Eseguire sul dataset intero prima dello split per evitare crash sulle classi rare.
         """
-        print("Avvio preprocessing CIC-IDS2018...")
-        initial_shape = df.shape
-
-        # 1. Rimozione righe di intestazione spuria (Esatta sintassi Colab)
+        print("Pre-binarizzazione Target CIC-IDS2018...")
+        df = df.copy()
+        
+        # 1. Rimozione righe di intestazione spuria
         df = df[~df[self.target_column].isin(['Label', ' Label', 'Label '])].copy()
 
-        # 2. Codifica del Target (Benign=0, tutto il resto=1)
+        # 2. Codifica del Target
         df[self.target_column] = np.where(df[self.target_column] == 'Benign', 0, 1).astype(np.int8)
-
-        # 3. Report statistico immediato
+        
+        # Report statistico immediato sul dato totale
         total_records = len(df)
         if total_records > 0:
             count_benign = int((df[self.target_column] == 0).sum())
@@ -52,27 +50,33 @@ class CICIDSPreprocessor:
             pct_attack = (count_attack / total_records) * 100
 
             print("\n=======================================================")
-            print("  SOVRASCRITTURA EFFETTUATA PER CLASSIFICAZIONE BINARIA")
+            print("  SOVRASCRITTURA EFFETTUATA PER CLASSIFICAZIONE BINARIA (PRE-SPLIT)")
             print("=======================================================")
             print(f"  Classe Codificata [0] -> 0 (Benign)   :   {count_benign:,} record ({pct_benign:.2f}%)".replace(',', '.'))
             print(f"  Classe Codificata [1] -> 1 (Attacco)  :   {count_attack:,} record ({pct_attack:.2f}%)".replace(',', '.'))
-            print("=======================================================")
+            print("=======================================================\n")
+            
+        return df
 
-        # 4. Rimozione Metadati non generalizzabili (Data Leakage)
+    def process(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        FASE 3 E 4 DI COLAB: Rimozione metadati e sanificazione NaN/inf.
+        Da eseguire in modo indipendente sulle singole fette (Train e Test) dopo lo split.
+        """
+        df = df.copy()
+        initial_shape = df.shape
+
+        # 1. Rimozione Metadati non generalizzabili (Data Leakage)
         if self.drop_metadata_columns:
             df = self._drop_metadata_columns(df)
 
-        # 5. Cast numerico e Sanificazione finale per i Worker
+        # 2. Cast numerico e Sanificazione finale per i Worker
         df = self._convert_feature_columns_to_numeric(df)
 
         if self.drop_invalid_rows:
             df = self._drop_invalid_rows(df)
 
-        print("\n[OK] Preprocessing completato.")
-        print(f" • Shape iniziale:    {initial_shape}")
-        print(f" • Shape finale:      {df.shape}")
-        print(" • Target codificato: 0 = Benign, 1 = Attack")
-
+        print(f" • Pulizia completata. Shape: {initial_shape} -> {df.shape}")
         return df
 
     @staticmethod
@@ -90,7 +94,7 @@ class CICIDSPreprocessor:
         ]
         if columns_to_drop:
             df = df.drop(columns=columns_to_drop, errors="ignore")
-            print(f" • Colonne metadata rimosse ({len(columns_to_drop)})")
+            print(f"   - Colonne metadata rimosse ({len(columns_to_drop)})")
         return df
 
     def _convert_feature_columns_to_numeric(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -106,5 +110,5 @@ class CICIDSPreprocessor:
         df = df.dropna().reset_index(drop=True)
         removed = rows_before - df.shape[0]
         if removed > 0:
-            print(f" • Righe rimosse per NaN/inf: {removed}")
+            print(f"   - Righe rimosse per NaN/inf: {removed}")
         return df

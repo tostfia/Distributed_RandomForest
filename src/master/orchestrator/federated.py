@@ -44,8 +44,8 @@ class FederatedOrchestrator(BaseOrchestrator):
 
     def _prepare_data_federated(self, payload: dict, base_seed: int, worker_names: list):
         """
-        Scarica il dataset dall'URL, lo splitta in 80/20 e lo frammenta in N shard
-        salvandoli direttamente nelle partizioni/cache locali dei rispettivi worker.
+        Scarica il dataset dall'URL, lo binarizza, lo splitta in 80/20 (ordine esatto Colab), 
+        applica il preprocessing e la feature selection separatamente, e infine lo frammenta in N shard.
         """
         self.current_job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
@@ -53,13 +53,13 @@ class FederatedOrchestrator(BaseOrchestrator):
         target_col = "Label"
         num_workers = len(worker_names)
 
-        print(f"\n[{self.orchestrator_name}] Avvio ETL FEDERATO. Tipo dataset: {dataset_type}")
+        print(f"\n[{self.orchestrator_name}] Avvio ETL FEDERATO. Tipo dataset: {dataset_type} (Ordine Speculare a Colab)")
 
         # --- ESTRAZIONE (Se Sintetico la partizione nativa avviene a livello worker) ---
         if dataset_type == "synthetic":
             print(f"[{self.orchestrator_name}] Dataset sintetico rilevato. La generazione avverrà nativamente sui nodi.")
             for i, name in enumerate(worker_names):
-                self.worker_shards_paths[name] = f"NATIVE_PARTITIONED|{i}"
+                self.worker_shards_paths[name] = f"NATIVE_PARTITIONED||{i}"
             return
 
         # --- ESTRAZIONE DATASET REALE (Da URL) ---
@@ -68,21 +68,34 @@ class FederatedOrchestrator(BaseOrchestrator):
         
         loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
         df_raw = loader.load()
+
+        # Istanziamo il nuovo preprocessor modificato e lo splitter
         preprocessor = CICIDSPreprocessor(target_column=target_col)
-        df_clean = preprocessor.process(df_raw)
-
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=base_seed)
-        train_df, test_df = splitter.split(df_clean)
 
-        # --- FEATURE SELECTION ---
+        # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO (Previene il crash delle classi rare) ───
+        df_binarized = preprocessor.binarize_target(df_raw)
+
+        # ─── FASE 2: SPLIT STRATIFICATO SU DATO BINARIZZATO (Esatto ordine Colab) ───
+        print(f"[{self.orchestrator_name}] Esecuzione Split Stratificato...")
+        train_df, test_df = splitter.split(df_binarized)
+
+        # ─── FASE 3 & 4: PREPROCESAMENTO INDIPENDENTE SUI DUE PEZZI (Metadata + NaN/inf) ───
+        print(f"\n[{self.orchestrator_name}] === PREPROCESSING FEDERATO SUL TRAIN SET ===")
+        train_df = preprocessor.process(train_df)
+        
+        print(f"\n[{self.orchestrator_name}] === PREPROCESSING FEDERATO SUL TEST SET ===")
+        test_df = preprocessor.process(test_df)
+
+        # ─── FASE 5: FEATURE SELECTION CON FIT/TRANSFORM (Previene Data Leakage) ───
         fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
 
-        # --- PARTIZIONAMENTO E DISTRIBUZIONE SULLE CACHE DEI WORKER VIA DAO ---
-        print(f"[{self.orchestrator_name}] Partizionamento dei DataFrame in {num_workers} shard bilanciati...")
+        # ─── FASE 6: PARTIZIONAMENTO E DISTRIBUZIONE SULLE CACHE DEI WORKER VIA DAO ───
+        print(f"\n[{self.orchestrator_name}] Partizionamento dei DataFrame in {num_workers} shard bilanciati...")
         
-        # Divisione matematica delle righe dei due set
+        # Divisione matematica delle righe dei due set pronti e allineati
         train_shards = np.array_split(train_df, num_workers)
         test_shards = np.array_split(test_df, num_workers)
         
@@ -93,19 +106,17 @@ class FederatedOrchestrator(BaseOrchestrator):
                 w_train_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/train_{self.current_job_id}.csv"
                 w_test_path = f"s3://my-cluster-datasets-bucket/federated_cache/{name}/test_{self.current_job_id}.csv"
             else:
-                # Spostiamo le cache dei singoli worker dentro la cartella condivisa da Docker
                 w_train_path = f"./.local_storage/{name}_cache/train_{self.current_job_id}.csv"
                 w_test_path = f"./.local_storage/{name}_cache/test_{self.current_job_id}.csv"
                 os.makedirs(os.path.dirname(w_train_path), exist_ok=True)
 
-            # Salvataggio degli shard
+            # Salvataggio degli shard ripuliti e allineati al millimetro
             dao.save_dataset(path=w_train_path, df=train_shards[i])
             dao.save_dataset(path=w_test_path, df=test_shards[i])
             
-            # Tracciamo solo il path di train da passare via RPC; il test verrà caricato implicitamente nell'inferenza
             self.worker_shards_paths[name] = w_train_path
             print(f" [{self.orchestrator_name}] Shard inviato alla cache di {name} -> {w_train_path}")
-
+            
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
         self.current_job_id = payload.get("job_id", "unknown_job")
         total_step_trees = target_alberi - start_alberi
