@@ -20,8 +20,8 @@ class SQSQueueInterface(ABC):
 
 class StateManagerInterface(ABC):
     @abstractmethod
-    def initiate_request(self, job_id: str, dataset_path: str) -> None:
-        """Registra la richiesta iniziale nel sistema di tracciamento dello stato."""
+    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
+        """Registra la richiesta iniziale nel sistema di tracciamento dello stato passandogli il seed nativo."""
         pass
 
     @abstractmethod
@@ -36,8 +36,8 @@ class StateManagerInterface(ABC):
         status: str, 
         orchestrator_id: str, 
         retries: int = 0,
-        base_random_state: int = 42,  # Supporto al seed di failover
-        alberi_addestrati: int = 0    # Supporto al progresso del checkpoint
+        base_random_state: Optional[int] = None,
+        alberi_addestrati: int = 0    
     ) -> None:
         """Aggiorna lo stato di avanzamento tracciando l'orchestratore, i tentativi e i checkpoint."""
         pass
