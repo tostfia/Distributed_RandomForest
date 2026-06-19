@@ -262,7 +262,7 @@ def handle_training():
     target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
     
     try:
-        state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path)
+        state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
         print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
         

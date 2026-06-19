@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 import pandas as pd
 
@@ -9,16 +8,6 @@ from src.shared.utilities.preprocessing import CICIDSPreprocessor
 
 
 class DatasetETLManager:
-    """
-    Coordina la pipeline ETL del dataset rispettando l'ambiente (.env).
-
-    Extract:
-        Usa un DatasetLoader (Grezzo, Sintetico, ecc.).
-    Transform:
-        Applica opzionalmente il CICIDSPreprocessor.
-    Load:
-        Salva il DataFrame risultante tramite il DAO corretto (Locale o S3).
-    """
 
     def __init__(
         self,
@@ -27,7 +16,6 @@ class DatasetETLManager:
     ):
         self.loader = loader
         self.preprocessor = preprocessor
-        # Inizializziamo la configurazione di sistema legata all'env
         self.cfg = SystemConfig()
 
     def run(self, output_url: str) -> str:
@@ -61,11 +49,7 @@ class DatasetETLManager:
         print(f"[ETL-Manager] Infrastruttura rilevata dal .env: {self.cfg.env.upper()}")
 
         try:
-            # Sfruttiamo la Factory per ottenere il DAO corretto (LocalFileSystemDAO o AwsS3DAO)
             dao = DatasetDAOFactory.get_dao(self.cfg.env)
-            
-            # Utilizziamo il metodo del DAO per persistere il file.
-            # Nota: Assicurati che nel tuo DAO ci sia un metodo per salvare (es: save_dataset o to_csv)
             dao.save_dataset(df, output_url)
             
         except Exception as exc:

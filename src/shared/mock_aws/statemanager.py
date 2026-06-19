@@ -7,8 +7,8 @@ TABLE_NAME = "ModelStatus"
 
 class MockStateManager(StateManagerInterface):
     
-    def initiate_request(self, job_id: str, dataset_path: str) -> None:
-        """Registra il job appena nato sul database in stato QUEUED."""
+    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
+        """Registra il job appena nato sul database in stato QUEUED accettando il seed dal modello Pydantic."""
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
@@ -16,10 +16,10 @@ class MockStateManager(StateManagerInterface):
             "retries": 0,
             "last_orchestrator": None,
             "alberi_addestrati": 0,
-            "base_random_state": 123
+            "base_random_state": seed
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
-        print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}...")
+        print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
 
     def obtain_request(self, job_id: str) -> Optional[dict]:
         """Ottieni lo stato attuale del job da DynamoDB."""
@@ -31,12 +31,13 @@ class MockStateManager(StateManagerInterface):
         status: str, 
         orchestrator_id: str, 
         retries: int = 0, 
-        base_random_state: int = 123, 
+        base_random_state: Optional[int] = None,
         alberi_addestrati: int = 0
     ) -> None:
-        """Aggiorna lo stato del job tracciando i progressi dell'addestramento e i failover."""
-        # Recuperiamo lo stato corrente per non perdere informazioni preesistenti (es: dataset_path)
+        """Aggiorna lo stato del job tracciando i progressi senza imporre un seed di fallback."""
         current_job = self.obtain_request(job_id) or {}
+        
+        final_seed = base_random_state if base_random_state is not None else current_job.get("base_random_state")
         
         payload = {
             "status": status,
@@ -44,17 +45,16 @@ class MockStateManager(StateManagerInterface):
             "timestamp": time.time(),
             "retries": retries,
             "last_orchestrator": orchestrator_id,
-            "base_random_state": base_random_state,   # Salviamo il seed corrente/aggiornato
-            "alberi_addestrati": alberi_addestrati     # Salviamo l'indice del checkpoint degli alberi
+            "base_random_state": final_seed,   
+            "alberi_addestrati": alberi_addestrati     
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         
-        # Log dettagliato per mostrare al professore che lo stato sta avanzando nel DB simulato
-        info_progress = f" | Alberi fatti: {alberi_addestrati} | Seed: {base_random_state}" if alberi_addestrati > 0 else ""
+        info_progress = f" | Alberi fatti: {alberi_addestrati} | Seed: {final_seed}" if alberi_addestrati > 0 else f" | Seed: {final_seed}"
         print(f"[StateManager] Job ID: {job_id[:8]}... aggiornato a stato: {status} da {orchestrator_id}{info_progress}")
 
     def complete_request(self, job_id: str, orchestrator_id: str) -> None:
-        """Finalizza la richiesta impostando lo stato su COMPLETED."""
+        """Finalizza la richiesta impostando lo stato su COMPLETED preservando il seed esistente."""
         current_job = self.obtain_request(job_id) or {}
         
         payload = {
@@ -63,15 +63,14 @@ class MockStateManager(StateManagerInterface):
             "timestamp": time.time(),
             "retries": current_job.get("retries", 0),
             "last_orchestrator": orchestrator_id,
-            "base_random_state": current_job.get("base_random_state", 123),
-            "alberi_addestrati": current_job.get("alberi_addestrati", 0) # Mantiene l'ultimo checkpoint massimo
+            "base_random_state": current_job.get("base_random_state"),
+            "alberi_addestrati": current_job.get("alberi_addestrati", 0) 
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
-        print(f"[StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id}")
+        print(f"[StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id} | Seed finale: {payload['base_random_state']}")
 
     def register_worker_task(self, job_id: str, worker_id: str, status: str) -> None:
         """Registra che un worker specifico ha ricevuto una parte del lavoro."""
-        # Creiamo una chiave unica: job_id#worker_id
         task_id = f"{job_id}#{worker_id}"
         payload = {
             "status": status,
@@ -79,7 +78,6 @@ class MockStateManager(StateManagerInterface):
             "job_id": job_id,
             "worker_id": worker_id
         }
-        # Supponendo che dynamo_db.put_item gestisca anche una tabella 'WorkerTasks'
         dynamo_db.put_item("WorkerTasks", task_id, payload)
         print(f"[StateManager] Task registrato: Job {job_id[:8]} -> Worker {worker_id} in stato {status}")
 
@@ -93,14 +91,10 @@ class MockStateManager(StateManagerInterface):
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
         """Controlla se tutti i task per un dato Job sono COMPLETED."""
-        
         response = dynamo_db.scan_table("WorkerTasks") 
         all_tasks = response.get("Items", [])
         
-        # Filtriamo i task appartenenti a questo specifico Job
         job_tasks = [t for t in all_tasks if t.get('job_id') == job_id]
-        
-        # Contiamo quanti hanno finito con successo
         completed_tasks = [t for t in job_tasks if t.get('status') == 'COMPLETED']
         
         print(f"[StateManager] Job {job_id[:8]} -> Worker pronti: {len(completed_tasks)}/{expected_count}")
