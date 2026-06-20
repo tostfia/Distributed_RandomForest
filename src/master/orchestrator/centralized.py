@@ -138,7 +138,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         def _rpc_call(w_name, w_info, n_trees, w_seed):
             print(f" [RPC -> {w_name}] Invio richiesta per {n_trees} alberi su {w_info['host']}:{w_info['port']}...")
-            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True,'sync_request_timeout': 600})
             connessioni_attive.append(conn)  
             try: 
                 remote_trees = conn.root.train_subset_forest(source_info=source_info, num_trees=n_trees, base_seed=w_seed, max_depth=max_depth)
@@ -224,6 +224,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA ===")
 
+        inference_start_time = time.perf_counter()
+
         model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
@@ -269,12 +271,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         def _rpc_inference_call(w_name, w_info, subset_trees_chunk):
             print(f" [RPC INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi...")
-            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True})
+            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True,'sync_request_timeout': 600})
             connessioni_attive.append(conn)
             
             serialized_chunk = pickle.dumps(subset_trees_chunk)
             raw_response = conn.root.predict_subset_forest(serialized_chunk, serialized_X_test)
             return pickle.loads(raw_response)
+        
+        rpc_start_time = time.perf_counter()
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             future_to_worker = {}
@@ -306,6 +310,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
             try: conn.close()
             except Exception: pass
 
+        rpc_inference_time = time.perf_counter() - rpc_start_time
+
         predictions_matrix = np.array(all_worker_predictions)
         print(f"[{self.orchestrator_name}] Matrice complessiva predizioni generata: {predictions_matrix.shape}")
 
@@ -313,9 +319,16 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"  VALUTAZIONE PRESTAZIONI MODELLO DISTRIBUITO (JOB: {job_id[:8]})")
         print("═" * 75)
 
+        total_inference_time = time.perf_counter() - inference_start_time
+
+        print("═" * 75)
+        print(f"  TEMPO TOTALE DI INFERENZA:              {total_inference_time:.4f} secondi")
+        print("═" * 75 + "\n")
+        print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
+
         if tree_type == "classifier":
             # Calcoliamo il voto di maggioranza esente da bug tramite weighted_mode ad un solo peso uniforme (1.0)
-            uniform_weights = np.ones(predictions_matrix.shape[0])
+            uniform_weights = np.ones(predictions_matrix.shape[0]).reshape(-1, 1)
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
             final_predictions = final_predictions.ravel()
             

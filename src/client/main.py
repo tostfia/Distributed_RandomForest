@@ -13,6 +13,8 @@ cfg = SystemConfig()
 # CENTRALIZZAZIONE: Definiamo il percorso unico per config.json nella cartella mock condivisa
 CONFIG_PATH = os.path.join("./.local_storage", "config.json")
 
+BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config.json")
+
 # 2. Inizializziamo i servizi globali UNA volta sola all'avvio dello script
 try:
     sqs_queue, state_manager = get_aws_services(cfg.env)
@@ -24,6 +26,25 @@ except Exception as e:
 def get_input(prompt: str, default: str = "") -> str:
     user_input = input(prompt).strip()
     return user_input if user_input else default
+
+
+def load_hyperparameters_from_config(mode:str) -> Hyperparameters:
+    if not os.path.exists(BASELINE_CONFIG_PATH):
+        raise FileNotFoundError(f"Il file di configurazione '{BASELINE_CONFIG_PATH}' non è stato trovato."  )
+    
+    with open(BASELINE_CONFIG_PATH, "r", encoding="utf-8") as f:
+        baseline_data = json.load(f)
+    raw_hp = baseline_data.get("hyperparameters", {})
+    if not raw_hp:
+        raise ValueError("La sezione 'hyperparameters' è mancante o vuota nel file di configurazione della baseline.")
+    known_fields = {"n_estimators", "max_depth", "class_weight", "max_samples", "bootstrap", "tree_type", "target_column"}
+    hp_data  = {k:v for k, v in raw_hp.items() if k in known_fields}
+    if mode == "federated":
+        hp_data["bootstrap"] = False
+        hp_data["max_samples"] = 1.0
+    hp_data.setdefault("target_column", "Label")
+    return Hyperparameters(**hp_data)
+
 
 
 def run_predefined_tests():
@@ -189,54 +210,23 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
 
     # 4. Configurazione Iperparametri
-    print("\n[4] Configurazione Matematica degli Alberi:")
+    print("\n[4] Configurazione Iperparametri da '{BASELINE_CONFIG_PATH}':")
     try:
-        n_estimators = int(get_input("  • Numero totale di alberi (n_estimators): ", "100"))
-        max_depth_raw = get_input("  • Profondità massima (max_depth - Invio per illimitata): ")
-        max_depth = int(max_depth_raw) if max_depth_raw else None
-        class_weight = get_input("  • Bilanciamento classi (class_weight es: balanced / Invio per None): ") or None
- 
-        if mode == "centralized":
-            bootstrap_raw = get_input("  • Usa bootstrap sampling? (S/N, default S): ", "S").upper()
-            bootstrap = bootstrap_raw != "N"
- 
-            if bootstrap:
-                max_samples_raw = get_input("  • Frazione campioni per albero (max_samples, es: 0.8, default 1.0): ", "1.0")
-                max_samples = float(max_samples_raw)
-                if not (0.0 < max_samples <= 1.0):
-                    raise ValueError("max_samples deve essere compreso tra 0 e 1.")
-            else:
-                max_samples = 1.0
-                print("  • max_samples: impostato a 1.0 automaticamente (bootstrap disabilitato)")
-        else:
-            bootstrap = False
-            max_samples = 1.0
-            print("  • Bootstrap e max_samples: disabilitati automaticamente (modalità Federata)")
- 
-        print("  • Tipo di task:")
-        print("    [1] Classificazione (usa DecisionTreeClassifier)")
-        print("    [2] Regressione     (usa DecisionTreeRegressor)")
-        tree_type_raw = get_input("    Scegli: ", "1")
-        tree_type = "classifier" if tree_type_raw == "1" else "regressor"
- 
-        target_column = "Label" 
-        print(f"  [INFO] Colonna target impostata automaticamente a: {target_column}")
- 
-    except ValueError as e:
-        print(f"\n[ERRORE] Input non valido: {e}. Riavvia il configuratore.")
+        hp_obj = load_hyperparameters_from_config(mode)
+        print(f"  [OK] Iperparametri caricati da baseline: n_estimators={hp_obj.n_estimators}, max_depth={hp_obj.max_depth}, class_weight={hp_obj.class_weight}, bootstrap={hp_obj.bootstrap}, max_samples={hp_obj.max_samples}, tree_type={hp_obj.tree_type}")
+    except FileNotFoundError as e:
+        print(f"\n[ERRORE] {e}")
         return
+    except Exception as e:
+        print(f"\n[ERRORE] Impossibile caricare gli iperparametri dalla baseline: {e}")
+        return
+        
+        
+            
 
     # 5. Validazione Pydantic
     try:
-        hp_obj = Hyperparameters(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            class_weight=class_weight,
-            max_samples=max_samples,
-            bootstrap=bootstrap,
-            tree_type=tree_type,
-            target_column=target_column,
-        )
+        
         
         request = TrainingRequest(
             environment=environment,

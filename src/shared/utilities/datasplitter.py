@@ -1,5 +1,5 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 from typing import Tuple
 
 class StratifiedDataSplitter:
@@ -35,12 +35,11 @@ class StratifiedDataSplitter:
 
         print(f"\n[Splitter] Esecuzione split stratificato (Test: {self.test_size*100}%, Seed: {self.random_state})...")
         
-        train_df, test_df = train_test_split(
-            df, 
-            test_size=self.test_size, 
-            random_state=self.random_state, 
-            stratify=df[self.target_column]
-        )
+        sss =  StratifiedShuffleSplit(n_splits=1, test_size=self.test_size, random_state=self.random_state)
+        train_df, test_df = None, None
+        for train_index, test_index in sss.split(df, df[self.target_column]):
+            train_df = df.iloc[train_index]
+            test_df = df.iloc[test_index]
         
         print(f"   -> Train set isolato: {train_df.shape[0]} istanze")
         print(f"   -> Test set isolato:  {test_df.shape[0]} istanze")

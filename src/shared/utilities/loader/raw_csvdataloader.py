@@ -140,6 +140,9 @@ class RawCSVDataLoader(DatasetLoader):
             if 'label' in df_temp.columns:
                 df_temp = df_temp.rename(columns={'label': 'Label'})
 
+            cols_to_convert  = df_temp.columns.difference(['Label'])
+            df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors='coerce')
+
             return df_temp
 
         except Exception as exc:

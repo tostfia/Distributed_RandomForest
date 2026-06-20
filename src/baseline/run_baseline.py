@@ -25,6 +25,7 @@ def run_baseline():
 
     # Seme globale sincronizzato con il cluster e Colab
     RANDOM_SEED = 123
+    
     target_col = "Label"
     
     # Inizializziamo il gestore della configurazione di sistema (.env)
@@ -72,10 +73,7 @@ def run_baseline():
         loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
         df_raw = loader.load()
         
-        # 2. Istanziamo il RawCSVDataLoader passandogli la CARTELLA.
-        # Applicherà internamente lo skip_logic (random.random() > 0.01) riga per riga.
-        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
-        df_raw = loader.load()
+        
         
         # Istanziamo i componenti di trasformazione
         preprocessor = CICIDSPreprocessor(target_column=target_col)
@@ -115,20 +113,33 @@ def run_baseline():
     # ---------------------------------------------------------
     print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning 5-Fold)...")
     
-    param_dist = {
-        'n_estimators': [10, 20, 30],
-        'max_depth': [10, 20, None],
-        'min_samples_split': [2, 5, 10]
-    }
-
+    param_dist = [
+        {
+            'n_estimators': [10, 20, 30],
+            'max_depth': [10, 20, None],
+            'min_samples_split': [2, 5, 10],
+            'class_weight': [None, 'balanced'],
+            'bootstrap': [True],
+            'max_samples':[0.5,0.7,0.8,1.0]
+        },
+        {
+            'n_estimators': [10, 20, 30],
+            'max_depth': [10, 20, None],
+            'min_samples_split': [2, 5, 10],
+            'class_weight': [None, 'balanced'],
+            'bootstrap': [False],
+        },
+    ]
+            
     search = RandomizedSearchCV(
         estimator=RandomForestClassifier(random_state=RANDOM_SEED),
         param_distributions=param_dist,
-        n_iter=5,
+        n_iter=10,
         cv=5,
         scoring={'accuracy': 'accuracy', 'precision': 'precision', 'recall': 'recall', 'f1': 'f1'},
         refit='f1',
         n_jobs=-1,
+        verbose=1,
         random_state=RANDOM_SEED
     )
 
@@ -147,16 +158,20 @@ def run_baseline():
     # ---------------------------------------------------------
     # FASE 3: SCRITTURA MANIFESTO CONFIG.JSON
     # ---------------------------------------------------------
+    best_booststrap = bool(best_params.get("bootstrap", True))
     config_data = {
         "mode": "distributed",
         "dataset_type": dataset_type,
         "dataset_path": data_folder if dataset_type == "real" else "synthetic",
         "hyperparameters": {
             "n_estimators": int(best_params.get("n_estimators", 100)),
-            "max_depth": best_params.get("max_depth") if best_params.get("max_depth") is None else int(best_params.get("max_depth")),
+            "max_depth": best_params.get("max_depth") ,
             "min_samples_split": int(best_params.get("min_samples_split", 2)),
             "class_weight": best_params.get("class_weight", None),
+            "bootstrap": best_booststrap,
+            "max_samples": float(best_params.get("max_samples", 1.0)) if best_booststrap else 1.0,
             "tree_type": "classifier",
+            "target_column": target_col,
             "random_state": int(RANDOM_SEED)
         }
     }
@@ -180,15 +195,19 @@ def run_baseline():
     # FASE 4: ADDESTRAMENTO FINALE (T_seq) & INFERENZA LOCALE
     # ---------------------------------------------------------
     print("\n>>> FASE 4: Addestramento Finale Monolitico per estrazione T_seq...")
-    tree_clf = RandomForestClassifier(
+    rf_kwargs = dict(
         n_estimators=config_data["hyperparameters"]["n_estimators"],
         max_depth=config_data["hyperparameters"]["max_depth"],
         min_samples_split=config_data["hyperparameters"]["min_samples_split"],
-        bootstrap=True,
+        bootstrap=config_data["hyperparameters"]["bootstrap"],
         class_weight=config_data["hyperparameters"]["class_weight"],
         n_jobs=-1,
         random_state=RANDOM_SEED
     )
+    if config_data["hyperparameters"]["bootstrap"]:
+        rf_kwargs["max_samples"] = config_data["hyperparameters"]["max_samples"]
+
+    tree_clf  = RandomForestClassifier(**rf_kwargs)
     
     start_train_finale = time.perf_counter()
     tree_clf.fit(X_train, y_train)
