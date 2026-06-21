@@ -58,7 +58,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- ESTRAZIONE ---
         if dataset_type == "synthetic":
-            loader = SyntheticDataLoader(n_samples=100000, random_seed=base_seed, target_column=target_col)
+            loader = SyntheticDataLoader()
             train_df, test_df = splitter.split(loader.load())
         else:
             if not dataset_path: 

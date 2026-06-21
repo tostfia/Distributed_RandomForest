@@ -1,3 +1,5 @@
+import os
+import json
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
@@ -20,17 +22,26 @@ class SyntheticDataLoader(DatasetLoader):
 
     def __init__(
         self,
-        n_samples: int = 100000,
-        n_features: int = 20,
+        n_samples: int = None,
+        n_features: int = None,
         random_seed: int = RANDOM_SEED,
-        target_column: str = "Label"
+        target_column: str = None
     ):
+        config_path = "synthetic/synthetic_config.json"
+        config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+            except Exception as e:
+                print(f"Errore durante la lettura del file di configurazione: {e}")
+
         # La proporzione di feature informative è fissa all'80% per garantire un certo grado di complessità.
-        self.n_samples = n_samples
-        self.n_features = n_features
-        self.n_informative = int(n_features * 0.8)
+        self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 100000)
+        self.n_features = n_features if n_features is not None else config.get("n_features", 20)
+        self.n_informative = int(self.n_features * 0.8)
         self.random_seed = random_seed
-        self.target_column = target_column
+        self.target_column = target_column if target_column is not None else config.get("target_column", "Label")
 
         self._validate_parameters()
 

@@ -31,7 +31,7 @@ services:
       - AURORA_PASSWORD
     volumes:
       - .:/app
-      - ./data:/app/data
+      - ./synthetic:/app/synthetic
       - ./.local_storage:/app/.local_storage  
       - ./saved_models:/app/saved_models   
     command: python -m src.master.orchestrator.main
@@ -57,7 +57,7 @@ services:
       - AURORA_PASSWORD
     volumes:
       - .:/app
-      - ./data:/app/data
+      - ./synthetic:/app/synthetic
       - ./.local_storage:/app/.local_storage   
       - ./saved_models:/app/saved_models  
     command: python -m src.master.orchestrator.main
@@ -89,7 +89,7 @@ services:
       - AURORA_PASSWORD
     volumes:
       - .:/app
-      - ./data:/app/data
+      - ./synthetic:/app/synthetic
       - ./.local_storage:/app/.local_storage  
       - ./saved_models:/app/saved_models     
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
@@ -120,7 +120,7 @@ services:
       - AURORA_PASSWORD
     volumes:
       - .:/app
-      - ./data:/app/data
+      - ./synthetic:/app/synthetic
       - ./.local_storage:/app/.local_storage    
       - ./saved_models:/app/saved_models  
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}

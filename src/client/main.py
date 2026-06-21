@@ -197,7 +197,7 @@ def handle_training():
     if dataset_choice == "2":
         dataset_type = "synthetic"
         if mode == "centralized":
-            dataset_path = "/app/data/sintetic_data.csv"
+            dataset_path = "synthetic/synthetic_dataset.csv"
         else:
             dataset_path = "NATIVE_PARTITIONED"
         print(f"  [INFO] Configurato Dataset SINTETICO: {dataset_path}")
