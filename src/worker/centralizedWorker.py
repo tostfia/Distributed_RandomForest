@@ -38,6 +38,10 @@ class CentralizedWorker(BaseWorker):
             f"[CentralizedWorker] Inizializzato in ambiente: {self.environment.upper()} "
             f"con DAO: {type(self.dao).__name__}"
         )
+
+        self._cached_source = None
+        self._cached_X = None
+        self._cached_y = None
     
     def is_regression(self) -> bool:
         return self.tree_type == "regressor"
@@ -48,6 +52,10 @@ class CentralizedWorker(BaseWorker):
         Args:
             source_info (str): URL S3 o path locale passato dinamicamente dall'Orchestratore.
         """
+        
+        if self._cached_source == source_info and self._cached_X is not None and self._cached_y is not None:
+            print("[CentralizedWorker] Utilizzo dei dati già caricati in cache.")
+            return self._cached_X, self._cached_y
         print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da: {source_info}")
         df: pd.DataFrame = self.dao.load_dataset(source_info)
         
@@ -66,11 +74,15 @@ class CentralizedWorker(BaseWorker):
         else:
             y = y_df.to_numpy(dtype=np.int64)
         
+        self._cached_source = source_info
+        self._cached_X = X
+        self._cached_y = y
         print(
             f"[CentralizedWorker] Dati caricati con successo: "
             f"X shape = {X.shape}, y shape = {y.shape}"
         )
-        return X, y
+        
+        return self._cached_X, self._cached_y
 
     def _get_tree_class(self) -> type:
         """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""

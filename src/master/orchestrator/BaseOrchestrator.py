@@ -139,7 +139,9 @@ class BaseOrchestrator(ABC):
 
         try:
             alberi_totali = hp.get("n_estimators", 100)
-            step_alberi = 20
+            # Definiamo un numero di alberi non fisso 
+            num_worker_attuali  = max(1, self._get_active_worker_count())
+            step_alberi = max(20, num_worker_attuali * 10)  # Step dinamico basato sul numero di worker attivi
             current_alberi = alberi_gia_fatti
 
             while current_alberi < alberi_totali:

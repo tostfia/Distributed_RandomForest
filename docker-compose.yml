@@ -1,16 +1,17 @@
 services:
 
-  postgres:
-    image: postgres:15
-    container_name: aurora_mock
-    environment:
-      POSTGRES_DB: rf_locks
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-    ports:
-      - "5432:5432"
-    volumes:
-      - ./src/utilities/sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+  #postgres:
+    #image: postgres:15
+    #container_name: aurora_mock
+    #environment:
+     # POSTGRES_DB: rf_locks
+     # POSTGRES_USER: admin
+     # POSTGRES_PASSWORD: password
+    #ports:
+     # - "5432:5432"
+    #volumes:
+      #- ./src/utilities/sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+     
 
   orchestrator-01:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
@@ -29,11 +30,13 @@ services:
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
+      - .:/app
       - ./data:/app/data
-      - ./.local_storage:/app/.local_storage     
+      - ./.local_storage:/app/.local_storage  
+      - ./saved_models:/app/saved_models   
     command: python -m src.master.orchestrator.main
-    depends_on:
-      - postgres 
+    #depends_on:
+      #- postgres 
     restart: on-failure
   
   orchestrator-02:
@@ -53,11 +56,13 @@ services:
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
+      - .:/app
       - ./data:/app/data
-      - ./.local_storage:/app/.local_storage     
+      - ./.local_storage:/app/.local_storage   
+      - ./saved_models:/app/saved_models  
     command: python -m src.master.orchestrator.main
-    depends_on:
-      - postgres
+    #depends_on:
+      #- postgres
     restart: on-failure
 
   
@@ -83,12 +88,14 @@ services:
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
+      - .:/app
       - ./data:/app/data
-      - ./.local_storage:/app/.local_storage       
+      - ./.local_storage:/app/.local_storage  
+      - ./saved_models:/app/saved_models     
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     depends_on:
       - orchestrator-01
-      - postgres
+      #- postgres
     restart: on-failure
 
   worker-02:
@@ -112,12 +119,14 @@ services:
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
+      - .:/app
       - ./data:/app/data
-      - ./.local_storage:/app/.local_storage      
+      - ./.local_storage:/app/.local_storage    
+      - ./saved_models:/app/saved_models  
     command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
     depends_on:
       - orchestrator-01
-      - postgres
+      #- postgres
     restart: on-failure
 
 

@@ -7,27 +7,39 @@ from rpyc import Service, ThreadedServer
 import threading
 import time
 import pickle 
+from concurrent.futures import ThreadPoolExecutor
 
 from src.shared.config import SystemConfig  # <-- INCLUSO CONFIG CENTRALE
 from src.shared.binding.serviceregistry import ServiceRegistry
 
-
+_child_X  = None
+_child_y  = None
+def _init_child_process(X, y):
+    """Inizializza il processo figlio salvando i dati in memoria una sola volta."""
+    global _child_X, _child_y
+    _child_X = X
+    _child_y = y
 # Addestramento di un singolo albero (resta fuori dalla classe per il multiprocessing)
 def _train_single_tree_processor(args):
-    X, y, tree_seed, max_depth, max_samples, bootstrap, tree_class = args
+    """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
+    global _child_X, _child_y
+    tree_seed, max_depth, max_samples, bootstrap, tree_class = args
     np.random.seed(tree_seed)
-    n_samples = X.shape[0]
+    
+    # Preleviamo la shape direttamente dalla memoria condivisa del processo figlio
+    n_samples = _child_X.shape[0]
 
     if bootstrap:
         size = int(max_samples * n_samples) if max_samples else n_samples
         indices = np.random.choice(n_samples, size=size, replace=True)
-        X_train, y_train = X[indices], y[indices]
+        X_train, y_train = _child_X[indices], _child_y[indices]
     else: 
-        X_train, y_train = X, y
+        X_train, y_train = _child_X, _child_y
    
     tree = tree_class(splitter="best", max_depth=max_depth) 
     tree.fit(X_train, y_train)
     return tree
+
 
 
 class BaseWorker(Service, ABC): 
@@ -52,6 +64,12 @@ class BaseWorker(Service, ABC):
         self.max_samples = max_samples
         self.bootstrap = bootstrap
         self._stop_heartbeat = None
+
+        self._cached_pool  = None
+        self._cached_pool_source = None
+        self._cached_X_test_bytes = None
+        self._cached_X_eval = None
+
 
     @abstractmethod
     def is_regression(self):
@@ -112,6 +130,11 @@ class BaseWorker(Service, ABC):
             print(f"\n[+] [{self.worker_name}] Arresto del server in corso...")
             self._stop_heartbeat.set()
             heartbeat_thread.join(timeout=2)
+            
+            if self._cached_pool is not None:
+                self._cached_pool.close()
+                self._cached_pool.join()
+                print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
             try:
                 ServiceRegistry.deregister_worker(self.worker_name)
                 print(f"[+] [{self.worker_name}] Server arrestato e worker rimosso dal Service Registry.") 
@@ -154,21 +177,35 @@ class BaseWorker(Service, ABC):
         # 1. Recupero dati e classe dell'albero dalle classi figlie
         X, y = self._load_data(source_info)
         tree_class = self._get_tree_class()
-
-        # 2. Generazione dei parametri per i singoli core
-        worker_tasks = []
-        for i in range(num_trees):
-            tree_seed = base_seed + i
-            worker_tasks.append((X, y, tree_seed, max_depth, self.max_samples, self.bootstrap, tree_class))
+            
 
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
             print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Esecuzione diretta senza Pool.")
-            local_trees = [_train_single_tree_processor(worker_tasks[0])]
+            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class)
+
+            global _child_X, _child_y
+            _old_child_X, _old_child_y = _child_X, _child_y
+            _child_X, _child_y = X, y
+            try:
+                local_trees = [_train_single_tree_processor(direct_task)]
+            finally:
+                _child_X, _child_y = _old_child_X, _old_child_y
         else:
-            print(f"[WORKER] Avvio calcolo parallelo (Pool) per {num_trees} alberi.")
-            with Pool(processes=2) as pool: 
-                local_trees = pool.map(_train_single_tree_processor, worker_tasks)
+            if self._cached_pool_source != source_info or self._cached_pool is None:
+                if self._cached_pool is not None:
+                    self._cached_pool.close()
+                    self._cached_pool.join()
+                    print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
+                print(f"[WORKER] Creazione nuovo Pool di processi per {num_trees} alberi...")
+                self._cached_pool = Pool(processes=min(num_trees, os.cpu_count()), initializer=_init_child_process, initargs=(X, y))
+                self._cached_pool_source = source_info
+            print(f"[WORKER] Pool di processi pronto. Avvio addestramento di {num_trees} alberi...")
+            worker_tasks = []
+            for i in range(num_trees):
+                seed = base_seed + i
+                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class))
+            local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")
         return pickle.dumps(local_trees)
@@ -186,9 +223,13 @@ class BaseWorker(Service, ABC):
 
         # 2. Gestione asimmetrica Centralizzato vs Federato
         if serialized_X_test is not None:
-            # Caso Centralizzato: i dati arrivano direttamente dall'Orchestratore
-            X_eval = pickle.loads(serialized_X_test)
-            print(f"[{self.worker_name}] Utilizzo del testing set centralizzato fornito dall'Orchestratore.")
+            if self._cached_X_test_bytes != serialized_X_test:
+                self._cached_X_test_bytes = serialized_X_test
+                self._cached_X_eval = pickle.loads(serialized_X_test)
+                print(f"[{self.worker_name}] Decodificato il testing set centralizzato (Shape: {self._cached_X_eval.shape}).")
+            else:
+                print(f"[{self.worker_name}] Utilizzo del testing set centralizzato già in cache (Shape: {self._cached_X_eval.shape}).")
+            X_eval = self._cached_X_eval
         else:
             # Caso Federato: i dati di test risiedono localmente sul Worker
             if getattr(self, 'X_test', None) is None:
@@ -199,11 +240,9 @@ class BaseWorker(Service, ABC):
             X_eval = self.X_test
             print(f"[{self.worker_name}] Utilizzo del testing set federato locale (Shape: {X_eval.shape}).")
 
-        # 3. Computazione delle predizioni di ogni singolo albero della sotto-foresta
-        # Ogni albero produce un vettore riga di risposte per ciascun campione in X_eval
-        sub_predictions = []
-        for i, tree in enumerate(trees):
-            sub_predictions.append(tree.predict(X_eval))
+        print(f"[{self.worker_name}] Avvio inferenza parallela su {len(trees)} alberi...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            sub_predictions = list(executor.map(lambda tree: tree.predict(X_eval), trees))
             
         print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
         

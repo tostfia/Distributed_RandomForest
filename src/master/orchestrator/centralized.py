@@ -327,10 +327,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
 
         if tree_type == "classifier":
+            print("[DEBUG ORCHESTRATORE] Sto eseguendo il NUOVO codice con ones_like!")
             # Calcoliamo il voto di maggioranza esente da bug tramite weighted_mode ad un solo peso uniforme (1.0)
-            uniform_weights = np.ones(predictions_matrix.shape[0]).reshape(-1, 1)
+            uniform_weights = np.ones_like(predictions_matrix)
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
-            final_predictions = final_predictions.ravel()
+            final_predictions = final_predictions.ravel().astype(int)
+            y_test = y_test.astype(int)
             
             # --- CALCOLO METRICHE DETTAGLIATE ALLINEATE A COLAB ---
             accuracy = np.mean(final_predictions == y_test)
