@@ -5,8 +5,7 @@ import multiprocessing
 from src.shared.config import SystemConfig
 from src.worker.centralizedWorker import CentralizedWorker
 from src.worker.federatedWorker import FederatedWorker
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor # type: ignore
-
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor 
 try:
     multiprocessing.set_start_method('spawn', force=True)
     print("[MULTIPROCESSING] Metodo 'spawn' attivato per evitare crash RPyC.")

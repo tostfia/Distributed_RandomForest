@@ -2,14 +2,13 @@ from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
 import os
 import numpy as np
-import rpyc
 from rpyc import Service, ThreadedServer
 import threading
 import time
 import pickle 
 from concurrent.futures import ThreadPoolExecutor
 
-from src.shared.config import SystemConfig  # <-- INCLUSO CONFIG CENTRALE
+from src.shared.config import SystemConfig
 from src.shared.binding.serviceregistry import ServiceRegistry
 
 _child_X  = None
@@ -39,8 +38,6 @@ def _train_single_tree_processor(args):
     tree = tree_class(splitter="best", max_depth=max_depth) 
     tree.fit(X_train, y_train)
     return tree
-
-
 
 class BaseWorker(Service, ABC): 
     def __init__(

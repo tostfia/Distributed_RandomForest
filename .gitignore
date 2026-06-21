@@ -1,8 +1,4 @@
 # === CONFIGURAZIONI E SEGRETI ===
-# Ignora il file .env reale contenente le configurazioni specifiche dell'host
-.env
-.env.local
-.env.*.local
 
 # Tooling e pacchetti di installazione AWS (locali)
 awscliv2.zip
