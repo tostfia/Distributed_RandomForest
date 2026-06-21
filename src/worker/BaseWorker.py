@@ -13,11 +13,20 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 
 _child_X  = None
 _child_y  = None
+
 def _init_child_process(X, y):
-    """Inizializza il processo figlio salvando i dati in memoria una sola volta."""
+    """Inizializza il processo figlio salvando i dati in memoria e isolando i core."""
+    
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    
     global _child_X, _child_y
     _child_X = X
     _child_y = y
+
 # Addestramento di un singolo albero (resta fuori dalla classe per il multiprocessing)
 def _train_single_tree_processor(args):
     """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
@@ -174,7 +183,27 @@ class BaseWorker(Service, ABC):
         # 1. Recupero dati e classe dell'albero dalle classi figlie
         X, y = self._load_data(source_info)
         tree_class = self._get_tree_class()
-            
+
+        # 2. CALCOLO DINAMICO DEI CORE (Locale vs AWS)
+        totale_core_macchina = os.cpu_count() or 1
+        
+        if self.environment != "aws":
+            try:
+                # Interroghiamo il ServiceRegistry usando l'ambiente del worker
+                workers_attivi = ServiceRegistry.get_available_workers(self.environment)
+                num_workers = max(1, len(workers_attivi))
+                
+                # Formula di bilanciamento per i tuoi 8 core in locale
+                core_disponibili_rete = max(1, totale_core_macchina - 1)
+                allocated_cores = max(1, int(core_disponibili_rete / num_workers))
+                print(f"[{self.worker_name}] [LOG LOCALE] Rilevati {num_workers} worker attivi sulla macchina.")
+                print(f"[{self.worker_name}] [LOG LOCALE] Allocazione dinamica: {allocated_cores} processi per questo pool.")
+            except Exception as e:
+                print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+                allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
+        else:
+            # Su AWS ogni worker ha la sua macchina isolata, usa la regola standard N-1
+            allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
 
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
@@ -194,9 +223,12 @@ class BaseWorker(Service, ABC):
                     self._cached_pool.close()
                     self._cached_pool.join()
                     print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
-                print(f"[WORKER] Creazione nuovo Pool di processi per {num_trees} alberi...")
-                self._cached_pool = Pool(processes=min(num_trees, os.cpu_count()), initializer=_init_child_process, initargs=(X, y))
+                
+                pool_size = min(num_trees, allocated_cores)
+                print(f"[WORKER] Creazione nuovo Pool di processi calibrato a {pool_size} processi...")
+                self._cached_pool = Pool(processes=pool_size, initializer=_init_child_process, initargs=(X, y))
                 self._cached_pool_source = source_info
+                
             print(f"[WORKER] Pool di processi pronto. Avvio addestramento di {num_trees} alberi...")
             worker_tasks = []
             for i in range(num_trees):
@@ -210,7 +242,7 @@ class BaseWorker(Service, ABC):
     def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None):
         """
         Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola 
-        le predizioni parziali sui dati di test.
+        le predizioni parziali sui dati di test sfruttando il C nativo di Scikit-Learn.
         """
         print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
         
@@ -228,7 +260,6 @@ class BaseWorker(Service, ABC):
                 print(f"[{self.worker_name}] Utilizzo del testing set centralizzato già in cache (Shape: {self._cached_X_eval.shape}).")
             X_eval = self._cached_X_eval
         else:
-            # Caso Federato: i dati di test risiedono localmente sul Worker
             if getattr(self, 'X_test', None) is None:
                 raise ValueError(
                     f"[{self.worker_name}] Errore: Nessun dataset di test locale trovato in memoria. "
@@ -237,11 +268,8 @@ class BaseWorker(Service, ABC):
             X_eval = self.X_test
             print(f"[{self.worker_name}] Utilizzo del testing set federato locale (Shape: {X_eval.shape}).")
 
-        print(f"[{self.worker_name}] Avvio inferenza parallela su {len(trees)} alberi...")
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            sub_predictions = list(executor.map(lambda tree: tree.predict(X_eval), trees))
+        print(f"[{self.worker_name}] Avvio inferenza nativa lineare su {len(trees)} alberi...")
+        sub_predictions = [tree.predict(X_eval) for tree in trees]
             
         print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
-        
-        # Restituiamo la matrice parziale all'Orchestratore
         return pickle.dumps(sub_predictions)

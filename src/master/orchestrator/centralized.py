@@ -49,7 +49,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload)
         target_col = "Label"
 
-        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type} (Ordine Speculare a Colab)")
+        print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type}")
 
         # Inizializziamo lo splitter
         splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(
@@ -226,26 +226,50 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         inference_start_time = time.perf_counter()
 
-        model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+        # ---------------------------------------------------------------------------
+        # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) IN BASE ALL'AMBIENTE
+        # ---------------------------------------------------------------------------
+        if self.environment == "aws":
+            # In AWS il modello pkl aggregato risiederà sul bucket S3 dedicato
+            model_path = f"s3://my-cluster-datasets-bucket/saved_models/model_{job_id}.pkl"
+        else:
+            model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
 
-        print(f"[{self.orchestrator_name}] Caricamento della foresta da {model_path}...")
-        with open(model_path, "rb") as f:
-            global_model = pickle.load(f)
+        # ---------------------------------------------------------------------------
+        # 2. RISOLUZIONE DINAMICA TESTING SET (.csv) BASATA SUL JOB_ID CORRENTE
+        # ---------------------------------------------------------------------------
+        if self.environment == "aws":
+            self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
+        else:
+            self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
+
+        print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Risoluzione asset logici per il Job ID: {job_id}")
+        print(f"[{self.orchestrator_name}] Path Modello calcolato: {model_path}")
+        print(f"[{self.orchestrator_name}] Path Dataset calcolato: {self.test_data_path}")
+
+        # ---------------------------------------------------------------------------
+        # 3. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE)
+        # ---------------------------------------------------------------------------
+        if self.environment == "local":
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+            print(f"[{self.orchestrator_name}] Caricamento della foresta locale da {model_path}...")
+            with open(model_path, "rb") as f:
+                global_model = pickle.load(f)
+        else:
+            # Fallback locale pronto per AWS qualora caricassi i modelli pkl nella root/saved_models di EC2
+            print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
+            local_fallback_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
+            with open(local_fallback_path, "rb") as f:
+                global_model = pickle.load(f)
         
         all_trees = global_model.estimators_
         total_trees = len(all_trees)
         print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
 
-        # RECOVERY DEL PATH: Ricostruiamo il path se l'istanza è stata sostituita dal failover
-        if self.test_data_path is None:
-            if self.environment == "aws":
-                self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
-            else:
-                # Sostituisci questa riga:
-                self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
-
+        # ---------------------------------------------------------------------------
+        # 4. CARICAMENTO DEL DATASET TRAMITE DAO COERENTE CON L'AMBIENTE
+        # ---------------------------------------------------------------------------
         print(f"[{self.orchestrator_name}] Caricamento Testing Set persistito via DAO: {self.test_data_path}")
         dao = DatasetDAOFactory.get_dao(self.environment)
         test_df = dao.load_dataset(self.test_data_path)
@@ -255,6 +279,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
         y_test = test_df[target_col].to_numpy()
         serialized_X_test = pickle.dumps(X_test)
 
+        # ---------------------------------------------------------------------------
+        # 5. SCOPERTA WORKER E DISTRIBUZIONE RPC (INVARIATA)
+        # ---------------------------------------------------------------------------
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
             raise RuntimeError("Nessun worker disponibile nel Service Registry per l'inferenza.")
@@ -328,13 +355,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         if tree_type == "classifier":
             print("[DEBUG ORCHESTRATORE] Sto eseguendo il NUOVO codice con ones_like!")
-            # Calcoliamo il voto di maggioranza esente da bug tramite weighted_mode ad un solo peso uniforme (1.0)
             uniform_weights = np.ones_like(predictions_matrix)
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
             final_predictions = final_predictions.ravel().astype(int)
             y_test = y_test.astype(int)
             
-            # --- CALCOLO METRICHE DETTAGLIATE ALLINEATE A COLAB ---
             accuracy = np.mean(final_predictions == y_test)
             precision = precision_score(y_test, final_predictions, zero_division=0)
             recall = recall_score(y_test, final_predictions, zero_division=0)

@@ -57,20 +57,13 @@ def run_predefined_tests():
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     
-    # 1. Recupero informazioni di contesto obbligatorie
     job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
         
-    data_url = None
-    if cfg.mode == "centralized":
-        data_url = get_input("Inserisci l'URL/Path dei nuovi dati di test centralizzati: ").strip()
-        if not data_url:
-            print("[ERRORE] Il percorso dei dati è obbligatorio in modalità centralizzata.")
-            return
-    else:
-        print("[INFO] Modalità Federata: i nodi utilizzeranno le proprie partizioni locali di test trattenute in RAM.")
+    # L'orchestratore risolverà il path autonomamente in base all'ambiente.
+    data_url = "" 
 
     # 2. Tentativo di recupero degli iperparametri del modello dal path centralizzato
     hp_obj = None
@@ -96,7 +89,7 @@ def handle_inference():
     try:
         inference_request = InferenceRequest(
             job_id=job_id,
-            data_url=data_url,
+            data_url=data_url, # Passa la stringa vuota validata
             environment=cfg.env,
             hyperparameters=hp_obj
         )
