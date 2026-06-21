@@ -1,9 +1,10 @@
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 import os 
 import json
-def create_dummy_dataset(config_path = "synthetic/synthetic_config.json"):
+
+def create_dummy_dataset(config_path="synthetic/synthetic_config.json"):
     loader = SyntheticDataLoader()
-    output_dir = "synthetic"
+    
     filename = "synthetic_dataset.csv"
     if os.path.exists(config_path):
         try:
@@ -13,12 +14,14 @@ def create_dummy_dataset(config_path = "synthetic/synthetic_config.json"):
         except Exception as e:
             print(f"Errore durante la lettura del file di configurazione: {e}")
             pass
-    final_path = os.path.join(output_dir, os.path.basename(filename))
+    pure_filename = os.path.basename(filename)
+    output_dir = "synthetic"
+    final_path = os.path.join(output_dir, pure_filename)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"[+] Creazione dataset sintetico '{filename}'...")
+    print(f"[+] Generazione dataset sintetico in corso...")
     df = loader.load()
-    df.to_csv(filename, index=False)
-    print(f"[+] Dataset '{filename}' [SUCCESSO] Dataset creato.")
+    df.to_csv(final_path, index=False)
+    print(f"[+] [SUCCESSO] Dataset creato e salvato in: '{final_path}'")
 
 if __name__ == "__main__":
     create_dummy_dataset()
