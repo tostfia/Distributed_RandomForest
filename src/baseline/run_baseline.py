@@ -19,24 +19,26 @@ from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 def run_baseline():
+    # --- CONFIGURAZIONE STILISTICA REPORT ---
+    LUNGHEZZA_LINEA = 80
+    DOPPIA_LINEA = "═" * LUNGHEZZA_LINEA
+    LINEA_SINGOLA = "─" * LUNGHEZZA_LINEA
+
     print("=====================================================")
     print("   AVVIO FASE TUNING & BASELINE SPECULARE AL CLUSTER ")
     print("=====================================================\n")
 
     # Seme globale sincronizzato con il cluster e Colab
     RANDOM_SEED = 123
-    
     target_col = "Label"
     
-    # Inizializziamo il gestore della configurazione di sistema (.env)
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
     
     # ---------------------------------------------------------
     # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO (Stile Colab)
     # ---------------------------------------------------------
-    print(">>> FASE 1: Estrazione e Preprocessing Dati (ETL Speculare)")
-    etl_start_time = time.perf_counter()
+    print(">>> FASE 1: Estrazione e Preprocessing Dati")
     
     dataset_type = "real"
     if os.path.exists("config.json"):
@@ -55,10 +57,8 @@ def run_baseline():
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
         train_df, test_df = splitter.split(df_clean)
     else:
-        # 1. Recuperiamo il percorso dal SystemConfig o forziamo la cache locale conosciuta
         data_folder = getattr(sys_cfg, "dataset_path", None)
         
-        # Se il config non punta a nulla o a una cartella vuota, forziamo la cartella corretta
         if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
             if os.path.exists("./dataset_cache"):
                 data_folder = "./dataset_cache"
@@ -67,37 +67,41 @@ def run_baseline():
 
         print(f" • Cartella sorgente identificata per dati reali: '{data_folder}'")
         print(f" • Tipo Dataset: Reale (Campionamento probabilistico 1%, Seed: {RANDOM_SEED})")
-        
+
+        # [TIMER 1]: Misura l'I/O di caricamento dei file grezzi dal disco
+        io_start_time = time.perf_counter()
         # 2. Istanziamo il RawCSVDataLoader passandogli la CARTELLA CACHE.
-        # Rileverà i file CSV ordinati, applicando lo skip_logic dell'1%
         loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
         df_raw = loader.load()
-        
-        
+        io_time = time.perf_counter() - io_start_time
+        print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
+
+        # [TIMER 2]: Parte esattamente prima di istanziare i componenti di trasformazione computazionale
+        preprocess_start_time = time.perf_counter()
         
         # Istanziamo i componenti di trasformazione
         preprocessor = CICIDSPreprocessor(target_column=target_col)
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
 
-        print(" • [ORDINE SPECULARE] Binarizzazione sul dato intero...")
+        print(" • Binarizzazione sul dato intero...")
         df_binarized = preprocessor.binarize_target(df_raw)
         
-        print(" • [ORDINE SPECULARE] Esecuzione Split Stratificato...")
+        print(" • Esecuzione Split Stratificato...")
         train_df, test_df = splitter.split(df_binarized)
 
-        print(" • [ORDINE SPECULARE] Preprocessing indipendente sul Train Set...")
+        print(" • Preprocessing indipendente sul Train Set...")
         train_df = preprocessor.process(train_df)
         
-        print(" • [ORDINE SPECULARE] Preprocessing indipendente sul Test Set...")
+        print(" • Preprocessing indipendente sul Test Set...")
         test_df = preprocessor.process(test_df)
 
-        print(" • [ORDINE SPECULARE] Applicazione Feature Selection Bilaterale...")
+        print(" • Applicazione Feature Selection Bilaterale...")
         fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
         
-    etl_time = time.perf_counter() - etl_start_time
-    print(f"[OK] Pipeline ETL speculare completata in {etl_time:.4f} secondi.")
+        etl_time = time.perf_counter() - preprocess_start_time
+        print(f"[OK] Trasformazione e Feature Selection completate in {etl_time:.4f} secondi.")
     
     # Separazione delle Feature dalle Label
     X_train = train_df.drop(columns=[target_col])
@@ -192,7 +196,7 @@ def run_baseline():
     tempo_totale_tuning_config = tempo_medio_fold_tuning * 5
 
     # ---------------------------------------------------------
-    # FASE 4: ADDESTRAMENTO FINALE (T_seq) & INFERENZA LOCALE
+    # FASE 4: ADDESTRAMENTO FINALE & INFERENZA LOCALE
     # ---------------------------------------------------------
     print("\n>>> FASE 4: Addestramento Finale Monolitico per estrazione T_seq...")
     rf_kwargs = dict(
@@ -244,44 +248,54 @@ def run_baseline():
     # ---------------------------------------------------------
     # FASE 5: OUTPUT REPORT COMPLETO
     # ---------------------------------------------------------
-    print("\n" + "═" * 75)
-    print("                  REPORT ESTESO DI VALIDAZIONE E BENCHMARK")
-    print("═" * 75)
+    print("\n" + DOPPIA_LINEA)
+    print(f"{'REPORT ESTESO DI VALIDAZIONE E BENCHMARK':^{LUNGHEZZA_LINEA}}")
+    print(DOPPIA_LINEA)
 
-    print("\n1. ANALISI DETTAGLIATA ITERAZIONE PER ITERAZIONE (ESTRATTA DA TUNING)")
-    print("-" * 75)
+    print(f"\n1. ANALISI DETTAGLIATA ITERAZIONE PER ITERAZIONE (CROSS-VALIDATION)")
+    print(LINEA_SINGOLA)
+    print(f"  {'Fold':<10} | {'Accuratezza':<12} | {'Precision':<12} | {'Recall':<12} | {'F1-Score':<12} | {'Tempo Fit':<10}")
+    print(LINEA_SINGOLA)
     for i in range(5):
-        print(f"  [Fold {i+1}/5] -> "
-              f"Acc: {cv_results_extracted['test_accuracy'][i]*100:.2f}% | "
-              f"Prec: {cv_results_extracted['test_precision'][i]*100:.2f}% | "
-              f"Rec: {cv_results_extracted['test_recall'][i]*100:.2f}% | "
-              f"F1: {cv_results_extracted['test_f1'][i]*100:.2f}% | "
-              f"Tempo Fit Medio: {cv_results_extracted['fit_time'][i]:.3f}s")
+        print(f"  Fold {i+1:02d}/05  | "
+              f"{cv_results_extracted['test_accuracy'][i]*100:10.2f}% | "
+              f"{cv_results_extracted['test_precision'][i]*100:10.2f}% | "
+              f"{cv_results_extracted['test_recall'][i]*100:10.2f}% | "
+              f"{cv_results_extracted['test_f1'][i]*100:10.2f}% | "
+              f"{cv_results_extracted['fit_time'][i]:.3f}s")
+    print(LINEA_SINGOLA)
 
-    print("\n2. METRICHE PREVENTIVE AGGREGATE DAL TUNING (MEDIE +/- DEVIAZIONE STANDARD)")
-    print("-" * 75)
-    print(f"  ACCURATEZZA GLOBALE CV:   {np.mean(cv_results_extracted['test_accuracy']) * 100:.2f} %  (+/- {np.std(cv_results_extracted['test_accuracy']) * 100:.2f}%)")
-    print(f"  PRECISION MEDIA CV:       {np.mean(cv_results_extracted['test_precision']) * 100:.2f} %  (+/- {np.std(cv_results_extracted['test_precision']) * 100:.2f}%)")
-    print(f"  RECALL MEDIA CV:          {np.mean(cv_results_extracted['test_recall']) * 100:.2f} %  (+/- {np.std(cv_results_extracted['test_recall']) * 100:.2f}%)")
-    print(f"  F1-SCORE MEDIO CV:        {np.mean(cv_results_extracted['test_f1']) * 100:.2f} %  (+/- {np.std(cv_results_extracted['test_f1']) * 100:.2f}%)")
+    print(f"\n2. METRICHE AGGREGATE DA TUNING (MEDIE ± DEVIAZIONE STANDARD)")
+    print(LINEA_SINGOLA)
+    metriche_cv = [
+        ("ACCURATEZZA GLOBALE", cv_results_extracted['test_accuracy']),
+        ("PRECISION MEDIA", cv_results_extracted['test_precision']),
+        ("RECALL MEDIA", cv_results_extracted['test_recall']),
+        ("F1-SCORE MEDIO", cv_results_extracted['test_f1'])
+    ]
+    for nome, array in metriche_cv:
+        media = np.mean(array) * 100
+        dev_std = np.std(array) * 100
+        print(f"  ▸ {nome:<25} : {media:6.2f}%  (± {dev_std:.2f}%)")
 
-    print("\n3. PERFORMANCE REALI SUL TEST SET INDIPENDENTE (TERRENO DI CONFRONTO CLUSTER)")
-    print("-" * 75)
-    print(f"  ACCURACY SUL TEST SET:    {test_accuracy * 100:.2f} %")
-    print(f"  PRECISION SUL TEST SET:   {test_precision * 100:.2f} %")
-    print(f"  RECALL SUL TEST SET:      {test_recall * 100:.2f} %")
-    print(f"  F1-SCORE SUL TEST SET:    {test_f1 * 100:.2f} %")
+    print(f"\n3. PERFORMANCE REALI SUL TEST SET INDIPENDENTE")
+    print(LINEA_SINGOLA)
+    print(f"  ▸ ACCURACY SUL TEST SET   : {test_accuracy * 100:6.2f}%")
+    print(f"  ▸ PRECISION SUL TEST SET  : {test_precision * 100:6.2f}%")
+    print(f"  ▸ RECALL SUL TEST SET     : {test_recall * 100:6.2f}%")
+    print(f"  ▸ F1-SCORE SUL TEST SET   : {test_f1 * 100:6.2f}%")
     print("\n  Matrice di Confusione sul Test Set:")
-    print(cm)
+    for riga in cm:
+        print(" " * 6 + " ".join(f"[{val:4d}]" for val in riga))
 
-    print("\n4. DIAGNOSTICA TEMPORALE E PROFILAZIONE HARDWARE")
-    print("-" * 75)
-    print(f"  Tempo di Preprocessing (ETL Speculare):            {etl_time:.4f} secondi")
-    print(f"  Tempo Totale Stimato dei Fit CV Config. Ottimale:  {tempo_totale_tuning_config:.4f} secondi")
-    print(f"  Latenza Media di un Singolo Fold nel Tuning:       {tempo_medio_fold_tuning:.4f} secondi")
-    print(f"  ADDESTRAMENTO FINALE LOCALE MONOLITICO (T_seq):    {t_seq:.4f} secondi  <-- BASELINE")
-    print(f"  Tempo di Inferenza Locale su Test Set:             {tempo_inferenza_totale:.4f} secondi")
-    print("═" * 75)
+    print(f"\n4. DIAGNOSTICA TEMPORALE E PROFILAZIONE HARDWARE")
+    print(LINEA_SINGOLA)
+    print(f"  • Tempo Totale di Cross-Validation     : {tempo_totale_tuning_config:8.4f} s")
+    print(f"  • Tempo Medio per Singolo Fold (CV)    : {tempo_medio_fold_tuning:8.4f} s")
+    print(f"  • Tempo di Caricamento Dati (I/O)      : {io_time:8.4f} s")
+    print(f"  • Tempo di Trasformazione (Process)    : {etl_time:8.4f} s")
+    print(f"  • Tempo Totale di Addestramento (Training Set)  : {t_seq:8.4f} s")
+    print(f"  • Tempo Totale di Inferenza (Testing Set) : {tempo_inferenza_totale:8.4f} s")
 
 if __name__ == "__main__":
     run_baseline()
