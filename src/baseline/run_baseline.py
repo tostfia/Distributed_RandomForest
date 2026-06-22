@@ -138,7 +138,7 @@ def run_baseline():
         cv=5,
         scoring={'accuracy': 'accuracy', 'precision': 'precision', 'recall': 'recall', 'f1': 'f1'},
         refit='f1',
-        n_jobs=-1,
+        n_jobs=1,
         verbose=1,
         random_state=RANDOM_SEED
     )
@@ -201,7 +201,7 @@ def run_baseline():
         min_samples_split=config_data["hyperparameters"]["min_samples_split"],
         bootstrap=config_data["hyperparameters"]["bootstrap"],
         class_weight=config_data["hyperparameters"]["class_weight"],
-        n_jobs=-1,
+        n_jobs=1,
         random_state=RANDOM_SEED
     )
     if config_data["hyperparameters"]["bootstrap"]:
