@@ -15,6 +15,9 @@ dataset_cache/
 # Centralizzazione di tabelle JSON, code SQS, config locali e checkpoint
 .local_storage/
 
+# === MODELLI ADDESTRATI FINALI ===
+.saved_models/
+
 # Escludi i dataset CSV (sia il dataset originale che quello campionato)
 data/*.csv
 

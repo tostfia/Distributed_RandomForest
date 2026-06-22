@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
 import os
+import socket
 import numpy as np
 from rpyc import Service, ThreadedServer
 import threading
@@ -82,28 +83,36 @@ class BaseWorker(Service, ABC):
         pass
 
     def _get_my_private_ip(self) -> str:
-        """Determina l'IP corretto per il binding di rete in base all'ambiente."""
-        if self.environment == "aws":
-            return "0.0.0.0"  # Su AWS ascolta su tutte le interfacce del container/istanza
+        """Determina l'IP corretto per il binding di rete in base all'ambiente.
+            Funziona sia in locale (con/senza Docker) sia su AWS.
+        """
+        # Se siamo dentro Docker (Compose imposta solitamente variabili o hostname specifici)
+        # o se siamo su AWS, dobbiamo ascoltare su tutte le interfacce (0.0.0.0)
+        if self.environment == "aws" or os.environ.get("RUNNING_IN_DOCKER", "false") == "true":
+            return "0.0.0.0"
+        
+        # Locale puro senza Docker
         return "127.0.0.1"
 
     def start_server(self, port: int, explicit_host: str = None):
         print(f"\n[{self.worker_name}] Inizializzazione Server RPC in ambiente {self.environment.upper()}...")
 
         advertise_host = os.environ.get("RPC_ADVERTISE_HOST", None)
-        # Gestione degli host coerente con l'ambiente del file .env
-        if self.environment == "aws":
-            host_to_bind = "0.0.0.0"
-            host_to_register = advertise_host if advertise_host else (explicit_host if explicit_host else "0.0.0.0")
-        else:
-            if advertise_host:
-                host_to_bind = "0.0.0.0"
-                host_to_register = advertise_host
-            else:
-                host_to_bind = explicit_host if explicit_host else "127.0.0.1"
-                host_to_register = explicit_host if explicit_host else "127.0.0.1"
+        is_docker = os.environ.get("RUNNING_IN_DOCKER", "false") == "true"
 
-        # Registrazione del Worker sul Service Registry (Mock o DynamoDB gestito in automatico)
+        # Gestione degli host dinamica
+        if self.environment == "aws" or is_docker:
+            host_to_bind = "0.0.0.0"  # Permette a RPyC di accettare connessioni esterne/da altri container
+            # Se siamo in Docker e non c'è un advertise_host esplicito, usiamo il socket hostname (il nome del container)
+            host_to_register = advertise_host if advertise_host else socket.gethostname()
+        else:
+            # Locale nativo senza Docker
+            host_to_bind = explicit_host if explicit_host else "127.0.0.1"
+            host_to_register = host_to_bind
+
+        print(f"[{self.worker_name}] Binding su: {host_to_bind}, Registrazione su Registry come: {host_to_register}:{port}")
+        
+        # Registrazione del Worker sul Service Registry
         ServiceRegistry.register_worker(worker_name=self.worker_name, host=host_to_register, port=port)
 
         self._stop_heartbeat = threading.Event()

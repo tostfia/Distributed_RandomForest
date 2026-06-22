@@ -14,6 +14,7 @@ services:
      
 
   orchestrator-01:
+    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_orchestrator_01_${TRAINING_MODE:-centralized}
     user: "${MY_UID}:${MY_GID}"
@@ -24,22 +25,24 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - EC2_ID=${EC2_ID:-Locale}-01
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - RUNNING_IN_DOCKER=true
       - AURORA_HOST
       - AURORA_PORT
       - AURORA_DB
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
-      - .:/app
-      - ./synthetic:/app/synthetic
-      - ./.local_storage:/app/.local_storage  
-      - ./saved_models:/app/saved_models   
+      - .:/app:z                        
+      - ./synthetic:/app/synthetic:z
+      - ./.local_storage:/app/.local_storage:z
+      - ./saved_models:/app/saved_models:z   
     command: python -m src.master.orchestrator.main
     #depends_on:
       #- postgres 
     restart: on-failure
   
   orchestrator-02:
+    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     container_name: ${EC2_ID:-locale}_orchestrator_02_${TRAINING_MODE:-centralized}
     user: "${MY_UID}:${MY_GID}"
@@ -50,68 +53,41 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - EC2_ID=${EC2_ID:-Locale}-02
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - RUNNING_IN_DOCKER=true
       - AURORA_HOST
       - AURORA_PORT
       - AURORA_DB
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
-      - .:/app
-      - ./synthetic:/app/synthetic
-      - ./.local_storage:/app/.local_storage   
-      - ./saved_models:/app/saved_models  
+      - .:/app:z                         
+      - ./synthetic:/app/synthetic:z
+      - ./.local_storage:/app/.local_storage:z
+      - ./saved_models:/app/saved_models:z  
     command: python -m src.master.orchestrator.main
     #depends_on:
       #- postgres
     restart: on-failure
 
-  
-
-  worker-01:
+  worker:
+    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_01
-    user: "${MY_UID}:${MY_GID}"  
-    ports:
-      - "18861:18861"
-    environment:
-      - WORKER_HEARTBEAT_TIMEOUT=120
-      - PYTHONUNBUFFERED=1
-      - RPC_HOST=worker-01
-      - RPC_PORT=18861
-      - RPC_ADVERTISED_HOST=worker-01
-      - ENV_MODE=${ENV_MODE:-local}
-      - TRAINING_MODE=${TRAINING_MODE:-centralized}
-      - LOCAL_STORAGE_PATH=/app/.local_storage  
-      - AURORA_HOST        
-      - AURORA_PORT
-      - AURORA_DB
-      - AURORA_USER
-      - AURORA_PASSWORD
-    volumes:
-      - .:/app
-      - ./synthetic:/app/synthetic
-      - ./.local_storage:/app/.local_storage  
-      - ./saved_models:/app/saved_models     
-    command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-01 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
-    depends_on:
-      - orchestrator-01
-      #- postgres
-    restart: on-failure
-
-  worker-02:
-    image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    container_name: ${EC2_ID:-locale}_worker_${TRAINING_MODE:-centralized}_02
     user: "${MY_UID}:${MY_GID}"
-    ports:
-      - "18862:18862"
+    # Non esponiamo le porte fisse sull'host per evitare conflitti durante la replicazione.
+    # Docker gestirà il routing internamente.
+    deploy:
+      replicas: ${NUM_WORKERS:-2}  # Avvia 2 repliche di default, configurabile a runtime
+      resources:
+        limits:
+          cpus: '0.5'              # Vincolo d'esame: evita la parallelizzazione trasparente
+          memory: 512M             # Protezione RAM
     environment:
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
-      - RPC_HOST=worker-02
-      - RPC_PORT=18862
-      - RPC_ADVERTISED_HOST=worker-02
+      - RPC_PORT=18861             # Tutti i worker ascoltano internamente sulla stessa porta logica
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
+      - RUNNING_IN_DOCKER=true     # Forza l'ascolto su 0.0.0.0 e la registrazione tramite hostname dinamico
       - LOCAL_STORAGE_PATH=/app/.local_storage  
       - AURORA_HOST       
       - AURORA_PORT
@@ -119,16 +95,19 @@ services:
       - AURORA_USER
       - AURORA_PASSWORD
     volumes:
-      - .:/app
-      - ./synthetic:/app/synthetic
-      - ./.local_storage:/app/.local_storage    
-      - ./saved_models:/app/saved_models  
-    command: python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-02 18862 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+      - .:/app:z                           
+      - ./synthetic:/app/synthetic:z
+      - ./.local_storage:/app/.local_storage:z
+      - ./saved_models:/app/saved_models:z  
+    # Il comando inietta la latenza di 50ms (se tc esiste) e usa $(hostname) per generare l'ID univoco del worker in locale
+    command: >
+      sh -c "
+      if command -v tc >/dev/null; then 
+        tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms}; 
+      fi;
+      python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-\$(hostname) 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+      "
     depends_on:
       - orchestrator-01
       #- postgres
     restart: on-failure
-
-
-  
-  

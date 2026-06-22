@@ -70,3 +70,19 @@ Inoltre, si procede con l'installazione di aws cli (seguendo le istruzioni della
 Per scaricare il file da s3, bisogna installare le librerie: pip install fsspec s3fs
 
 In realtà poi basta fare: pip install -r requirements.txt, poi per quanto riguarda aws instllazione di: pip install "botocore<1.43.0"
+
+
+Aggiunto uno script per eseguire i ritardi di rete in locale. Possibilità di averli sia sul locale senza docker sia sul distribuito con docker: chmod +x run_local.sh. Dopodiché per eseguire il codice: ./run_local.sh delay. Inoltre, per poter avviare più terminali da bash, si è installato il seguente motore grafico: sudo dnf install gnome-terminal -y
+
+Prima di effettuare la build, vanno lanciati questi comandi: 
+sudo chown -R $USER:$USER ./.local_storage
+chmod -R 775 ./.local_storage
+
+anche per la cartella ./.saved_models
+
+prima vanno assegnate le variabili: 
+export MY_UID=$(id -u)
+export MY_GID=$(id -g)
+
+Per lanciare: docker compose build, per poi eseguire docker compose up --scale worker=3 (da 1 a 7); 
+Lanciare i comandi dei worker separatamente. 
