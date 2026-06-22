@@ -86,3 +86,5 @@ export MY_GID=$(id -g)
 
 Per lanciare: docker compose build, per poi eseguire docker compose up --scale worker=3 (da 1 a 7); 
 Lanciare i comandi dei worker separatamente. 
+
+Comando docker utile per eseguire in background: docker compose up --build --force-recreate -d

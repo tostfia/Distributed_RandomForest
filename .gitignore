@@ -11,13 +11,6 @@ data/db_files/
 
 dataset_cache/
 
-# === STORAGE LOCALE CONDIVISO (MOCK CLUSTER) ===
-# Centralizzazione di tabelle JSON, code SQS, config locali e checkpoint
-.local_storage/
-
-# === MODELLI ADDESTRATI FINALI ===
-.saved_models/
-
 # Escludi i dataset CSV (sia il dataset originale che quello campionato)
 data/*.csv
 
@@ -41,3 +34,15 @@ env/
 # === IDE / EDITOR ===
 .vscode/
 .idea/
+
+# Ignora i database locali ma tieni la cartella
+.local_storage/*
+!.local_storage/.gitkeep
+
+# Ignora i file di modello pesanti (.pkl) ma tieni la cartella
+saved_models/*
+!.saved_models/.gitkeep
+
+# Se hai la cartella dei dati sintetici, ignora i CSV giganti
+synthetic/*
+!.synthetic/.gitkeep
