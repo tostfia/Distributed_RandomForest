@@ -48,3 +48,4 @@ saved_models/*
 # Se hai la cartella dei dati sintetici, ignora i CSV giganti
 synthetic/*
 !.synthetic/.gitkeep
+!synthetic/*.json
