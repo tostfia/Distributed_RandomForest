@@ -7,7 +7,6 @@ import threading
 import traceback
 from rpyc.utils.classic import obtain
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.utils.extmath import weighted_mode
 from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
@@ -195,8 +194,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         
                         result_raw = worker_conn.root.train_subset_forest(
                             source_info=source_info,
-                            n_estimators=quota_chunk,       
-                            base_random_state=chunk_seed,    
+                            num_trees=quota_chunk,       
+                            base_seed=chunk_seed,    
                             max_depth=max_depth
                         )
                         
@@ -294,39 +293,31 @@ class CentralizedOrchestrator(BaseOrchestrator):
         return False
     
     def _execute_inference_step(self, payload: dict):
+        """
+        Esegue l'inferenza distribuita centralizzata in modalità Fault-Tolerant
+        sfruttando una task queue concorrente per riallocare dinamicamente i blocchi in caso di crash.
+        """
         job_id = payload.get("job_id")
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
         target_col = "Label"
 
-        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA ===")
-
+        print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA FAULT-TOLERANT ===")
         inference_start_time = time.perf_counter()
 
-        # ---------------------------------------------------------------------------
-        # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) IN BASE ALL'AMBIENTE
-        # ---------------------------------------------------------------------------
+        # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) E TESTING SET (.csv) IN BASE ALL'AMBIENTE
         if self.environment == "aws":
-            # In AWS il modello pkl aggregato risiederà sul bucket S3 dedicato
             model_path = f"s3://my-cluster-datasets-bucket/saved_models/model_{job_id}.pkl"
-        else:
-            model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
-
-        # ---------------------------------------------------------------------------
-        # 2. RISOLUZIONE DINAMICA TESTING SET (.csv) BASATA SUL JOB_ID CORRENTE
-        # ---------------------------------------------------------------------------
-        if self.environment == "aws":
             self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
         else:
+            model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
             self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
 
         print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Risoluzione asset logici per il Job ID: {job_id}")
         print(f"[{self.orchestrator_name}] Path Modello calcolato: {model_path}")
         print(f"[{self.orchestrator_name}] Path Dataset calcolato: {self.test_data_path}")
 
-        # ---------------------------------------------------------------------------
-        # 3. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE)
-        # ---------------------------------------------------------------------------
+        # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
         if self.environment == "local":
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
@@ -334,7 +325,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
             with open(model_path, "rb") as f:
                 global_model = pickle.load(f)
         else:
-            # Fallback locale pronto per AWS qualora caricassi i modelli pkl nella root/saved_models di EC2
             print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
             local_fallback_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
             with open(local_fallback_path, "rb") as f:
@@ -344,9 +334,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         total_trees = len(all_trees)
         print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
 
-        # ---------------------------------------------------------------------------
-        # 4. CARICAMENTO DEL DATASET TRAMITE DAO COERENTE CON L'AMBIENTE
-        # ---------------------------------------------------------------------------
+        # 3. CARICAMENTO E PREPARAZIONE DEL DATASET DI TEST TRAMITE DAO
         print(f"[{self.orchestrator_name}] Caricamento Testing Set persistito via DAO: {self.test_data_path}")
         dao = DatasetDAOFactory.get_dao(self.environment)
         test_df = dao.load_dataset(self.test_data_path)
@@ -356,9 +344,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         y_test = test_df[target_col].to_numpy()
         serialized_X_test = pickle.dumps(X_test)
 
-        # ---------------------------------------------------------------------------
-        # 5. SCOPERTA WORKER E DISTRIBUZIONE RPC (INVARIATA)
-        # ---------------------------------------------------------------------------
+        # 4. SCOPERTA WORKER E INIZIALIZZAZIONE STRUTTURE FAULT-TOLERANT
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         if not available_workers:
             raise RuntimeError("Nessun worker disponibile nel Service Registry per l'inferenza.")
@@ -367,76 +353,177 @@ class CentralizedOrchestrator(BaseOrchestrator):
         num_workers = len(worker_names)
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
-        trees_per_worker = total_trees // num_workers
-        remainder = total_trees % num_workers
+        # Calcolo dinamico granulare della dimensione del chunk di alberi
+        CHUNK_SIZE = max(1, total_trees // (num_workers * 2))
+        print(f"[{self.orchestrator_name}] CHUNK_SIZE di inferenza impostata a {CHUNK_SIZE} alberi per task.")
 
-        all_worker_predictions = []
-        connessioni_attive = []
-
-        def _rpc_inference_call(w_name, w_info, subset_trees_chunk):
-            print(f" [RPC INFERENZA -> {w_name}] Invio di {len(subset_trees_chunk)} alberi...")
-            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True,'sync_request_timeout': 600})
-            connessioni_attive.append(conn)
-            
-            serialized_chunk = pickle.dumps(subset_trees_chunk)
-            raw_response = conn.root.predict_subset_forest(serialized_chunk, serialized_X_test)
-            return pickle.loads(raw_response)
+        # Popolamento della coda thread-safe dei sotto-task di inferenza
+        task_queue = queue.Queue()
+        tree_start = 0
+        task_id_counter = 0
         
+        while tree_start < total_trees:
+            tree_end = min(tree_start + CHUNK_SIZE, total_trees)
+            chunk_estimators = all_trees[tree_start:tree_end]
+            serialized_chunk_trees = pickle.dumps(chunk_estimators)
+            
+            task_queue.put((task_id_counter, tree_start, tree_end, serialized_chunk_trees))
+            task_id_counter += 1
+            tree_start = tree_end
+
+        # Strutture dati condivise protette da Lock per i thread consumatori
+        predictions_chunks = []
+        results_lock = threading.Lock()
+        connessioni_attive = []
+        connessioni_lock = threading.Lock()
+        active_worker_names = list(worker_names)
+
+        # 5. DEFINIZIONE DEL CONSUMATORE CONCORRENTE PER L'INFERENZA VIA RPC
+        def inference_worker_consumer(w_name):
+            w_info = available_workers[w_name]
+            worker_conn = None
+            try:
+                print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                worker_conn = rpyc.connect(
+                    w_info["host"], 
+                    w_info["port"], 
+                    config={
+                        'allow_pickle': True,
+                        'sync_request_timeout': 600,
+                        'keepalive': True
+                    }
+                )
+                with connessioni_lock:
+                    connessioni_attive.append(worker_conn)
+                
+                while True:
+                    try:
+                        task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=1)
+                    except queue.Empty:
+                        break
+
+                    quota_alberi = end_idx - start_idx
+                    print(f"[{self.orchestrator_name}-InfThread] Assegnazione Task {task_id} ({quota_alberi} alberi: {start_idx}-{end_idx}) a {w_name}")
+                    
+                    try:
+                        # Invocazione remota sul metodo esposto dal BaseWorker
+                        raw_response = worker_conn.root.predict_subset_forest(
+                            chunk_trees_bytes, 
+                            serialized_X_test
+                        )
+                        sub_predictions = pickle.loads(obtain(raw_response))
+                        
+                        with results_lock:
+                            # Tracciamo start_idx per poter riordinare sequenzialmente i blocchi alla fine
+                            predictions_chunks.append((start_idx, sub_predictions))
+                            
+                        print(f"   [RPC INF <- {w_name}] Task {task_id} completato con successo.")
+                        task_queue.task_done()
+                        
+                    except Exception as e:
+                        print(f"   [ERRORE RPC INFERENZA] Fallimento del worker {w_name} sul Task {task_id}: {e}")
+                        
+                        # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
+                        task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
+                        print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
+                        
+                        with results_lock:
+                            if w_name in active_worker_names:
+                                active_worker_names.remove(w_name)
+                        break  # Interruzione del loop per questo canale RPC corrotto
+                        
+            except Exception as conn_err:
+                print(f"   [ERRORE CONNESSIOINE INFERENZA] Impossibile raggiungere il worker {w_name}: {conn_err}")
+                with results_lock:
+                    if w_name in active_worker_names:
+                        active_worker_names.remove(w_name)
+            finally:
+                if worker_conn:
+                    try:
+                        worker_conn.close()
+                        with connessioni_lock:
+                            if worker_conn in connessioni_attive:
+                                connessioni_attive.remove(worker_conn)
+                    except:
+                        pass
+
+        # 6. AVVIO MULTI-THREADING E SINCRONIZZAZIONE DEI CONSUMATORI
         rpc_start_time = time.perf_counter()
+        threads = []
+        for name in worker_names:
+            t = threading.Thread(target=inference_worker_consumer, args=(name,))
+            t.start()
+            threads.append(t)
 
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_worker = {}
-            current_tree_idx = 0
+        for t in threads:
+            t.join()
 
-            for i, name in enumerate(worker_names):
-                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
-                if allocated_trees == 0:
-                    continue
+        # Rilevamento di un eventuale crash totale di tutti i nodi di calcolo
+        if not task_queue.empty() and len(active_worker_names) == 0:
+            print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati durante lo step di inferenza!")
+            raise RuntimeError("Sotto-sistema Fault Tolerance Inferenza interrotto: Nessun worker rimasto disponibile.")
 
-                chunk = all_trees[current_tree_idx : current_tree_idx + allocated_trees]
-                current_tree_idx += allocated_trees
-
-                f = executor.submit(_rpc_inference_call, name, available_workers[name], chunk)
-                future_to_worker[f] = name
-
-            for future in as_completed(future_to_worker):
-                w_name = future_to_worker[future]
-                try:
-                    sub_predictions = future.result()
-                    all_worker_predictions.extend(sub_predictions)
-                    print(f"   [RPC INFERENZA <- {w_name}] Ricevute correttamente predizioni parziali.")
-                except Exception as e:
-                    print(f"   [ERRORE CRITICO INFERENZA] Il worker '{w_name}' ha fallito: {e}")
-                    raise e
-
-        print(f"[*] Chiusura di {len(connessioni_attive)} connessioni RPC attive...")
-        for conn in connessioni_attive:
-            try: conn.close()
-            except Exception: pass
+        # Chiusura precauzionale di socket RPyC rimasti aperti
+        with connessioni_lock:
+            for conn in connessioni_attive:
+                try: conn.close()
+                except Exception: pass
 
         rpc_inference_time = time.perf_counter() - rpc_start_time
 
+        # 7. ORDINAMENTO SEQUENZIALE E COMPOSIZIONE DELLA MATRICE DELLE PREDIZIONI
+        print(f"[{self.orchestrator_name}] Collezionamento predizioni completato. Ricomposizione matrice in corso...")
+        predictions_chunks.sort(key=lambda x: x[0])
+        
+        all_worker_predictions = []
+        for _, sub_preds in predictions_chunks:
+            all_worker_predictions.extend(sub_preds)
+
         predictions_matrix = np.array(all_worker_predictions)
-        print(f"[{self.orchestrator_name}] Matrice complessiva predizioni generata: {predictions_matrix.shape}")
-
-        print("\n" + "═" * 75)
-        print(f"  VALUTAZIONE PRESTAZIONI MODELLO DISTRIBUITO (JOB: {job_id[:8]})")
-        print("═" * 75)
-
+        print(f"[{self.orchestrator_name}] Matrice complessiva delle predizioni rigenerata: {predictions_matrix.shape}")
+        
         total_inference_time = time.perf_counter() - inference_start_time
 
+        # 8. DELEGA AL METODO MODULARE PER IL CALCOLO E LA STAMPA DELLE METRICHE
+        self._print_and_validate_metrics(
+            predictions_matrix=predictions_matrix,
+            y_test=y_test,
+            tree_type=tree_type,
+            testing_set_size=X_test.shape[0],
+            job_id=job_id,
+            total_inference_time=total_inference_time,
+            rpc_inference_time=rpc_inference_time
+        )
+
+    def _print_and_validate_metrics(
+        self, 
+        predictions_matrix: np.ndarray, 
+        y_test: np.ndarray, 
+        tree_type: str, 
+        testing_set_size: int,
+        job_id: str,
+        total_inference_time: float,
+        rpc_inference_time: float
+    ):
+        """
+        Metodo helper per il calcolo, la validazione statistica e la stampa 
+        delle metriche di performance del modello globale.
+        """
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE PRESTAZIONI MODELLO DISTRIBUITO FAULT-TOLERANT (JOB: {job_id[:8]})")
         print("═" * 75)
         print(f"  TEMPO TOTALE DI INFERENZA:              {total_inference_time:.4f} secondi")
         print("═" * 75 + "\n")
         print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
 
         if tree_type == "classifier":
-            print("[DEBUG ORCHESTRATORE] Sto eseguendo il NUOVO codice con ones_like!")
+            # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)
             uniform_weights = np.ones_like(predictions_matrix)
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
             final_predictions = final_predictions.ravel().astype(int)
             y_test = y_test.astype(int)
             
+            # Calcolo delle metriche di classificazione standard
             accuracy = np.mean(final_predictions == y_test)
             precision = precision_score(y_test, final_predictions, zero_division=0)
             recall = recall_score(y_test, final_predictions, zero_division=0)
@@ -444,7 +531,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             cm = confusion_matrix(y_test, final_predictions)
             
             print(f"  Tipo di Modello:                        CLASSIFICATORE")
-            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print(f"  Testing Set size:                       {testing_set_size} campioni")
             print("-" * 75)
             print(f"  ACCURACY FINALE DISTRIBUITA:            {accuracy * 100:.2f} %")
             print(f"  PRECISION DISTRIBUITA:                  {precision * 100:.2f} %")
@@ -457,14 +544,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(classification_report(y_test, final_predictions, zero_division=0))
             
         else:
+            # Caso Regressore: media aritmetica dei valori continui predetti dagli alberi
             final_predictions = np.mean(predictions_matrix, axis=0)
             mae = np.mean(np.abs(final_predictions - y_test))
             print(f"  Tipo di Modello:                        REGRESSORE")
-            print(f"  Testing Set size:                       {X_test.shape[0]} campioni")
+            print(f"  Testing Set size:                       {testing_set_size} campioni")
             print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
 
         print("═" * 75 + "\n")
-
 
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
