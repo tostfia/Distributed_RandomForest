@@ -42,6 +42,7 @@ class SyntheticDataLoader(DatasetLoader):
         self.n_informative = int(self.n_features * 0.8)
         self.random_seed = random_seed
         self.target_column = target_column if target_column is not None else config.get("target_column", "Label")
+        self.filename = filename if (filename := config.get("filename")) is not None else "synthetic_dataset.csv"
 
         self._validate_parameters()
 
@@ -85,6 +86,12 @@ class SyntheticDataLoader(DatasetLoader):
         print("\n[OK] Dataset sintetico generato.")
         print(f" • Numero di righe:   {df.shape[0]}")
         print(f" • Numero di colonne: {df.shape[1]}")
+        output_dir = "synthetic/"
+        os.makedirs(output_dir, exist_ok=True)
+        final_path = os.path.join(output_dir, self.filename)
+        df.to_csv(final_path, index=False)
+        print(f" • Dataset salvato in: {final_path}")
+
 
         return df
 
