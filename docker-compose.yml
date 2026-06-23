@@ -1,18 +1,5 @@
 services:
 
-  #postgres:
-    #image: postgres:15
-    #container_name: aurora_mock
-    #environment:
-     # POSTGRES_DB: rf_locks
-     # POSTGRES_USER: admin
-     # POSTGRES_PASSWORD: password
-    #ports:
-     # - "5432:5432"
-    #volumes:
-      #- ./src/utilities/sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
-     
-
   orchestrator-01:
     build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
@@ -26,19 +13,12 @@ services:
       - EC2_ID=${EC2_ID:-Locale}-01
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - RUNNING_IN_DOCKER=true
-      - AURORA_HOST
-      - AURORA_PORT
-      - AURORA_DB
-      - AURORA_USER
-      - AURORA_PASSWORD
     volumes:
       - .:/app:z                        
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z   
     command: python -m src.master.orchestrator.main
-    #depends_on:
-      #- postgres 
     restart: on-failure
   
   orchestrator-02:
@@ -54,19 +34,12 @@ services:
       - EC2_ID=${EC2_ID:-Locale}-02
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - RUNNING_IN_DOCKER=true
-      - AURORA_HOST
-      - AURORA_PORT
-      - AURORA_DB
-      - AURORA_USER
-      - AURORA_PASSWORD
     volumes:
       - .:/app:z                         
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z  
     command: python -m src.master.orchestrator.main
-    #depends_on:
-      #- postgres
     restart: on-failure
 
   worker:
@@ -89,11 +62,6 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - RUNNING_IN_DOCKER=true     # Forza l'ascolto su 0.0.0.0 e la registrazione tramite hostname dinamico
       - LOCAL_STORAGE_PATH=/app/.local_storage  
-      - AURORA_HOST       
-      - AURORA_PORT
-      - AURORA_DB
-      - AURORA_USER
-      - AURORA_PASSWORD
     volumes:
       - .:/app:z                           
       - ./synthetic:/app/synthetic:z
@@ -109,5 +77,4 @@ services:
       "
     depends_on:
       - orchestrator-01
-      #- postgres
     restart: on-failure
