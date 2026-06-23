@@ -15,7 +15,6 @@ from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.factory import DatasetDAOFactory
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
-from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
