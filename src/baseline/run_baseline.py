@@ -31,6 +31,8 @@ def run_baseline():
     # Seme globale sincronizzato con il cluster e Colab
     RANDOM_SEED = 123
     target_col = "Label"
+    BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
+    dataset_type = "real"
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
@@ -40,20 +42,22 @@ def run_baseline():
     # ---------------------------------------------------------
     print(">>> FASE 1: Estrazione e Preprocessing Dati")
     
-    dataset_type = "real"
-    if os.path.exists("config.json"):
-        with open("config.json", "r") as f:
+    if os.path.exists(BOOT_CONFIG_PATH):
+        with open(BOOT_CONFIG_PATH, "r") as f:
             try:
                 tmp_cfg = json.load(f)
                 dataset_type = tmp_cfg.get("dataset_type", "real")
+                print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except:
+                print(f" [ATTENZIONE] Errore nel parsing di {BOOT_CONFIG_PATH}: {e}")
                 pass
+    else:
+        print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
     if dataset_type == "synthetic":
         print(f" • Tipo Dataset: Sintetico (Stress Test Task 2)")
         loader = SyntheticDataLoader(n_samples=100000, random_seed=RANDOM_SEED, target_column=target_col)
         df_clean = loader.load()
-        
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
         train_df, test_df = splitter.split(df_clean)
     else:
@@ -119,16 +123,16 @@ def run_baseline():
     
     param_dist = [
         {
-            'n_estimators': [10, 20, 30],
-            'max_depth': [10, 20, None],
+            'n_estimators': [100, 200, 300],
+            'max_depth': [10, 25, None],
             'min_samples_split': [2, 5, 10],
             'class_weight': [None, 'balanced'],
             'bootstrap': [True],
             'max_samples':[0.5,0.7,0.8,1.0]
         },
         {
-            'n_estimators': [10, 20, 30],
-            'max_depth': [10, 20, None],
+            'n_estimators': [100, 200, 300],
+            'max_depth': [10, 25, None],
             'min_samples_split': [2, 5, 10],
             'class_weight': [None, 'balanced'],
             'bootstrap': [False],

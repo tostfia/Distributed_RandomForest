@@ -257,19 +257,27 @@ def handle_training():
 def handle_baseline_selection():
     """Interfaccia di instradamento per l'esecuzione della baseline locale."""
     print("\n=== PREPARAZIONE BASELINE LOCALE ===")
-    if not os.path.exists(CONFIG_PATH):
-        print("[INFO] Nessun file config.json rilevato. Configurazione rapida del dataset per la baseline:")
-        print("  [1] Esegui su Dataset Reale")
-        print("  [2] Esegui su Dataset Sintetico")
-        choice = get_input("  Scelta: ", "1")
+    
+    print("Seleziona la sorgente dati per il calcolo della baseline:")
+    print("  [1] Esegui su Dataset Reale (1% probabilistic sampling)")
+    print("  [2] Esegui su Dataset Sintetico (Stress Test)")
+    choice = get_input("  Scelta [Default: 1]: ", "1")
+    
+    dtype = "synthetic" if choice == "2" else "real"
+    
+    # Prepariamo la configurazione di boot minima per la baseline
+    boot_config = {
+        "dataset_type": dtype
+    }
+    
+    # Usiamo il path centralizzato CONFIG_PATH (./.local_storage/config.json) 
+    # o assicurati che run_baseline legga dallo stesso path.
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(boot_config, f, indent=2)
+    print(f"[OK] Boot configuration registrata per dataset: {dtype.upper()}")
         
-        dtype = "synthetic" if choice == "2" else "real"
-        dummy_config = {"dataset_type": dtype, "hyperparameters": {"n_estimators": 100}}
-        
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(dummy_config, f)
-            
+    # Avviamo il processo analitico isolato
     run_baseline()
 
 
