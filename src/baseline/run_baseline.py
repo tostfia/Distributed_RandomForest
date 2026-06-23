@@ -123,7 +123,7 @@ def run_baseline():
     
     param_dist = [
         {
-            'n_estimators': [100, 200, 300],
+            'n_estimators': [10, 20, 30],
             'max_depth': [10, 25, None],
             'min_samples_split': [2, 5, 10],
             'class_weight': [None, 'balanced'],
@@ -131,7 +131,7 @@ def run_baseline():
             'max_samples':[0.5,0.7,0.8,1.0]
         },
         {
-            'n_estimators': [100, 200, 300],
+            'n_estimators': [10, 20, 30],
             'max_depth': [10, 25, None],
             'min_samples_split': [2, 5, 10],
             'class_weight': [None, 'balanced'],
@@ -172,7 +172,7 @@ def run_baseline():
         "dataset_type": dataset_type,
         "dataset_path": data_folder if dataset_type == "real" else "synthetic",
         "hyperparameters": {
-            "n_estimators": int(best_params.get("n_estimators", 100)),
+            "n_estimators": int(best_params.get("n_estimators", 10)),
             "max_depth": best_params.get("max_depth") ,
             "min_samples_split": int(best_params.get("min_samples_split", 2)),
             "class_weight": best_params.get("class_weight", None),

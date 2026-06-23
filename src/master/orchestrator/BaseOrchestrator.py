@@ -4,7 +4,8 @@ import os
 import sys
 import time
 import threading
-
+import boto3
+from botocore.exceptions import ClientError
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services, DatasetDAOFactory
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -25,12 +26,101 @@ class BaseOrchestrator(ABC):
             print(f"[{self.orchestrator_name.upper()}] Errore inizializzazione servizi: {e}")
             sys.exit(1)
 
-    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 30):
+    def _get_lock_key(self) -> str:
+        return "global_orchestrator_leader_lock"
+    
+    def _try_acquire_leadership(self,ttl:int = 30) -> bool:
+        lock_key = self._get_lock_key()
+        
+        if self.environment == "local":
+            lock_dir = "./.local_storage"
+            lock_path = os.path.join(lock_dir, f"{lock_key}.json")
+            temp_path = os.path.join(lock_dir, f"{lock_key}.tmp")
+            now = time.time()
+            
+            if os.path.exists(lock_path):
+                try:
+                    with open(lock_path, "r", encoding="utf-8") as f:
+                        lock_data = json.load(f)
+                    # Se il lock è ancora valido ed appartiene a un altro, fallisci
+                    if lock_data.get("leader") != self.orchestrator_name and (now - lock_data.get("timestamp", 0)) < 25:
+                        return False
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    print(f"[{self.orchestrator_name}] Lock file corrotto o vuoto rilevato sul disco. Tento il ripristino...")
+                    pass
+                    
+                except Exception:
+                    pass # File corrotto o rimosso a metà lettura, procedi a sovrascrivere
+            
+            try:
+                os.makedirs(lock_dir, exist_ok=True)
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump({"leader": self.orchestrator_name, "timestamp": now}, f, indent=2)
+                os.replace(temp_path, lock_path)  # Atomic replace
+                return True
+            except:
+                return False
+        else:
+            # Implementazione AWS con Scrittura Condizionale su DynamoDB
+            # [STRATEGIA IN AWS]: Sfrutta DynamoDB via state_manager con una scrittura condizionale (Conditional Put)
+            try:
+                return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=30)
+            except AttributeError:
+                # Fallback di sicurezza se non ancora mappato nel tuo state_manager AWS custom
+                return True
+    
+    def _refresh_leadership_lock(self):
+        """Aggiorna il timestamp del lock per comunicare che il Leader è in salute."""
+        lock_key = self._get_lock_key()
+        if self.environment == "local":
+            lock_dir = "./.local_storage"
+            lock_path = os.path.join(lock_dir, f"{lock_key}.json")
+            temp_path = os.path.join(lock_dir, f"{lock_key}.tmp")
+            try:
+                os.makedirs(lock_dir, exist_ok=True)
+                # 1. Scriviamo l'aggiornamento sul file temporaneo .tmp
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump({"leader": self.orchestrator_name, "timestamp": time.time()}, f, indent=2)
+                # 2. Sostituzione ATOMICA a livello di OS: il file .json non sarà mai vuoto
+                os.replace(temp_path, lock_path)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] Errore nel rinnovo del lock locale: {e}")
+        else:
+            try:
+                self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=30)
+            except Exception:
+                pass
+
+    def _release_leadership(self):
+        """Rilascia il lock globale in fase di spegnimento pulito dell'istanza."""
+        lock_key = self._get_lock_key()
+        if self.environment == "local":
+            lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
+            if os.path.exists(lock_path):
+                try:
+                    with open(lock_path, "r", encoding="utf-8") as f:
+                        lock_data = json.load(f)
+                    if lock_data.get("leader") == self.orchestrator_name:
+                        os.remove(lock_path)
+                        print(f"[{self.orchestrator_name}] Lock di leadership globale rilasciato.")
+                except Exception:
+                    pass
+        else:
+            try:
+                self.state_manager.release_global_lock(lock_key, self.orchestrator_name)
+            except Exception:
+                pass
+
+    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
+        """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
             try:
+                # 1. Aggiorna la presenza nel registro servizi comune
                 ServiceRegistry.update_orchestrator_heartbeat(self.orchestrator_name)
+                # 2. Rinnova attivamente la scadenza del lock di leadership
+                self._refresh_leadership_lock()
             except Exception as e:
-                print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat: {e}")
+                print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat/lock: {e}")
 
             for _ in range(interval):
                 if stop_event.is_set():
@@ -45,12 +135,25 @@ class BaseOrchestrator(ABC):
 
         ServiceRegistry.register_orchestrator(self.orchestrator_name)
 
+        is_leader = False
         self._stop_heartbeat = threading.Event()
-        self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
-        self.hb_thread.start()
+        self.hb_thread = None
 
         try:
             while True:
+                if not is_leader:
+                    is_leader = self._try_acquire_leadership()
+                    if not is_leader:
+                        print(f"[{self.orchestrator_name}] [STANDBY] Un altro orchestratore è Active. In attesa di fault... (Sleep 5s)")
+                        time.sleep(5)
+                        continue
+                    else:
+                        print(f"\n[{self.orchestrator_name}] [ACTIVE] !!! LEADERSHIP GLOBALE ACQUISITA !!!")
+                        print(f"[{self.orchestrator_name}] Avvio dell'heartbeat thread e attivazione del polling sulla coda: '{self.queue_name}'\n")
+                        # Avviamo il thread di heartbeat SOLO dopo aver conquistato la leadership
+                        self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
+                        self.hb_thread.start()
+                
                 try:
                     sqs_response = self.sqs_queue.receive_message(queue_name=self.queue_name, visibility_timeout=300)
 
@@ -72,8 +175,11 @@ class BaseOrchestrator(ABC):
             print(f"\n[-] Interruzione manuale intercettata sull'orchestrattore {self.orchestrator_name}")
         finally:
             print(f"[*] Chiusura dei servizi in corso per {self.orchestrator_name}...")
-            self._stop_heartbeat.set()
-            self.hb_thread.join(timeout=1)
+            if is_leader:
+                self._stop_heartbeat.set()
+                if self.hb_thread:
+                    self.hb_thread.join(timeout=2)
+                self._release_leadership()
             ServiceRegistry.deregister_orchestrator(self.orchestrator_name)
             print(f"[*] Orchestratore rimosso correttamente dalla rete.")
 

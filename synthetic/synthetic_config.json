@@ -1,6 +1,6 @@
 {
   "n_samples": 500000,
-  "n_features": 40,
+  "n_features": 30,
   "target_column": "Label",
   "filename": "sintetic_dataset.csv"
 }

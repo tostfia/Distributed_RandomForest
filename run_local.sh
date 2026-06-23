@@ -30,6 +30,14 @@ else
     TERM_CMD="bash -c"
 fi
 
+echo -n "Quanti nodi Orchestratore vuoi avviare per il test di Fault (1-2)? "
+read NUM_ORCHESTRATORS
+
+if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
+    echo "Errore: inserisci un numero compreso tra 1 e 2."
+    exit 1
+fi
+
 # Richiesta dinamica del numero di Worker
 echo -n "Quanti nodi Worker vuoi avviare per questo test (1-7)? "
 read NUM_WORKERS
@@ -49,10 +57,14 @@ fi
 echo "[SYSTEM] Avvio del cluster distribuito su terminali differenti..."
 
 # 1. Avvio dell'Orchestratore in un nuovo terminale
-echo "[START] Avvio Orchestratore Master..."
-$TERM_CMD bash -c "python -m src.master.orchestrator.main; exec bash"
-sleep 2
+echo "[START] Avvio di $NUM_ORCHESTRATORS Orchestratore/i Master..."
+for ((i=1; i<=NUM_ORCHESTRATORS; i++)); do
+    echo "[START] Avvio Istanza Orchestratore #$i..."
+    $TERM_CMD bash -c "python -m src.master.orchestrator.main; exec bash"
+    sleep 1 # Piccolo delay per non far accavallare la creazione della cartella .local_storage
+done
 
+sleep 2
 # 2. Avvio dinamico dei Worker in terminali differenti
 PORT_BASE=18861
 for ((i=1; i<=NUM_WORKERS; i++)); do
