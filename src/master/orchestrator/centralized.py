@@ -2,7 +2,10 @@ import pickle
 import os
 import time
 import rpyc
+import queue
+import threading
 import traceback
+from rpyc.utils.classic import obtain
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -106,13 +109,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
 
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
+        """
+        Esegue lo step di addestramento distribuito centralizzato.
+        Versione allineata e verificata con le firme di BaseWorker.
+        """
+
+        # 1. Preparazione dei dati (se non ancora pronti)
         if self.train_data_path is None:
             self._prepare_data(payload, seed)
         
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 
+        # 2. Recupero dei Worker disponibili dal ServiceRegistry
         while True:
             available_workers = ServiceRegistry.get_available_workers(self.environment)
             if available_workers:
@@ -124,66 +134,134 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
-
-        trees_per_worker = total_step_trees // num_workers
-        remainder = total_step_trees % num_workers
         source_info = self.train_data_path 
         
+        # Estrazione iperparametri dal payload
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
+        tree_type = hp.get("tree_type", "classifier")
+
+        # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
+        CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
+        print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
+
+        # 4. Configurazione della Coda di Sotto-Task locale
+        task_queue = queue.Queue()
+        sub_start = start_alberi
+        task_id_counter = 0
+        
+        while sub_start < target_alberi:
+            sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
+            # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
+            task_queue.put((task_id_counter, sub_start, sub_end, seed + (sub_start - start_alberi)))
+            task_id_counter += 1
+            sub_start = sub_end
 
         all_trained_trees = []
-        current_seed_offset = seed
+        results_lock = threading.Lock()
         connessioni_attive = []
+        connessioni_lock = threading.Lock()
+        
+        active_worker_names = list(worker_names)
 
-        def _rpc_call(w_name, w_info, n_trees, w_seed):
-            print(f" [RPC -> {w_name}] Invio richiesta per {n_trees} alberi su {w_info['host']}:{w_info['port']}...")
-            conn = rpyc.connect(w_info["host"], w_info["port"], config={'allow_pickle': True,'sync_request_timeout': 600})
-            connessioni_attive.append(conn)  
-            try: 
-                remote_trees = conn.root.train_subset_forest(source_info=source_info, num_trees=n_trees, base_seed=w_seed, max_depth=max_depth)
-                return remote_trees
-            except Exception as e:
-                print(f"   [ERRORE RPC] Connessione fallita con {w_name}: {e}")
-                raise e
+        # 5. Definizione della funzione consumatrice per i thread
+        def worker_thread_consumer(w_name):
+            w_info = available_workers[w_name]
+            worker_conn = None
+            try:
+                print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                worker_conn = rpyc.connect(
+                    w_info["host"], 
+                    w_info["port"], 
+                    config={
+                        'allow_pickle': True,
+                        'sync_request_timeout': 600,
+                        'keepalive': True
+                    }
+                )
+                with connessioni_lock:
+                    connessioni_attive.append(worker_conn)
+                
+                while True:
+                    try:
+                        task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=1)
+                    except queue.Empty:
+                        break
 
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_worker = {}
-            for i, name in enumerate(worker_names):
-                info = available_workers[name]
-                allocated_trees = trees_per_worker + (1 if i < remainder else 0)
+                    quota_chunk = end_t - start_t
+                    print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+                    
+                    try:
+                        
+                        result_raw = worker_conn.root.train_subset_forest(
+                            source_info=source_info,
+                            n_estimators=quota_chunk,       
+                            base_random_state=chunk_seed,    
+                            max_depth=max_depth
+                        )
+                        
+                        # Deserializzazione sicura dei byte trasmessi via rete
+                        result_trees = pickle.loads(obtain(result_raw))
+                        
+                        with results_lock:
+                            all_trained_trees.extend(result_trees)
+                            
+                        print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                        task_queue.task_done()
+                        
+                    except Exception as e:
+                        print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
+                        
+                        # Reinserimento immediato del chunk per la fault tolerance
+                        task_queue.put((task_id, start_t, end_t, chunk_seed))
+                        print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato per il failover.")
+                        
+                        with results_lock:
+                            if w_name in active_worker_names:
+                                active_worker_names.remove(w_name)
+                        break  
+                        
+            except Exception as conn_err:
+                print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
+                with results_lock:
+                    if w_name in active_worker_names:
+                        active_worker_names.remove(w_name)
+            finally:
+                if worker_conn:
+                    try:
+                        worker_conn.close()
+                        with connessioni_lock:
+                            if worker_conn in connessioni_attive:
+                                connessioni_attive.remove(worker_conn)
+                    except:
+                        pass
 
-                if allocated_trees == 0:
-                    continue
+        # 6. Avvio dei thread
+        threads = []
+        for name in worker_names:
+            t = threading.Thread(target=worker_thread_consumer, args=(name,))
+            t.start()
+            threads.append(t)
 
-                f = executor.submit(_rpc_call, name, info, allocated_trees, current_seed_offset)
-                future_to_worker[f] = name
-                current_seed_offset += allocated_trees
+        for t in threads:
+            t.join()
 
-            for future in as_completed(future_to_worker):
-                w_name = future_to_worker[future]
-                try:
-                    result_raw = future.result()
-                    result_trees = pickle.loads(result_raw) if isinstance(result_raw, bytes) else result_raw
-                    all_trained_trees.extend(result_trees)
-                    print(f"   [RPC <- {w_name}] Ricevuti con successo {len(result_trees)} alberi.")
-                except Exception as e:
-                    print(f"   [ERRORE CRITICO] Il worker '{w_name}' ha fallito o si è disconnesso: {e}")
-                    traceback.print_exc()  
-                    raise e  
+        # 7. Monitoraggio fallimento totale dello step
+        if not task_queue.empty() and len(active_worker_names) == 0:
+            print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
+            raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
 
-        print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC attive...")
-        for conn in connessioni_attive:
-            try: conn.close()
-            except Exception: pass
+        # Chiusura pulita delle connessioni
+        print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC residue...")
+        with connessioni_lock:
+            for conn in connessioni_attive:
+                try: conn.close()
+                except Exception: pass
 
-        # --- RICOMPOSIZIONE E SALVATAGGIO ---
+        # 8. Ricomposizione della foresta globale
         if len(all_trained_trees) > 0:
             print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
-            tree_type = hp.get("tree_type", "classifier")
-            
             try:
-                # Estraiamo il numero di feature di input dal primo albero valido per blindare il modello
                 n_features = all_trained_trees[0].n_features_in_
                 
                 if tree_type == "classifier":
@@ -193,7 +271,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 else:
                     global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
                 
-                # Iniezione parametri strutturali per la piena compatibilità esterna
                 global_model.estimators_ = all_trained_trees
                 global_model.n_features_in_ = n_features
                 global_model.n_outputs_ = 1
@@ -205,15 +282,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 with open(model_path, "wb") as f:
                     pickle.dump(global_model, f)
                 
-                print(f"   [{self.orchestrator_name}] Modello {tree_type} integrato correttamente in '{model_path}'.")
+                print(f"   [{self.orchestrator_name}] Modello {tree_type} salvato con successo in '{model_path}'.")
                 return True
                 
             except Exception as e:
-                print(f"   [ERRORE AGGREGAZIONE] Impossibile creare il modello {tree_type}: {e}")
+                print(f"   [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
                 traceback.print_exc()
                 return False
 
-        print(f"   [{self.orchestrator_name}] Nessun albero ricevuto. Fallimento.")
+        print(f"   [{self.orchestrator_name}] Nessun albero collezionato.")
         return False
     
     def _execute_inference_step(self, payload: dict):
