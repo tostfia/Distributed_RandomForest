@@ -114,10 +114,26 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Versione allineata e verificata con le firme di BaseWorker.
         """
 
-        # 1. Preparazione dei dati (se non ancora pronti)
+        # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
         if self.train_data_path is None:
-            self._prepare_data(payload, seed)
-        
+            expected_job_id = payload.get("job_id", "unknown_job")
+            if self.environment == "aws":
+                expected_train = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{expected_job_id}.csv"
+                expected_test = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{expected_job_id}.csv"
+            else:
+                expected_train = f"./.local_storage/shared_train_{expected_job_id}.csv"
+                expected_test = f"./.local_storage/shared_test_{expected_job_id}.csv"
+            
+            # Verifichiamo se lo storage condiviso ha già i dati pronti
+            if self.environment == "local" and os.path.exists(expected_train) and os.path.exists(expected_test):
+                print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT ETL] Dataset già presente nello storage condiviso. Salto la fase ETL.")
+                self.train_data_path = expected_train
+                self.test_data_path = expected_test
+                self.current_job_id = expected_job_id
+            else:
+                # Se non esistono o siamo in AWS (implementabile con check su S3), esegui l'ETL normalmente
+                self._prepare_data(payload, seed)
+                
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 

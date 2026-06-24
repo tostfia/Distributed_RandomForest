@@ -114,6 +114,29 @@ class MockSQSQueue(SQSQueueInterface):
         else:
             print(f"[MOCK SQS] [ERRORE CANCELLAZIONE] ReceiptHandle non valido o scaduto: {receipt_handle}")
             return False
+    def change_message_visibility(self, queue_name: str, receipt_handle: str, visibility_timeout: int) -> bool:
+        """
+        Modifica ed estende il Visibility Timeout di un messaggio attualmente in-flight.
+        Simula il comportamento dell'omonima API di AWS SQS.
+        """
+        state = self._load_state()
+        now = time.time()
+        
+        # Verifichiamo se il messaggio è ancora in elaborazione ed appartiene alla coda corretta
+        if receipt_handle in state["in_flight"]:
+            # Aggiorniamo il timestamp di scadenza: ora attuale + nuova estensione
+            state["in_flight"][receipt_handle]["time_out"] = now + visibility_timeout
+            
+            # Salviamo lo stato aggiornato in modo concorrenziale su JSON
+            self._save_state(state)
+            
+            job_id = state["in_flight"][receipt_handle]["message"].get("job_id", "unknown")
+            print(f"[MOCK SQS] [HEARTBEAT OK] Visibilità estesa per {receipt_handle} (Job ID: {job_id[:8]}...) di altri {visibility_timeout}s.")
+            return True
+        else:
+            # Caso in cui il messaggio potrebbe essere già stato eliminato o scaduto prima del heartbeat
+            print(f"[MOCK SQS] [HEARTBEAT WARN] Impossibile aggiornare la visibilità. ReceiptHandle non trovato: {receipt_handle}")
+            return False
 
 # Istanza globale esportata per la Factory polimorfa
 sqs_queue = MockSQSQueue()
