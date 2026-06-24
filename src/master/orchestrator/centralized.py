@@ -133,145 +133,195 @@ class CentralizedOrchestrator(BaseOrchestrator):
             else:
                 # Se non esistono o siamo in AWS (implementabile con check su S3), esegui l'ETL normalmente
                 self._prepare_data(payload, seed)
+        if self.environment == "aws":
+            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
+        else:
+            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
+            os.makedirs("./.local_storage", exist_ok=True)
+        all_trained_trees = []
+
+        # ─── FASE DI RESUME: SE ABBIAMO SUBITO UN FAILOVER E ABBIAMO GIÀ ALBERI PRONTI ───
+        if start_alberi > 0:
+            print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Rilevato start_alberi = {start_alberi}. Ripristino checkpoint fisico...")
+            if os.path.exists(checkpoint_trees_path):
+                try:
+                    with open(checkpoint_trees_path, "rb") as f:
+                        all_trained_trees = pickle.load(f)
+                    print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
+                    # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
+                    start_alberi = len(all_trained_trees)
+                except Exception as e_load:
+                    print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
+                    start_alberi = 0
+                    all_trained_trees = []
+            else:
+                print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
+                start_alberi = 0
                 
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
-
-        # 2. Recupero dei Worker disponibili dal ServiceRegistry
-        while True:
-            available_workers = ServiceRegistry.get_available_workers(self.environment)
-            if available_workers:
-                print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
-                break
-            
-            print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
-            time.sleep(10)
-
-        worker_names = list(available_workers.keys())
-        num_workers = len(worker_names)
-        source_info = self.train_data_path 
-        
-        # Estrazione iperparametri dal payload
-        hp = payload.get("hyperparameters", {})
-        max_depth = hp.get("max_depth", None)
-        tree_type = hp.get("tree_type", "classifier")
-
-        # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
-        CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
-        print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
-
-        # 4. Configurazione della Coda di Sotto-Task locale
-        task_queue = queue.Queue()
-        sub_start = start_alberi
-        task_id_counter = 0
-        
-        while sub_start < target_alberi:
-            sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
-            # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
-            task_queue.put((task_id_counter, sub_start, sub_end, seed + (sub_start - start_alberi)))
-            task_id_counter += 1
-            sub_start = sub_end
-
-        all_trained_trees = []
-        results_lock = threading.Lock()
-        connessioni_attive = []
-        connessioni_lock = threading.Lock()
-        
-        active_worker_names = list(worker_names)
-
-        # 5. Definizione della funzione consumatrice per i thread
-        def worker_thread_consumer(w_name):
-            w_info = available_workers[w_name]
-            worker_conn = None
-            try:
-                print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
-                worker_conn = rpyc.connect(
-                    w_info["host"], 
-                    w_info["port"], 
-                    config={
-                        'allow_pickle': True,
-                        'sync_request_timeout': 600,
-                        'keepalive': True
-                    }
-                )
-                with connessioni_lock:
-                    connessioni_attive.append(worker_conn)
+        # Caso limite: avevamo già finito tutto ma eravamo crashati prima di consolidare
+        if total_step_trees <= 0:
+            print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
+        else:
+            print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
+            # 2. Recupero dei Worker disponibili dal ServiceRegistry
+            while True:
+                available_workers = ServiceRegistry.get_available_workers(self.environment)
+                if available_workers:
+                    print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
+                    break
                 
-                while True:
-                    try:
-                        task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=1)
-                    except queue.Empty:
-                        break
+                print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
+                time.sleep(10)
 
-                    quota_chunk = end_t - start_t
-                    print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+            worker_names = list(available_workers.keys())
+            num_workers = len(worker_names)
+            source_info = self.train_data_path 
+        
+            # Estrazione iperparametri dal payload
+            hp = payload.get("hyperparameters", {})
+            max_depth = hp.get("max_depth", None)
+            tree_type = hp.get("tree_type", "classifier")
+
+            # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
+            CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
+            print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
+
+            # 4. Configurazione della Coda di Sotto-Task locale
+            task_queue = queue.Queue()
+            sub_start = start_alberi
+            task_id_counter = 0
+            
+            while sub_start < target_alberi:
+                sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
+                # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
+                task_queue.put((task_id_counter, sub_start, sub_end, seed + (sub_start - start_alberi)))
+                task_id_counter += 1
+                sub_start = sub_end
+
+            
+            results_lock = threading.Lock()
+            connessioni_attive = []
+            connessioni_lock = threading.Lock()
+            
+            active_worker_names = list(worker_names)
+
+            # 5. Definizione della funzione consumatrice per i thread
+            def worker_thread_consumer(w_name):
+                w_info = available_workers[w_name]
+                worker_conn = None
+                try:
+                    print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                    worker_conn = rpyc.connect(
+                        w_info["host"], 
+                        w_info["port"], 
+                        config={
+                            'allow_pickle': True,
+                            'sync_request_timeout': 600,
+                            'keepalive': True
+                        }
+                    )
+                    with connessioni_lock:
+                        connessioni_attive.append(worker_conn)
                     
-                    try:
+                    while True:
+                        try:
+                            task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=1)
+                        except queue.Empty:
+                            break
+
+                        quota_chunk = end_t - start_t
+                        print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         
-                        result_raw = worker_conn.root.train_subset_forest(
-                            source_info=source_info,
-                            num_trees=quota_chunk,       
-                            base_seed=chunk_seed,    
-                            max_depth=max_depth
-                        )
-                        
-                        # Deserializzazione sicura dei byte trasmessi via rete
-                        result_trees = pickle.loads(obtain(result_raw))
-                        
-                        with results_lock:
-                            all_trained_trees.extend(result_trees)
+                        try:
                             
-                        print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
-                        task_queue.task_done()
+                            result_raw = worker_conn.root.train_subset_forest(
+                                source_info=source_info,
+                                num_trees=quota_chunk,       
+                                base_seed=chunk_seed,    
+                                max_depth=max_depth
+                            )
+                            
+                            # Deserializzazione sicura dei byte trasmessi via rete
+                            result_trees = pickle.loads(obtain(result_raw))
+                            
+                            with results_lock:
+                                all_trained_trees.extend(result_trees)
+                                current_total = len(all_trained_trees)
+                                # ─── STRATEGIA SAGEMAKER: SALVATAGGIO FISICO ATOMICO PROGRESSIVO ───
+                                try:
+                                    with open(checkpoint_trees_path, "wb") as f_chk:
+                                        pickle.dump(all_trained_trees, f_chk)
+                                    print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
+                                except Exception as e_fs:
+                                    print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+                                
+                                # Sincronizziamo in tempo reale anche il contatore logico nel Database/State Manager
+                                if hasattr(self, 'state_manager') and self.state_manager:
+                                    try:
+                                        self.state_manager.update_request_status(
+                                            job_id=self.current_job_id,
+                                            status="PROCESSING",
+                                            orchestrator_id=self.orchestrator_name,
+                                            retries=payload.get("retries", 0),
+                                            base_random_state=seed,
+                                            alberi_addestrati=current_total
+                                        )
+                                    except Exception as e_db:
+                                        print(f"   [ERRORE DB] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                                
+                            print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                            task_queue.task_done()
+                            
+                        except Exception as e:
+                            print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
+                            
+                            # Reinserimento immediato del chunk per la fault tolerance
+                            task_queue.put((task_id, start_t, end_t, chunk_seed))
+                            print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato per il failover.")
+                            
+                            with results_lock:
+                                if w_name in active_worker_names:
+                                    active_worker_names.remove(w_name)
+                            break  
                         
-                    except Exception as e:
-                        print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
-                        
-                        # Reinserimento immediato del chunk per la fault tolerance
-                        task_queue.put((task_id, start_t, end_t, chunk_seed))
-                        print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato per il failover.")
-                        
-                        with results_lock:
-                            if w_name in active_worker_names:
-                                active_worker_names.remove(w_name)
-                        break  
-                        
-            except Exception as conn_err:
-                print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
-                with results_lock:
-                    if w_name in active_worker_names:
-                        active_worker_names.remove(w_name)
-            finally:
-                if worker_conn:
-                    try:
-                        worker_conn.close()
-                        with connessioni_lock:
-                            if worker_conn in connessioni_attive:
-                                connessioni_attive.remove(worker_conn)
-                    except:
-                        pass
+                except Exception as conn_err:
+                    print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
+                    with results_lock:
+                        if w_name in active_worker_names:
+                            active_worker_names.remove(w_name)
+                finally:
+                    if worker_conn:
+                        try:
+                            worker_conn.close()
+                            with connessioni_lock:
+                                if worker_conn in connessioni_attive:
+                                    connessioni_attive.remove(worker_conn)
+                        except:
+                            pass
 
-        # 6. Avvio dei thread
-        threads = []
-        for name in worker_names:
-            t = threading.Thread(target=worker_thread_consumer, args=(name,))
-            t.start()
-            threads.append(t)
+            # 6. Avvio dei thread
+            threads = []
+            for name in worker_names:
+                t = threading.Thread(target=worker_thread_consumer, args=(name,))
+                t.start()
+                threads.append(t)
 
-        for t in threads:
-            t.join()
+            for t in threads:
+                t.join()
 
-        # 7. Monitoraggio fallimento totale dello step
-        if not task_queue.empty() and len(active_worker_names) == 0:
-            print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
-            raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
+            # 7. Monitoraggio fallimento totale dello step
+            if not task_queue.empty() and len(active_worker_names) == 0:
+                print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
+                raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
 
-        # Chiusura pulita delle connessioni
-        print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC residue...")
-        with connessioni_lock:
-            for conn in connessioni_attive:
-                try: conn.close()
-                except Exception: pass
+            # Chiusura pulita delle connessioni
+            print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC residue...")
+            with connessioni_lock:
+                for conn in connessioni_attive:
+                    try: conn.close()
+                    except Exception: pass
 
         # 8. Ricomposizione della foresta globale
         if len(all_trained_trees) > 0:
@@ -568,6 +618,44 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
 
         print("═" * 75 + "\n")
+
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
+        """
+        Estende il checkpoint della classe base aggiungendo il salvataggio FISICO
+        degli alberi (specifico del calcolo centralizzato).
+        """
+        # 1. Chiamiamo la classe base per aggiornare DynamoDB (evita duplicazione di codice)
+        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
+        
+        # 2. Se ci sono alberi fisici da blindare su disco/S3, lo facciamo qui
+        if alberi_reali is not None and len(alberi_reali) > 0:
+            if self.environment == "aws":
+                checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+            else:
+                checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+            
+            try:
+                with open(checkpoint_trees_path, "wb") as f:
+                    pickle.dump(alberi_reali, f)
+                print(f"[{self.orchestrator_name}] [CENTRALIZED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi salvati in storage.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE STORAGE] Fallito salvataggio fisico degli alberi: {e}")
+
+    def _clean_checkpoint(self, job_id: str):
+        """
+        Override del metodo di pulizia per rimuovere il file pickle parziale.
+        """
+        if self.environment == "aws":
+            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+        else:
+            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+            
+        if os.path.exists(checkpoint_trees_path):
+            try:
+                os.remove(checkpoint_trees_path)
+                print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso file temporaneo degli alberi parziali.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {checkpoint_trees_path}: {e}")
 
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")

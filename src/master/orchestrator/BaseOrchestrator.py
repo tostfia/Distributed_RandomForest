@@ -430,4 +430,27 @@ class BaseOrchestrator(ABC):
                         self._process_job(recovered_payload, receipt_handle=None)
                     except Exception as e:
                         print(f"[{self.orchestrator_name}] Errore durante il recupero del Job {job_id[:8]}: {e}")
+    
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
+        """
+        Implementazione di base: gestisce il checkpoint LOGICO (Metadati su DynamoDB).
+        Questo comportamento è comune a TUTTI gli orchestratori.
+        """
+        print(f"[{self.orchestrator_name}] [BASE-CHECKPOINT] Aggiornamento metadati di stato nel DB.")
+        if hasattr(self, 'state_manager') and self.state_manager:
+            self.state_manager.update_request_status(
+                job_id=job_id, 
+                status="PROCESSING", 
+                orchestrator_id=self.orchestrator_name, 
+                retries=retries,
+                base_random_state=base_random_state,
+                alberi_addestrati=current_alberi
+            )
+
+    def _clean_checkpoint(self, job_id: str):
+        """
+        Hook di pulizia. Di base non fa nulla, ma permette alle classi figlie
+        di fare l'override per cancellare file locali o su S3.
+        """
+        pass
                     
