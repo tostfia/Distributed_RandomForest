@@ -47,6 +47,7 @@ class FederatedWorker(BaseWorker):
         # Attributi per preservare il testing set locale per l'inferenza federata
         self.X_test = None
         self.y_test = None
+        self.local_sample_count = 0
 
         self.worker_index = 0
         for char in worker_name.split("-"):
@@ -151,6 +152,7 @@ class FederatedWorker(BaseWorker):
             self.X_test = df_test.drop(columns=[self.target_column]).to_numpy(dtype=np.float64)
             self.y_test = df_test[self.target_column].to_numpy(dtype=np.float64 if self.is_regression() else np.int64)
 
+        self.local_sample_count = len(X_train)
         print(f"[FederatedWorker] [ETL OK] Record di addestramento pronti: {X_train.shape}")
         print(f"[FederatedWorker] [ETL OK] Record di validazione blindati in RAM: {self.X_test.shape}")
         
@@ -158,6 +160,23 @@ class FederatedWorker(BaseWorker):
 
     def _get_tree_class(self) -> type:
         return self.tree_class_reference
+    
+    #override 
+    def _get_task_storage_paths(self, source_info: str, base_seed: int, num_trees: int):
+        """
+        OVERRIDE CRITICO: Forza l'isolamento dei task su storage condiviso (S3/Locale)
+        iniettando il nome del worker nel path per evitare sovrascritture tra nodi diversi.
+        """
+        filename = os.path.basename(source_info)
+        job_id = filename.replace("train_", "").replace(".csv", "").replace("|", "_")
+
+        local_dir = os.path.join("./.local_storage","trained_tasks")
+        local_path = os.path.join(local_dir,f"task_{self.worker_name}_{job_id}_seed_{base_seed}_trees_{num_trees}.json")
+        s3_bucket = os.environ.get("TRAINED_TREES_S3_BUCKET", "my-cluster-trained-trees-bucket")
+        # Inseriamo una sottocartella specifica per il worker su S3
+        s3_key = f"tasks/{job_id}/{self.worker_name}/task_seed_{base_seed}_trees_{num_trees}.pkl"
+        
+        return local_dir, local_path, s3_bucket, s3_key
 
     def exposed_get_local_y_test(self) -> bytes:
         """Metodo esposto tramite RPC per consentire all'Orchestratore di scaricare
@@ -167,3 +186,10 @@ class FederatedWorker(BaseWorker):
         if self.y_test is None:
             raise ValueError(f"[{self.worker_name}] Errore: Nessun target vector locale y_test in RAM.")
         return pickle.dumps(self.y_test)
+    
+    def exposed_get_local_sample_count(self)-> int:
+        """Metodo esposto tramite RPC per consentire all'Orchestratore di ottenere
+
+        il numero di campioni locali per il calcolo ponderato delle metriche globali.
+        """
+        return self.local_sample_count
