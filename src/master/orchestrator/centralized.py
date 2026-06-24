@@ -427,23 +427,31 @@ class CentralizedOrchestrator(BaseOrchestrator):
         task_queue = queue.Queue()
         tree_start = 0
         task_id_counter = 0
-        
-        while tree_start < total_trees:
-            tree_end = min(tree_start + CHUNK_SIZE, total_trees)
-            chunk_estimators = all_trees[tree_start:tree_end]
-            serialized_chunk_trees = pickle.dumps(chunk_estimators)
-            
-            task_queue.put((task_id_counter, tree_start, tree_end, serialized_chunk_trees))
-            task_id_counter += 1
-            tree_start = tree_end
-
-        # Strutture dati condivise protette da Lock per i thread consumatori
-        predictions_chunks = []
+        predictions_chunks = self._load_inference_checkpoint(job_id)  # Tentativo di ripristino da checkpoint
+        already_done_ranges = {start for start, _ in predictions_chunks}
         results_lock = threading.Lock()
         connessioni_attive = []
         connessioni_lock = threading.Lock()
         active_worker_names = list(worker_names)
+        
+        while tree_start < total_trees:
+            tree_end = min(tree_start + CHUNK_SIZE, total_trees)
+            if tree_start not in already_done_ranges:
+                chunk_estimators = all_trees[tree_start:tree_end]
+                serialized_chunk_trees = pickle.dumps(chunk_estimators)
+                task_queue.put((task_id_counter, tree_start, tree_end, serialized_chunk_trees))
+                task_id_counter += 1
+            else: 
+                print(f"[SHORT-CIRCUIT] Chunk {tree_start}-{tree_end} già completato. Skip.")
+            tree_start = tree_end
 
+        # Strutture dati condivise protette da Lock per i thread consumatori
+       
+
+        MAX_RETRIES_PER_TASK = 3  # Numero massimo di tentativi per ogni sotto-task prima di considerarlo fallito
+        task_retries = {}  # Dizionario per tracciare i tentativi per ogni task_id
+
+        failed_tasks = set()
         # 5. DEFINIZIONE DEL CONSUMATORE CONCORRENTE PER L'INFERENZA VIA RPC
         def inference_worker_consumer(w_name):
             w_info = available_workers[w_name]
@@ -464,7 +472,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 while True:
                     try:
-                        task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=1)
+                        task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=2)
                     except queue.Empty:
                         break
 
@@ -482,16 +490,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         with results_lock:
                             # Tracciamo start_idx per poter riordinare sequenzialmente i blocchi alla fine
                             predictions_chunks.append((start_idx, sub_predictions))
+                            inference_cp_path = self._get_inference_checkpoint_path(job_id)
+                            try:
+                                with open(inference_cp_path, "wb") as f_chk:
+                                    pickle.dump(predictions_chunks, f_chk)
+                                print(f"   [RPC INF <- {w_name}] [CHECKPOINT INFERENZA OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {len(predictions_chunks)} chunk.")
+                            except Exception as e_fs:
+                                print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere i chunk di inferenza parziali su file: {e_fs}")
                             
                         print(f"   [RPC INF <- {w_name}] Task {task_id} completato con successo.")
                         task_queue.task_done()
                         
                     except Exception as e:
                         print(f"   [ERRORE RPC INFERENZA] Fallimento del worker {w_name} sul Task {task_id}: {e}")
-                        
-                        # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
-                        task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
-                        print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
+                        retries = task_retries.get(task_id, 0) + 1
+                        task_retries[task_id] = retries
+                        if retries > MAX_RETRIES_PER_TASK:
+                            # Segnaliamo il fallimento permanente invece di loopar all'infinito
+                            print(f"[FATAL] Task {task_id} ha superato il limite di {MAX_RETRIES_PER_TASK} retry. Abort.")
+                            failed_tasks.add(task_id)
+                            task_queue.task_done()
+                        else:
+                            # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
+                            task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
+                            print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
                         
                         with results_lock:
                             if w_name in active_worker_names:
@@ -512,7 +534,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 connessioni_attive.remove(worker_conn)
                     except:
                         pass
-
+         
         # 6. AVVIO MULTI-THREADING E SINCRONIZZAZIONE DEI CONSUMATORI
         rpc_start_time = time.perf_counter()
         threads = []
@@ -523,11 +545,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         for t in threads:
             t.join()
+        
+        if failed_tasks:
+            raise RuntimeError(f"Inferenza parziale: {len(failed_tasks)} chunk non completati.")
+        if not task_queue.empty() :
+            raise RuntimeError("Task in coda orfani: tutti i worker sono crashati.")
 
-        # Rilevamento di un eventuale crash totale di tutti i nodi di calcolo
-        if not task_queue.empty() and len(active_worker_names) == 0:
-            print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati durante lo step di inferenza!")
-            raise RuntimeError("Sotto-sistema Fault Tolerance Inferenza interrotto: Nessun worker rimasto disponibile.")
 
         # Chiusura precauzionale di socket RPyC rimasti aperti
         with connessioni_lock:
@@ -645,6 +668,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         """
         Override del metodo di pulizia per rimuovere il file pickle parziale.
         """
+        super()._clean_checkpoint(job_id)
         if self.environment == "aws":
             checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
         else:
@@ -656,7 +680,28 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso file temporaneo degli alberi parziali.")
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {checkpoint_trees_path}: {e}")
-
+        inference_cp = self._get_inference_checkpoint_path(job_id)
+        if os.path.exists(inference_cp):
+            os.remove(inference_cp)
+    
+    
+    def _get_inference_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
+        return f"./.local_storage/inference_chunks_{job_id}.pkl"
+    
+    
+    def _load_inference_checkpoint(self, job_id: str):
+        path = self._get_inference_checkpoint_path(job_id)
+        if self.environment == "local" and os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    chunks = pickle.load(f)
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Caricati {len(chunks)} chunk di inferenza dal checkpoint.")
+                return chunks
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
+        return []
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
     orchestrator = CentralizedOrchestrator()
