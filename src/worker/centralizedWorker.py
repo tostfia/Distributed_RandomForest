@@ -45,6 +45,10 @@ class CentralizedWorker(BaseWorker):
     
     def is_regression(self) -> bool:
         return self.tree_type == "regressor"
+    
+    def _get_tree_class(self) -> type:
+        """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
+        return self.tree_class_reference
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
         
@@ -83,7 +87,3 @@ class CentralizedWorker(BaseWorker):
         )
         
         return self._cached_X, self._cached_y
-
-    def _get_tree_class(self) -> type:
-        """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
-        return self.tree_class_reference

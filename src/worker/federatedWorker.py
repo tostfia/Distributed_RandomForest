@@ -1,11 +1,14 @@
 import os
 import pickle
+from botocore.exceptions import ClientError
+import boto3
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification, make_regression
+from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 
+from Distributed_RandomForest.src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory 
 
@@ -45,9 +48,12 @@ class FederatedWorker(BaseWorker):
             
         os.makedirs(self.local_cache_dir, exist_ok=True)
         
-        # Attributi per preservare il testing set locale per l'inferenza federata
-        self.X_test = None
-        self.y_test = None
+        # Cache dello stato interno
+        self._cached_job_id = None
+        self._cached_X_train = None
+        self._cached_y_train = None
+        self._cached_X_test = None
+        self._cached_y_test = None
         self.local_sample_count = 0
 
         self.worker_index = 0
@@ -63,6 +69,10 @@ class FederatedWorker(BaseWorker):
 
     def is_regression(self) -> bool:
         return self.tree_type == "regressor"
+    
+    def _get_tree_class(self) -> type:
+        """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
+        return self.tree_class_reference
    
     def _load_data(self, dataset_tag: str):
         """Implementazione obbligatoria per la classe base."""
@@ -85,74 +95,136 @@ class FederatedWorker(BaseWorker):
     def exposed_load_local_shard(self):
         """Metodo RPC per forzare il caricamento."""
         return self._load_data("real")
-   
-    # ─── PUNTO DI INSERIMENTO: METODO RPC DI TRAINING ───
     
-    def exposed_train_local_federated_forest(self, dataset_tag: str, num_trees: int, base_seed: int, max_depth: int = None) -> bytes:
+    def exposed_train_local_federated_forest(self, payload: dict) -> list:
         """Metodo esposto tramite RPC richiesto dall'Orchestratore per avviare l'addestramento.
-        
         Chiama il caricamento dinamico dei dati e restituisce gli alberi locali in formato binario.
         """
-        try:
-            # 1. CHIAMATA A LOAD DATA: Popola X_train, y_train, X_test, y_test in RAM prima del fit
-            self._load_data(dataset_tag)
-            
-            print(f"[{self.worker_name}] Inizio addestramento locale di {num_trees} alberi...")
-            local_estimators = []
-            
-            # 2. Loop di addestramento degli alberi (Logica Bagging tipica di Random Forest)
-            for i in range(num_trees):
-                current_seed = base_seed + i
-                
-                # Istanziamo il singolo stimatore (es: DecisionTreeClassifier o DecisionTreeRegressor)
-                # ereditato tramite la reference passata nel costruttore base
-                tree = self.tree_class_reference(
-                    max_depth=max_depth,
-                    random_state=current_seed
-                )
-                
-                # Gestione del Bootstrap (campionamento locale con ripetizione)
-                if self.bootstrap:
-                    n_samples = len(self.X_train)
-                    # Genera indici casuali stabili usando il seed dell'albero corrente
-                    boot_indices = np.random.RandomState(current_seed).choice(
-                        n_samples, size=n_samples, replace=True
-                    )
-                    X_sampled = self.X_train.iloc[boot_indices]
-                    y_sampled = self.y_train.iloc[boot_indices]
-                else:
-                    X_sampled = self.X_train
-                    y_sampled = self.y_train
-                
-                # Fit dell'albero sullo shard locale (o sui dati sintetici)
-                tree.fit(X_sampled, y_sampled)
-                local_estimators.append(tree)
-                
-            print(f"[{self.worker_name}] [OK] Addestrati con successo {len(local_estimators)} alberi.")
-            
-            # 3. Serializzazione e ritorno dei pesi via socket RPC
-            return pickle.dumps(local_estimators)
-            
-        except Exception as e:
-            print(f"[{self.worker_name}] [ERRORE CRITICO TRAINING] Impossibile completare il task locale: {e}")
-            raise e
+        """Metodo RPC esposto all'Orchestratore per l'addestramento locale."""
+        job_id = payload.get("job_id")
+        dataset_type = payload.get("dataset_type", "real").strip().lower()
+        n_estimators_local = int(payload.get("n_estimators_local", 1))
+        worker_index = payload.get("worker_index", 1)
+        hyperparameters = payload.get("hyperparameters", {})
 
+        max_depth = hyperparameters.get("max_depth")
+        base_seed = int(hyperparameters.get("random_state", 123))
+        
+        print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
+
+        # Caricamento e Preprocessing dei dati (eseguito solo se cambia il Job ID o la cache è vuota)
+        if self._cached_job_id != job_id or self._cached_X_train is None:
+            if dataset_type == "synthetic":
+                self._load_synthetic_data(hyperparameters)
+            else:
+                # Passiamo l'intero payload per estrarre la lista globale delle feature sincronizzate
+                self._load_and_preprocess_real_shard(worker_index, payload)
+            self._cached_job_id = job_id
+
+        # Configurazione dei seed atomici per i singoli alberi del chunk
+        seeds_for_trees = [base_seed + i for i in range(n_estimators_local)]
+        task_arguments = [
+            (seed, max_depth, self.max_samples, self.bootstrap, self._get_tree_class())
+            for seed in seeds_for_trees
+        ]
+
+        print(f"[{self.worker_name}] Avvio computazione parallela di {n_estimators_local} alberi...")
+        trained_trees = self._execute_parallel_training(task_arguments, n_estimators_local)
+
+        return trained_trees
     
+    def _load_and_preprocess_real_shard(self, worker_index: int, payload: dict):
+        """Scarica e processa lo shard reale garantendo l'allineamento delle feature."""
+        train_filename = "train_shard.csv"
+        test_filename = "test_shard.csv"
+        local_train_path = os.path.join(self.local_cache_dir, train_filename)
+        local_test_path = os.path.join(self.local_cache_dir, test_filename)
 
+        # 1. GESTIONE AWS S3 (Se applicabile)
+        if self.environment == "aws":
+            bucket_name = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+            s3_train_key = f"federated_shards/worker_{worker_index}/{train_filename}"
+            s3_test_key = f"federated_shards/worker_{worker_index}/{test_filename}"
+            
+            s3_client = boto3.client("s3")
+            try:
+                s3_client.download_file(bucket_name, s3_train_key, local_train_path)
+                s3_client.download_file(bucket_name, s3_test_key, local_test_path)
+            except ClientError as e:
+                raise IOError(f"[{self.worker_name}] Errore download shard da S3: {e}")
 
-    # ─── METODI DI VALIDAZIONE FEDERATA ───
+        # 2. LETTURA SHARD GREZZI
+        if not os.path.exists(local_train_path):
+            raise FileNotFoundError(f"Shard non trovato in {local_train_path}")
+            
+        df_train_raw = pd.read_csv(local_train_path, low_memory=False)
+        df_test_raw = pd.read_csv(local_test_path, low_memory=False)
+
+        # 3. PIPELINE DI PREPROCESSING SPECULARE
+        preprocessor = CICIDSPreprocessor(target_column=self.target_column)
+        
+        df_train_bin = preprocessor.binarize_target(df_train_raw)
+        df_test_bin = preprocessor.binarize_target(df_test_raw)
+        
+        df_train_clean = preprocessor.process(df_train_bin)
+        df_test_clean = preprocessor.process(df_test_bin)
+
+        # 4. Allineamento Forzato delle Feature (Sincronizzazione tramite Master)
+        # L'orchestratore includerà nel payload la lista esatta 'selected_features' decisa a monte
+        selected_features = payload.get("selected_features", None)
+        
+        if selected_features is not None:
+            print(f"[{self.worker_name}] Applicazione spazio feature sincronizzato dal Master ({len(selected_features)} colonne).")
+            # Ci assicuriamo che il target rimanga presente prima di isolare le matrici
+            features_to_keep = [col for col in selected_features if col != self.target_column]
+            
+            X_train_df = df_train_clean[features_to_keep]
+            X_test_df = df_test_clean[features_to_keep]
+        else:
+            # Fallback di sicurezza se non passate (es. esecuzione isolata)
+            print(f"[{self.worker_name}] [ATTENZIONE] Nessuna lista feature passata. Uso il set completo.")
+            X_train_df = df_train_clean.drop(columns=[self.target_column])
+            X_test_df = df_test_clean.drop(columns=[self.target_column])
+
+        y_train_df = df_train_clean[self.target_column]
+        y_test_df = df_test_clean[self.target_column]
+
+        # 5. CONVERSIONE IN MATRICI NUMPY STABILI (Identica a CentralizedWorker)
+        self._cached_X_train = X_train_df.to_numpy(dtype=np.float64)
+        self._cached_X_test = X_test_df.to_numpy(dtype=np.float64)
+        
+        if self.is_regression():
+            self._cached_y_train = y_train_df.to_numpy(dtype=np.float64)
+            self._cached_y_test = y_test_df.to_numpy(dtype=np.float64)
+        else:
+            self._cached_y_train = y_train_df.to_numpy(dtype=np.int64)
+            self._cached_y_test = y_test_df.to_numpy(dtype=np.int64)
+        
+        self.local_sample_count = len(self._cached_X_train)
+        print(f"[{self.worker_name}] Shard caricato in cache. X_train Shape: {self._cached_X_train.shape}")
+
+    def _load_synthetic_data(self, hyperparameters: dict):
+        """Generazione di dati sintetici speculari in RAM."""
+        seed = hyperparameters.get("random_state", 123)
+        X, y = make_classification(n_samples=20000, n_features=20, random_state=seed)
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.20, random_state=seed, stratify=y)
+        
+        self._cached_X_train = X_tr.astype(np.float64)
+        self._cached_X_test = X_te.astype(np.float64)
+        
+        if self.is_regression():
+            self._cached_y_train = y_tr.astype(np.float64)
+            self._cached_y_test = y_te.astype(np.float64)
+        else:
+            self._cached_y_train = y_tr.astype(np.int64)
+            self._cached_y_test = y_te.astype(np.int64)
+            
+        self.local_sample_count = len(self._cached_X_train)
 
     def exposed_predict_subset_forest(self, serialized_trees: bytes, serialized_X_test: bytes = None) -> bytes:
-        """Metodo RPC per effettuare inferenza locale sul proprio test set blindato in RAM."""
-        print(f"[{self.worker_name}] [FL-EVAL] Ricevuto modello globale aggregato per validazione distribuita...")
         
-        if serialized_X_test is not None:
-            X_to_predict = pickle.loads(serialized_X_test)
-        else:
-            X_to_predict = self.X_test
-            
-        if X_to_predict is None:
-            raise ValueError(f"[{self.worker_name}] Errore: Nessun dataset di test caricato in RAM.")
+        if self._cached_X_test is None:
+            raise ValueError("Nessun dataset di test in cache.")
             
         unpacked_model = pickle.loads(serialized_trees)
         
@@ -161,19 +233,19 @@ class FederatedWorker(BaseWorker):
                 rf = RandomForestRegressor(n_estimators=len(unpacked_model))
             else:
                 rf = RandomForestClassifier(n_estimators=len(unpacked_model))
-                rf.classes_ = np.array([0, 1])
+                rf.classes_ = np.array([0, 1], dtype=np.int64)
                 rf.n_classes_ = 2
                 
             rf.estimators_ = unpacked_model
-            rf.n_features_in_ = X_to_predict.shape[1]
+            rf.n_features_in_ = self._cached_X_test.shape[1]
             rf.n_outputs_ = 1
-            y_pred = rf.predict(X_to_predict)
+            y_pred = rf.predict(self._cached_X_test)
         else:
-            y_pred = unpacked_model.predict(X_to_predict)
+            y_pred = unpacked_model.predict(self._cached_X_test)
             
         return pickle.dumps({
             "y_pred": y_pred,
-            "y_true": self.y_test,
+            "y_true": self._cached_y_test,
             "n_samples": self.local_sample_count
         })
 
@@ -182,13 +254,10 @@ class FederatedWorker(BaseWorker):
         """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
         return self.tree_class_reference
 
-
-    # ─── METODI DI METADATI PER L'ORCHESTRATORE ───
-
     def exposed_get_local_y_test(self) -> bytes:
-        if self.y_test is None:
+        if self._cached_y_test is None:
             raise ValueError(f"[{self.worker_name}] Errore: Nessun target vector locale y_test in RAM.")
-        return pickle.dumps(self.y_test)
+        return pickle.dumps(self._cached_y_test)
     
     def exposed_get_local_sample_count(self) -> int:
         return self.local_sample_count
