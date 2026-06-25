@@ -11,7 +11,6 @@ import pickle
 import boto3
 import json
 from botocore.exceptions import ClientError
-from concurrent.futures import ThreadPoolExecutor
 
 from src.shared.config import SystemConfig
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -32,7 +31,7 @@ def _init_child_process(X, y):
     _child_X = X
     _child_y = y
 
-# Addestramento di un singolo albero (resta fuori dalla classe per il multiprocessing)
+# Addestramento di un singolo albero
 def _train_single_tree_processor(args):
     """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
     global _child_X, _child_y
@@ -376,3 +375,4 @@ class BaseWorker(Service, ABC):
                 print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato su S3.")
             except Exception as e:
                 print(f"[{self.worker_name}] Errore nel caricamento del task su S3: {e}")    
+                

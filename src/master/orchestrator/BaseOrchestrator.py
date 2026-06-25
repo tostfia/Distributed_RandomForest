@@ -8,13 +8,12 @@ import threading
 import boto3
 from botocore.exceptions import ClientError
 from src.shared.config import SystemConfig
-from src.shared.factory import get_aws_services, DatasetDAOFactory
+from src.shared.factory import get_aws_services
 from src.shared.binding.serviceregistry import ServiceRegistry
 
 
 class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str):
-        # 1. Leggiamo l'ambiente direttamente dal file .env tramite SystemConfig
         self.cfg = SystemConfig()
         self.environment = self.cfg.env
         
@@ -243,7 +242,9 @@ class BaseOrchestrator(ABC):
             print(f"[*] Orchestratore rimosso correttamente dalla rete.")
 
     def _process_job(self, payload: dict, receipt_handle: str):
+
         """Logica di instradamento del lavoro in base al tipo di richiesta."""
+
         # 1. Prepariamo e avviamo il thread di Heartbeat per la visibilità SQS
         stop_visibility = threading.Event()
         visibility_thread = threading.Thread(
@@ -320,13 +321,15 @@ class BaseOrchestrator(ABC):
 
                 while current_alberi < alberi_totali:
                     prossimo_target = min(current_alberi + step_alberi, alberi_totali)
-                    successo = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
+                    
+                    alberi_ottenuti = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
 
-                    if not successo:
-                        print(f"[{self.orchestrator_name}] Risorse insufficienti per Job {job_id[:8]}. In attesa...")
+                    # ANTILOOP: Se i worker sono morti e non abbiamo prodotto alcun progresso, ci fermiamo
+                    if alberi_ottenuti <= current_alberi:
+                        print(f"[{self.orchestrator_name}] Nessun progresso nell'addestramento per Job {job_id[:8]}. Risorse insufficienti. In attesa di nuovi Worker...")
                         return
                     
-                    current_alberi = prossimo_target
+                    current_alberi = alberi_ottenuti
                     self._save_checkpoint(job_id, current_alberi, retries, base_random_state)
             
                 t_dist = time.perf_counter() - start_dist 

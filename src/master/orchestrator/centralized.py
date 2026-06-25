@@ -26,6 +26,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
         name = orchestrator_name or f"Orchestrator-Centralizzato-{socket.gethostname()}"
+
+        self.current_job_id = None
+        self.train_data_path = None
+        self.test_data_path = None
+
         super().__init__(
             orchestrator_name=name,
             queue_name="centralized_queue"
@@ -101,10 +106,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
 
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
-        
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Esegue lo step di addestramento distribuito centralizzato.
+        Restituisce il numero REALE di alberi totali validati e salvati con successo.
         """
 
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
@@ -155,12 +160,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
-        # Caso limite: avevamo già finito tutto ma eravamo crashati prima di consolidare
+        
+        # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
         else:
             print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
-            # 2. Recupero dei Worker disponibili dal ServiceRegistry
             while True:
                 available_workers = ServiceRegistry.get_available_workers(self.environment)
                 if available_workers:
@@ -186,12 +191,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
             # 4. Configurazione della Coda di Sotto-Task locale
             task_queue = queue.Queue()
             sub_start = start_alberi
-            task_id_counter = CHUNK_SIZE
+            task_id_counter = 1
             
             while sub_start < target_alberi:
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
                 # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
-                task_queue.put((task_id_counter, sub_start, sub_end, seed + (sub_start - start_alberi)))
+                task_seed = seed + sub_start
+                # Usiamo sub_start come offset assoluto rispetto al seed iniziale del JOB
+                task_queue.put((task_id_counter, sub_start, sub_end, task_seed))
                 task_id_counter += 1
                 sub_start = sub_end
 
@@ -218,17 +225,28 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     with connessioni_lock:
                         connessioni_attive.append(worker_conn)
                     
-                    while True:
+                    # ─── Il thread resta attivo finché non raccogliamo la quota di alberi globale ───
+                    while len(all_trained_trees) < target_alberi:
                         try:
-                            task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=1)
+                            # Timeout breve (2 secondi) per controllare periodicamente lo stato e non restare appesi
+                            task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=2)
                         except queue.Empty:
-                            break
+                            # Se la coda è momentaneamente vuota ma mancano alberi al target globale,
+                            # un altro worker attivo potrebbe crashare a breve e rimettere un task in coda.
+                            # Usciamo solo se l'addestramento è finito o se siamo l'ultimo worker attivo rimasto.
+                            with results_lock:
+                                total_attuali = len(all_trained_trees)
+                                num_worker_attivi = len(active_worker_names)
+                            
+                            if total_attuali >= target_alberi or num_worker_attivi <= 1:
+                                break
+                            time.sleep(1)
+                            continue
 
                         quota_chunk = end_t - start_t
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         
                         try:
-                            
                             result_raw = worker_conn.root.train_subset_forest(
                                 source_info=source_info,
                                 num_trees=quota_chunk,       
@@ -242,7 +260,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             with results_lock:
                                 all_trained_trees.extend(result_trees)
                                 current_total = len(all_trained_trees)
-                                # ─── STRATEGIA SAGEMAKER: SALVATAGGIO FISICO ATOMICO PROGRESSIVO ───
+                                # SALVATAGGIO FISICO ATOMICO PROGRESSIVO
                                 try:
                                     with open(checkpoint_trees_path, "wb") as f_chk:
                                         pickle.dump(all_trained_trees, f_chk)
@@ -270,14 +288,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         except Exception as e:
                             print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
                             
-                            # Reinserimento immediato del chunk per la fault tolerance
+                            # FAULT TOLERANCE REALE: Reinserimento immediato del chunk per la fault tolerance
                             task_queue.put((task_id, start_t, end_t, chunk_seed))
-                            print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato per il failover.")
+                            print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
                             
                             with results_lock:
                                 if w_name in active_worker_names:
                                     active_worker_names.remove(w_name)
-                            break  
+                            break  # Il canale RPC con questo worker è saltato, chiudiamo il thread relativo
                         
                 except Exception as conn_err:
                     print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
@@ -341,15 +359,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     pickle.dump(global_model, f)
                 
                 print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
-                return True
+                
+                # ─── MODIFICA 3: Restituiamo la dimensione REALE degli alberi salvati ───
+                return len(all_trained_trees)
                 
             except Exception as e:
                 print(f"   [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
                 traceback.print_exc()
-                return False
+                return len(all_trained_trees)
 
         print(f"   [{self.orchestrator_name}] Nessun albero collezionato.")
-        return False
+        # ─── Ritorna 0 se non è stato possibile generare o caricare nulla ───
+        return 0
     
     def _execute_inference_step(self, payload: dict):
         """
