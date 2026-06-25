@@ -20,20 +20,17 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 
 class FederatedOrchestrator(BaseOrchestrator):
-    def __init__(self):
-        # 1. Recuperiamo la configurazione dal file .env tramite SystemConfig
+    # In FederatedOrchestrator
+    def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
-        
-        # Recuperiamo il Process ID per distinguere le repliche nei log
-        pid = os.getpid()
-        
-        # Inizializziamo la classe base in ascolto sulla coda federata
+        import socket
+        name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
         super().__init__(
-            orchestrator_name=f"Orchestrator-Federato-{pid}",
+            orchestrator_name=name,
             queue_name="federated_queue"
         )
         self.current_job_id = None
-        self.worker_shards_paths = {}  # Mappa per tracciare i path dei dataset partizionati per ciascun worker
+        self.worker_shards_paths = {}
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         dataset_type = payload.get("dataset_type")

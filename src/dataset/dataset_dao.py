@@ -16,6 +16,10 @@ class DatasetDAO(ABC):
         """Salva un DataFrame Pandas nella destinazione specificata."""
         pass
 
+    @abstractmethod
+    def save_binary(self, path: str, data: bytes) -> None:
+        """Salva dati binari generici (es. modelli pickle) sulla destinazione."""
+        pass
 
 class LocalFileSystemDAO(DatasetDAO):
     """Implementazione DAO per il File System Locale."""
@@ -31,6 +35,12 @@ class LocalFileSystemDAO(DatasetDAO):
         # Crea le cartelle intermedie se non esistono
         os.makedirs(os.path.dirname(path), exist_ok=True)
         df.to_csv(path, index=False)
+    
+    def save_binary(self, path: str, data: bytes) -> None:
+        print(f"[DAO-LOCAL] Salvataggio file binario su: {path}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
 
 
 class AwsS3DAO(DatasetDAO):
@@ -73,3 +83,8 @@ class AwsS3DAO(DatasetDAO):
         
         # Carichiamo il buffer su S3
         self.s3_client.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue())
+    
+    def save_binary(self, path: str, data: bytes) -> None:
+        print(f"[DAO-AWS] Salvataggio file binario nel bucket S3 su: {path}")
+        bucket, key = self._parse_s3_uri(path)
+        self.s3_client.put_object(Bucket=bucket, Key=key, Body=data)

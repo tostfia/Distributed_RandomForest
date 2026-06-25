@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import fcntl
 import json
 import os
 import sys
@@ -29,62 +30,79 @@ class BaseOrchestrator(ABC):
     def _get_lock_key(self) -> str:
         return "global_orchestrator_leader_lock"
     
-    def _try_acquire_leadership(self,ttl:int = 30) -> bool:
+    def _try_acquire_leadership(self, ttl: int = 30) -> bool:
+            
         lock_key = self._get_lock_key()
-        
+
         if self.environment == "local":
             lock_dir = "./.local_storage"
             lock_path = os.path.join(lock_dir, f"{lock_key}.json")
-            temp_path = os.path.join(lock_dir, f"{lock_key}.tmp")
+            mutex_path = os.path.join(lock_dir, f"{lock_key}.mutex")
             now = time.time()
-            
-            if os.path.exists(lock_path):
+            os.makedirs(lock_dir, exist_ok=True)
+
+            with open(mutex_path, "a") as mutex:
+                fcntl.flock(mutex, fcntl.LOCK_EX)
                 try:
-                    with open(lock_path, "r", encoding="utf-8") as f:
-                        lock_data = json.load(f)
-                    # Se il lock è ancora valido ed appartiene a un altro, fallisci
-                    if lock_data.get("leader") != self.orchestrator_name and (now - lock_data.get("timestamp", 0)) < 25:
-                        return False
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    print(f"[{self.orchestrator_name}] Lock file corrotto o vuoto rilevato sul disco. Tento il ripristino...")
-                    pass
-                    
-                except Exception:
-                    pass # File corrotto o rimosso a metà lettura, procedi a sovrascrivere
-            
-            try:
-                os.makedirs(lock_dir, exist_ok=True)
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump({"leader": self.orchestrator_name, "timestamp": now}, f, indent=2)
-                os.replace(temp_path, lock_path)  # Atomic replace
-                return True
-            except:
-                return False
+                    if os.path.exists(lock_path):
+                        try:
+                            with open(lock_path, "r", encoding="utf-8") as f:
+                                lock_data = json.load(f)
+                            owner = lock_data.get("leader")
+                            timestamp = lock_data.get("timestamp", 0)
+                            # Lock valido e di qualcun altro → standby
+                            if owner != self.orchestrator_name and (now - timestamp) < 25:
+                                return False
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            print(f"[{self.orchestrator_name}] Lock corrotto, tento sovrascrittura...")
+
+                    # Siamo dentro il mutex: scrittura diretta, niente .tmp necessario
+                    with open(lock_path, "w", encoding="utf-8") as f:
+                        json.dump({"leader": self.orchestrator_name, "timestamp": now}, f, indent=2)
+                    return True
+
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] Errore acquisizione lock: {e}")
+                    return False
+                finally:
+                    fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
-            # Implementazione AWS con Scrittura Condizionale su DynamoDB
-            # [STRATEGIA IN AWS]: Sfrutta DynamoDB via state_manager con una scrittura condizionale (Conditional Put)
             try:
                 return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=30)
             except AttributeError:
-                # Fallback di sicurezza se non ancora mappato nel tuo state_manager AWS custom
                 return True
     
     def _refresh_leadership_lock(self):
-        """Aggiorna il timestamp del lock per comunicare che il Leader è in salute."""
         lock_key = self._get_lock_key()
+
         if self.environment == "local":
             lock_dir = "./.local_storage"
             lock_path = os.path.join(lock_dir, f"{lock_key}.json")
-            temp_path = os.path.join(lock_dir, f"{lock_key}.tmp")
-            try:
-                os.makedirs(lock_dir, exist_ok=True)
-                # 1. Scriviamo l'aggiornamento sul file temporaneo .tmp
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump({"leader": self.orchestrator_name, "timestamp": time.time()}, f, indent=2)
-                # 2. Sostituzione ATOMICA a livello di OS: il file .json non sarà mai vuoto
-                os.replace(temp_path, lock_path)
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] Errore nel rinnovo del lock locale: {e}")
+            mutex_path = os.path.join(lock_dir, f"{lock_key}.mutex")
+
+            os.makedirs(lock_dir, exist_ok=True)
+
+            with open(mutex_path, "a") as mutex:
+                fcntl.flock(mutex, fcntl.LOCK_EX)
+                try:
+                    # Verifica che siamo ancora noi i leader prima di aggiornare
+                    if os.path.exists(lock_path):
+                        try:
+                            with open(lock_path, "r", encoding="utf-8") as f:
+                                lock_data = json.load(f)
+                            if lock_data.get("leader") != self.orchestrator_name:
+                                print(f"[{self.orchestrator_name}] Refresh ignorato: non sono più il leader.")
+                                return
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+
+                    with open(lock_path, "w", encoding="utf-8") as f:
+                        json.dump({"leader": self.orchestrator_name, "timestamp": time.time()}, f, indent=2)
+
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] Errore nel rinnovo del lock: {e}")
+                finally:
+                    fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
             try:
                 self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=30)
@@ -92,19 +110,29 @@ class BaseOrchestrator(ABC):
                 pass
 
     def _release_leadership(self):
-        """Rilascia il lock globale in fase di spegnimento pulito dell'istanza."""
+
         lock_key = self._get_lock_key()
+
         if self.environment == "local":
-            lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
-            if os.path.exists(lock_path):
+            lock_dir = "./.local_storage"
+            lock_path = os.path.join(lock_dir, f"{lock_key}.json")
+            mutex_path = os.path.join(lock_dir, f"{lock_key}.mutex")
+
+            os.makedirs(lock_dir, exist_ok=True)
+
+            with open(mutex_path, "a") as mutex:
+                fcntl.flock(mutex, fcntl.LOCK_EX)
                 try:
-                    with open(lock_path, "r", encoding="utf-8") as f:
-                        lock_data = json.load(f)
-                    if lock_data.get("leader") == self.orchestrator_name:
-                        os.remove(lock_path)
-                        print(f"[{self.orchestrator_name}] Lock di leadership globale rilasciato.")
+                    if os.path.exists(lock_path):
+                        with open(lock_path, "r", encoding="utf-8") as f:
+                            lock_data = json.load(f)
+                        if lock_data.get("leader") == self.orchestrator_name:
+                            os.remove(lock_path)
+                            print(f"[{self.orchestrator_name}] Lock di leadership globale rilasciato.")
                 except Exception:
                     pass
+                finally:
+                    fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
             try:
                 self.state_manager.release_global_lock(lock_key, self.orchestrator_name)
@@ -126,6 +154,7 @@ class BaseOrchestrator(ABC):
                 if stop_event.is_set():
                     break
                 time.sleep(1)
+                
     def _visibility_heartbeat_loop(self, receipt_handle: str, stop_event: threading.Event, timeout_extension: int = 30, interval: int = 15):
         """
         Invia periodicamente un comando a SQS per estendere l'invisibilità del messaggio
@@ -175,7 +204,7 @@ class BaseOrchestrator(ABC):
                         time.sleep(5)
                         continue
                     else:
-                        print(f"\n[{self.orchestrator_name}] [ACTIVE] !!! LEADERSHIP GLOBALE ACQUISITA !!!")
+                        print(f"\n[{self.orchestrator_name}] [ACTIVE] !!! LEADERSHIP ACQUISITA !!!")
                         print(f"[{self.orchestrator_name}] Avvio dell'heartbeat thread e attivazione del polling sulla coda: '{self.queue_name}'\n")
                         # Avviamo il thread di heartbeat SOLO dopo aver conquistato la leadership
                         self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
@@ -327,42 +356,13 @@ class BaseOrchestrator(ABC):
             visibility_thread.join(timeout=2)
             print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread terminato per il messaggio corrente.")
 
-        @abstractmethod
-        def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
-            pass
+    @abstractmethod
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
+        pass
 
-        @abstractmethod
-        def _execute_inference_step(self, payload: dict):
-            pass
-
-        def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, seed: int):
-            checkpoint_data = {"alberi_addestrati": current_alberi}
-            
-            if self.environment == "local":
-                local_cp_dir = os.path.join("./.local_storage", "checkpoints")
-                os.makedirs(local_cp_dir, exist_ok=True)
-                
-                cp_path = os.path.join(local_cp_dir, f"checkpoint_{job_id}.json")
-                with open(cp_path, "w", encoding="utf-8") as f:
-                    json.dump(checkpoint_data, f, indent=2)
-            else:
-                try:
-                    import pandas as pd
-                    dao = DatasetDAOFactory.get_dao(self.environment)
-                    df_cp = pd.DataFrame([checkpoint_data])
-                    dao.save_dataset(df_cp, f"s3://my-cluster-checkpoints-bucket/checkpoint_{job_id}.csv")
-                    print(f"   [S3-CHECKPOINT] Salvato checkpoint ({current_alberi} alberi) su S3.")
-                except Exception as e:
-                    print(f"   [S3-CHECKPOINT-ERROR] Impossibile salvare il checkpoint su S3: {e}")
-            
-            self.state_manager.update_request_status(
-                job_id=job_id,
-                status="PROCESSING",
-                orchestrator_id=self.orchestrator_name,
-                retries=retries,
-                base_random_state=seed,
-                alberi_addestrati=current_alberi
-            )
+    @abstractmethod
+    def _execute_inference_step(self, payload: dict):
+        pass
 
     def _load_checkpoint(self, job_id: str, existing_state: dict) -> int:
         db_val = existing_state.get("alberi_addestrati", 0)
@@ -374,12 +374,6 @@ class BaseOrchestrator(ABC):
         else:
             return db_val
         return db_val
-
-    def _clean_checkpoint(self, job_id: str):
-        if self.environment == "local":
-            path = os.path.join("./.local_storage", "checkpoints", f"checkpoint_{job_id}.json")
-            if os.path.exists(path):
-                os.remove(path)
     
     def _generate_performance_report(self, job_id: str, t_dist: float):
         print("\n" + "═" * 75)
@@ -448,9 +442,8 @@ class BaseOrchestrator(ABC):
             )
 
     def _clean_checkpoint(self, job_id: str):
-        """
-        Hook di pulizia. Di base non fa nulla, ma permette alle classi figlie
-        di fare l'override per cancellare file locali o su S3.
-        """
-        pass
+        if self.environment == "local":
+            path = os.path.join("./.local_storage", "checkpoints", f"checkpoint_{job_id}.json")
+            if os.path.exists(path):
+                os.remove(path)
                     

@@ -1,80 +1,58 @@
 services:
-
-  orchestrator-01:
-    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
+  orchestrator:
+    build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    container_name: ${EC2_ID:-locale}_orchestrator_01_${TRAINING_MODE:-centralized}
     user: "${MY_UID}:${MY_GID}"
     environment:
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
-      - EC2_ID=${EC2_ID:-Locale}-01
+      - EC2_ID=${EC2_ID:-Locale}
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - RUNNING_IN_DOCKER=true
     volumes:
-      - .:/app:z                        
+      - .:/app:z
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
-      - ./saved_models:/app/saved_models:z   
-    command: python -m src.master.orchestrator.main
+      - ./saved_models:/app/saved_models:z
+    command: >
+      sh -c "ORCHESTRATOR_ID=Orchestrator-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-$$(hostname)
+      python -m src.master.orchestrator.main"
     restart: on-failure
-  
-  orchestrator-02:
-    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
-    image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    container_name: ${EC2_ID:-locale}_orchestrator_02_${TRAINING_MODE:-centralized}
-    user: "${MY_UID}:${MY_GID}"
-    environment:
-      - WORKER_HEARTBEAT_TIMEOUT=120
-      - PYTHONUNBUFFERED=1
-      - ENV_MODE=${ENV_MODE:-local}
-      - TRAINING_MODE=${TRAINING_MODE:-centralized}
-      - EC2_ID=${EC2_ID:-Locale}-02
-      - LOCAL_STORAGE_PATH=/app/.local_storage
-      - RUNNING_IN_DOCKER=true
-    volumes:
-      - .:/app:z                         
-      - ./synthetic:/app/synthetic:z
-      - ./.local_storage:/app/.local_storage:z
-      - ./saved_models:/app/saved_models:z  
-    command: python -m src.master.orchestrator.main
-    restart: on-failure
+    deploy:
+      replicas: 2
 
   worker:
-    build: .  # Istruisce Docker a costruire l'immagine usando il Dockerfile locale
+    build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID}:${MY_GID}"
-    # Non esponiamo le porte fisse sull'host per evitare conflitti durante la replicazione.
-    # Docker gestirà il routing internamente.
     deploy:
-      replicas: ${NUM_WORKERS:-2}  # Avvia 2 repliche di default, configurabile a runtime
+      replicas: ${NUM_WORKERS:-2}
       resources:
         limits:
-          cpus: '0.5'              # Vincolo d'esame: evita la parallelizzazione trasparente
-          memory: 512M             # Protezione RAM
+          cpus: '0.5'
+          memory: 512M
     environment:
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
-      - RPC_PORT=18861             # Tutti i worker ascoltano internamente sulla stessa porta logica
+      - RPC_PORT=18861
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
-      - RUNNING_IN_DOCKER=true     # Forza l'ascolto su 0.0.0.0 e la registrazione tramite hostname dinamico
-      - LOCAL_STORAGE_PATH=/app/.local_storage  
+      - RUNNING_IN_DOCKER=true
+      - LOCAL_STORAGE_PATH=/app/.local_storage
     volumes:
-      - .:/app:z                           
+      - .:/app:z
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
-      - ./saved_models:/app/saved_models:z  
-    # Il comando inietta la latenza di 50ms (se tc esiste) e usa $(hostname) per generare l'ID univoco del worker in locale
+      - ./saved_models:/app/saved_models:z
     command: >
       sh -c "
-      if command -v tc >/dev/null; then 
-        tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms}; 
-      fi;
-      python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-\$(hostname) 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
+        if command -v tc >/dev/null; then
+          tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms};
+        fi;
+        python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-\$(hostname) 18861 ${TRAINING_MODE:-centralized} ${ENV_MODE:-local}
       "
     depends_on:
-      - orchestrator-01
+      - orchestrator
     restart: on-failure

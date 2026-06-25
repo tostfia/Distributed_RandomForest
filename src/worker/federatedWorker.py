@@ -83,7 +83,7 @@ class FederatedWorker(BaseWorker):
                 except ValueError:
                     pass
 
-            seed_locale = 42 + idx_da_stringa
+            seed_locale = 123 + idx_da_stringa
             print(f"[FederatedWorker] Generazione sintetica in RAM (Index: {idx_da_stringa}, Seed: {seed_locale})...")
             
             n_samples = 25000  

@@ -30,7 +30,7 @@ else
     TERM_CMD="bash -c"
 fi
 
-echo -n "Quanti nodi Orchestratore vuoi avviare per il test di Fault (1-2)? "
+echo -n "Quanti nodi Orchestratore vuoi avviare (1-2)? "
 read NUM_ORCHESTRATORS
 
 if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
@@ -39,7 +39,7 @@ if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
 fi
 
 # Richiesta dinamica del numero di Worker
-echo -n "Quanti nodi Worker vuoi avviare per questo test (1-7)? "
+echo -n "Quanti nodi Worker vuoi avviare (1-7)? "
 read NUM_WORKERS
 
 if ! [[ "$NUM_WORKERS" =~ ^[1-7]$ ]]; then

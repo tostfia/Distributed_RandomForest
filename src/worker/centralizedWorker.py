@@ -47,8 +47,8 @@ class CentralizedWorker(BaseWorker):
         return self.tree_type == "regressor"
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
+        
         """Carica il dataset centralizzato delegando al DAO e lo trasforma in matrici NumPy.
-
         Args:
             source_info (str): URL S3 o path locale passato dinamicamente dall'Orchestratore.
         """

@@ -1,5 +1,6 @@
 import pickle
 import os
+import socket
 import time
 import rpyc
 import queue
@@ -22,21 +23,13 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 
 class CentralizedOrchestrator(BaseOrchestrator):
-    def __init__(self):
-        # 1. Recuperiamo la configurazione dal file .env
+    def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
-        
-        # Recuperiamo il Process ID per distinguere le repliche nei log
-        pid = os.getpid()
-        
-        # Inizializziamo la classe base senza passare l'ambiente (lo legge da sé via config)
+        name = orchestrator_name or f"Orchestrator-Centralizzato-{socket.gethostname()}"
         super().__init__(
-            orchestrator_name=f"Orchestrator-Centralizzato-{pid}",
+            orchestrator_name=name,
             queue_name="centralized_queue"
         )
-        self.current_job_id = None
-        self.train_data_path = None
-        self.test_data_path = None
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
@@ -109,9 +102,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
+        
         """
         Esegue lo step di addestramento distribuito centralizzato.
-        Versione allineata e verificata con le firme di BaseWorker.
         """
 
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
@@ -133,11 +126,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
             else:
                 # Se non esistono o siamo in AWS (implementabile con check su S3), esegui l'ETL normalmente
                 self._prepare_data(payload, seed)
+
         if self.environment == "aws":
             checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
         else:
             checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
             os.makedirs("./.local_storage", exist_ok=True)
+        
         all_trained_trees = []
 
         # ─── FASE DI RESUME: SE ABBIAMO SUBITO UN FAILOVER E ABBIAMO GIÀ ALBERI PRONTI ───
@@ -191,7 +186,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             # 4. Configurazione della Coda di Sotto-Task locale
             task_queue = queue.Queue()
             sub_start = start_alberi
-            task_id_counter = 0
+            task_id_counter = CHUNK_SIZE
             
             while sub_start < target_alberi:
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
@@ -200,11 +195,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 task_id_counter += 1
                 sub_start = sub_end
 
-            
             results_lock = threading.Lock()
             connessioni_attive = []
             connessioni_lock = threading.Lock()
-            
             active_worker_names = list(worker_names)
 
             # 5. Definizione della funzione consumatrice per i thread
@@ -269,7 +262,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                             alberi_addestrati=current_total
                                         )
                                     except Exception as e_db:
-                                        print(f"   [ERRORE DB] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                                        print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                                 
                             print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
                             task_queue.task_done()
@@ -342,12 +335,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 TARGET_DIR = "./saved_models"
                 os.makedirs(TARGET_DIR, exist_ok=True)
-                model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
+                model_path = os.path.join(TARGET_DIR, f"cen_model_{self.current_job_id}.pkl")
                 
                 with open(model_path, "wb") as f:
                     pickle.dump(global_model, f)
                 
-                print(f"   [{self.orchestrator_name}] Modello {tree_type} salvato con successo in '{model_path}'.")
+                print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
                 return True
                 
             except Exception as e:
@@ -446,8 +439,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
             tree_start = tree_end
 
         # Strutture dati condivise protette da Lock per i thread consumatori
-       
-
         MAX_RETRIES_PER_TASK = 3  # Numero massimo di tentativi per ogni sotto-task prima di considerarlo fallito
         task_retries = {}  # Dizionario per tracciare i tentativi per ogni task_id
 
