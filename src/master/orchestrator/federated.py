@@ -8,7 +8,6 @@ import rpyc
 from rpyc.utils.classic import obtain
 import traceback
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score, mean_absolute_error, mean_squared_error, r2_score
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
@@ -19,21 +18,21 @@ from src.shared.config import SystemConfig
 
 
 class FederatedOrchestrator(BaseOrchestrator):
-    # In FederatedOrchestrator
+    
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
-        import socket
         name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
         super().__init__(
             orchestrator_name=name,
             queue_name="federated_queue"
         )
         self.current_job_id = None
-        self.worker_shards_paths = {}  # Mappa per tracciare i path dei dataset partizionati per ciascun worker
+        self.worker_shards_paths = {}
 
     def _resolve_dataset_type(self, payload: dict) -> str:
+        """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
         dataset_type = payload.get("dataset_type")
-        if dataset_type: 
+        if dataset_type:
             return str(dataset_type).strip().lower()
         return "real"
     
@@ -56,239 +55,175 @@ class FederatedOrchestrator(BaseOrchestrator):
                 print(f"[Orchestrator] Errore nel caricamento del worker {name}: {e}")
     
 
-  
-
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> bool:
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
-        Esegue un round di addestramento Federated Learning per Random Forest.
-        I worker addestrano gli alberi localmente sui propri dati privati.
-        L'orchestratore colleziona gli alberi e li aggrega nel modello globale.
+        Esegue un macro-step di addestramento federato puro. 
+        Distribuisce le richieste sui worker sani che addestreranno gli alberi
+        sui propri frammenti di dati locali (shard pre-esistenti).
         """
-
-        # 1. PARAMETRIZZAZIONE FEDERATA (Niente ETL centralizzato)
-        # Recuperiamo l'identificativo del dataset locale che i client devono usare 
+        job_id = payload.get("job_id")
+        self.current_job_id = job_id
+        hyperparameters = payload.get("hyperparameters", {})
         
-        expected_job_id = payload.get("job_id", "unknown_job")
-        self.current_job_id = expected_job_id
-        dataset_tag = self._resolve_dataset_type(payload)
-        try:
-            self._prepare_data(payload, seed)
-        except Exception as e:
-            print(f"[{self.orchestrator_name}] [ERRORE CRITICO ENTRATA ETL] Pipeline interrotta: {e}")
-            return False
+        max_depth = hyperparameters.get("max_depth", None)
+        min_samples_split = hyperparameters.get("min_samples_split", 2)
+        is_classification = payload.get("task_type", "classification") == "classification"
+        dataset_type = self._resolve_dataset_type(payload)
 
-        # Configurazione path di checkpoint (per ripartire in caso di crash dell'orchestratore)
-        if self.environment == "aws":
-            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/federated_trees_{self.current_job_id}.pkl"
-        else:
-            checkpoint_trees_path = f"./.local_storage/federated_trees_{self.current_job_id}.pkl"
-            os.makedirs("./.local_storage", exist_ok=True)
-        
+        print(f"\n[{self.orchestrator_name}] === AVVIO MACRO-STEP TRAINING FEDERATO ({start_alberi} -> {target_alberi} alberi) ===")
+
+        # 1. Rilevamento dei worker disponibili nella rete federata
+        registry = ServiceRegistry()
+        active_worker_names = registry.get_active_workers()
+        if not active_worker_names:
+            print(f"[{self.orchestrator_name}] [ERRORE CRITICO] Nessun nodo worker attivo registrato. Sospendo lo step.")
+            return start_alberi
+
+        print(f"[{self.orchestrator_name}] Nodi federati attivi rilevati: {active_worker_names}")
+
+        # 2. Ripristino dello stato precedente (Cache Checkpoint Fisico degli Alberi)
         all_trained_trees = []
-
-        # ─── FASE DI RESUME (FAULT TOLERANCE DELL'ORCHESTRATORE) ───
+        checkpoint_trees_path = self._get_trees_checkpoint_path(job_id)
         if start_alberi > 0:
-            print(f"\n[{self.orchestrator_name}] [FEDERATED-RESUME] Ripristino checkpoint globale...")
             if os.path.exists(checkpoint_trees_path):
                 try:
                     with open(checkpoint_trees_path, "rb") as f:
                         all_trained_trees = pickle.load(f)
-                    print(f"[{self.orchestrator_name}] [OK] Ripristinati {len(all_trained_trees)} alberi federati dal checkpoint.")
-                    start_alberi = len(all_trained_trees)
-                except Exception as e_load:
-                    print(f"[{self.orchestrator_name}] [ERROR] Checkpoint corrotto: {e_load}. Ricalcolo round da 0.")
-                    start_alberi = 0
+                    print(f"[{self.orchestrator_name}] [FEDERATED-RESUME] Ripristinati {len(all_trained_trees)} alberi dal checkpoint fisico.")
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [FEDERATED-RESUME WARN] Errore ripristino checkpoint: {e}")
                     all_trained_trees = []
-            else:
-                print(f"[{self.orchestrator_name}] [WARN] Checkpoint non trovato. Riparto da zero.")
-                start_alberi = 0
 
-        total_residual_trees = target_alberi - start_alberi
-        if total_residual_trees <= 0:
-            print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti sono già pronti in memoria.")
-        else:
-            print(f"\n[{self.orchestrator_name}] Inizio Round Federato: {total_residual_trees} alberi residui da raccogliere...")
+        if len(all_trained_trees) != start_alberi:
+            print(f"[{self.orchestrator_name}] [FEDERATED-WARN] Disallineamento cache ({len(all_trained_trees)}) vs start_alberi ({start_alberi}). Allineamento forzato.")
+            start_alberi = len(all_trained_trees)
 
-            # 2. SCOPERTA DEI NODI FEDERATI (WORKER)
-            while True:
-                available_workers = ServiceRegistry.get_available_workers(self.environment)
-                if available_workers:
-                    print(f"[{self.orchestrator_name}] Nodi Federati attivi rilevati: {list(available_workers.keys())}.")
-                    break
-                print(f"[{self.orchestrator_name}] Nessun nodo federato disponibile. In attesa di client...")
-                time.sleep(10)
+        alberi_da_generare_in_questo_step = target_alberi - start_alberi
+        if alberi_da_generare_in_questo_step <= 0:
+            print(f"[{self.orchestrator_name}] Target già soddisfatto per questo blocco.")
+            return start_alberi
 
-            worker_names = list(available_workers.keys())
-            num_workers = len(worker_names)
+        # 3. Configurazione della Coda dei Sotto-Task (Bilanciamento del carico)
+        CHUNK_SIZE = max(1, alberi_da_generare_in_questo_step // len(active_worker_names))
+        task_queue = queue.Queue()
+        task_id_counter = 1
 
-            # Estrattori Iperparametri
-            hp = payload.get("hyperparameters", {})
-            max_depth = hp.get("max_depth", None)
-            tree_type = hp.get("tree_type", "classifier")
+        sub_start = start_alberi
+        worker_cycle_list = list(active_worker_names)
+        worker_idx = 0
 
-            # 3. RIPARTIZIONE DEL CARICO TRA I NODI CLIENT
-            # Nel FL puro, ogni nodo contribuisce all'addestramento proporzionalmente o equamente sui propri dati.
-            # Calcoliamo quanti alberi deve generare OGNI singolo worker in questo round.
-            CHUNK_SIZE = max(1, total_residual_trees // num_workers)
-            print(f"[{self.orchestrator_name}] Configurazione Round: {CHUNK_SIZE} alberi richiesti a ogni Client.")
-
-            threads = []
-            for i, name in enumerate(worker_names):
-                sub_start = start_alberi + (i * CHUNK_SIZE)
-                sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
-                
-                # Gestione del resto matematico per l'ultimo worker
-                if i == num_workers - 1:
-                    sub_end = target_alberi
-                    
-                chunk_seed = seed + (sub_start - start_alberi)
-                
-                # Passiamo i range precisi come argomenti del thread per quel worker specifico
-                t = threading.Thread(
-                    target=federated_worker_consumer, 
-                    args=(name, sub_start, sub_end, chunk_seed)
-                )
-                t.start()
-                threads.append(t)
-
-            for t in threads:
-                t.join()
-
-            results_lock = threading.Lock()
-            connessioni_attive = []
-            connessioni_lock = threading.Lock()
-            active_worker_names = list(worker_names)
-
-            # 4. CONSUMER THREAD: COORDINAMENTO RPC FEDERATO
-            def federated_worker_consumer(w_name):
-                w_info = available_workers[w_name]
-                worker_conn = None
-                try:
-                    print(f" [Federated RPC -> {w_name}] Connessione al nodo privato...")
-                    worker_conn = rpyc.connect(
-                        w_info["host"], 
-                        w_info["port"], 
-                        config={
-                            'allow_pickle': True,
-                            'sync_request_timeout': 600,  # Timeout alto per l'addestramento locale
-                            'keepalive': True
-                        }
-                    )
-                    with connessioni_lock:
-                        connessioni_attive.append(worker_conn)
-                    quota_chunk = end_t - start_t
-                    print(f" [Federated RPC -> {w_name}] Addestramento assegnato di {quota_chunk} alberi (range {start_t}-{end_t}) con seed {chunk_seed}...")
-
-                    # Chiamata RPC sul blocco assegnato
-                    result_raw = worker_conn.root.exposed_train_local_federated_forest(
-                        dataset_tag=dataset_tag, 
-                        num_trees=quota_chunk,       
-                        base_seed=chunk_seed,    
-                        max_depth=max_depth
-                    )
-                    result_trees = pickle.loads(obtain(result_raw))
+        while sub_start < target_alberi:
+            sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
+            assigned_worker = worker_cycle_list[worker_idx % len(worker_cycle_list)]
             
-                    with results_lock:
-                        all_trained_trees.extend(result_trees)
-                        current_total = len(all_trained_trees)
-                        
-                        # Checkpoint progressivo dell'aggregazione globale
-                        try:
-                            with open(checkpoint_trees_path, "wb") as f_chk:
-                                pickle.dump(all_trained_trees, f_chk)
-                        except Exception as e_fs:
-                            print(f" [ERRORE CHECKPOINT] Impossibile aggiornare file di round: {e_fs}")
-                        
-                        # Aggiornamento State Manager/Dashboard
-                        if hasattr(self, 'state_manager') and self.state_manager:
-                            try:
-                                self.state_manager.update_request_status(
-                                    job_id=self.current_job_id,
-                                    status="PROCESSING",
-                                    orchestrator_id=self.orchestrator_name,
-                                    retries = payload.get("retries", 0),
-                                    base_random_state = seed,
-                                    alberi_addestrati=current_total
-                                )
-                            except Exception as e_sm:
-                                print(f" [ERRORE] Impossibile aggiornare lo stato del job: {e_sm}")
-                    
+            # Offset assoluto del seed per garantire consistenza matematica deterministica
+            task_seed = seed + sub_start
+            
+            # Inseriamo il task specificando a quale worker assegnarlo idealmente in base alla topologia
+            task_queue.put((task_id_counter, assigned_worker, sub_start, sub_end, task_seed))
+            
+            task_id_counter += 1
+            worker_idx += 1
+            sub_start = sub_end
 
-                    
+        print(f"[{self.orchestrator_name}] Coda dei task configurata con {task_queue.qsize()} elementi distributivi.")
+        trees_lock = threading.Lock()
 
-                except Exception as e:
-                    print(f" [FALLIMENTO NODO FEDERATO] Il client {w_name} è disconnesso o ha fallito: {e}")
-                            
-                    
-                except Exception as e_outer:
-                    print(f" [ERRORE GENERALE] Errore sul nodo {w_name}: {e_outer}")
-                    with results_lock:
-                        if w_name in active_worker_names:
-                            active_worker_names.remove(w_name)
-                finally:
-                    if worker_conn:
-                        try:
-                            worker_conn.close()
-                            with connessioni_lock:
-                                if worker_conn in connessioni_attive:
-                                    connessioni_attive.remove(worker_conn)
-                        except: pass
+        # 4. Motore di Consumo Multi-Thread
+        def thread_consumer():
+            while True:
+                # Condizione di uscita sicura coordinata dal lock globale
+                with trees_lock:
+                    if len(all_trained_trees) >= target_alberi:
+                        break
 
-            # 5. AVVIO DELLA PARALIZZAZIONE DEI NODI
-            # Lanciamo un pool di thread pari al numero di nodi federati pronti a lavorare
-         
-            for name in worker_names:
-                t = threading.Thread(target=federated_worker_consumer, args = (name,))
-                t.start()
-                threads.append(t)
-
-            for t in threads:
-                t.join()
-
-
-            # Pulizia Connessioni
-            with connessioni_lock:
-                for conn in connessioni_attive:
-                    try: conn.close()
-                    except Exception: pass
-
-            # 7. AGGREGAZIONE FEDERATA (Server-Side Model Fusion)
-            # Nelle Random Forest, l'aggregazione federata consiste nell'unire gli stimatori locali
-            # per formare un'unica grande foresta globale (Federated Ensemble Integration).
-            if len(all_trained_trees) > 0:
-                print(f"[{self.orchestrator_name}] Inizio fusione dei modelli locali nella foresta globale...")
                 try:
-                    n_features = all_trained_trees[0].n_features_in_
-                    
-                    if tree_type == "classifier":
-                        global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                        global_model.classes_ = np.array([0, 1])  # Standardizziamo le classi attese
-                        global_model.n_classes_ = 2
-                    else:
-                        global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
-                    
-                    # Iniettiamo gli alberi estratti da tutti i client segregati
-                    global_model.estimators_ = all_trained_trees
-                    global_model.n_features_in_ = n_features
-                    global_model.n_outputs_ = 1
-                    
-                    TARGET_DIR = "./saved_models"
-                    os.makedirs(TARGET_DIR, exist_ok=True)
-                    model_path = os.path.join(TARGET_DIR, f"fedetated_model_{self.current_job_id}.pkl")
-                    
-                    with open(model_path, "wb") as f:
-                        pickle.dump(global_model, f)
-                    
-                    print(f"[{self.orchestrator_name}] Modello Globale Federato salvato in '{model_path}'.")
-                    return True
-                    
-                except Exception as e:
-                    print(f" [ERRORE FUSIONE FEDERATA] Impossibile accorpare i sotto-modelli dei client: {e}")
-                    traceback.print_exc()
-                    return False
+                    task = task_queue.get(timeout=2)
+                except queue.Empty:
+                    break
 
-            print(f"[{self.orchestrator_name}] Nessun modello parziale collezionato dai client.")
-            return False
+                task_id, worker_name, s_start, s_end, t_seed = task
+                trees_to_fit = s_end - s_start
+
+                # Controllo dinamico dello stato di salute del cluster
+                current_active_workers = registry.get_active_workers()
+                if worker_name not in current_active_workers:
+                    print(f"[{self.orchestrator_name}-Thread] [FAILOVER] Il worker designato ({worker_name}) è offline.")
+                    if not current_active_workers:
+                        print(f"[{self.orchestrator_name}-Thread] [CRITICO] Nessun worker disponibile nel cluster. Abort task.")
+                        task_queue.put(task)
+                        task_queue.task_done()
+                        break
+                    
+                    # Spostamento dinamico della richiesta (Failover) su un altro nodo attivo
+                    new_worker = current_active_workers[0]
+                    print(f"[{self.orchestrator_name}-Thread] [FAILOVER] Reindirizzo il Task {task_id} sul worker superstite: {new_worker}")
+                    task_queue.put((task_id, new_worker, s_start, s_end, t_seed))
+                    task_queue.task_done()
+                    continue
+
+                # Connessione RPC ed Addestramento Locale sul Worker
+                try:
+                    worker_info = registry.get_worker_connection_info(worker_name)
+                    if not worker_info:
+                        raise ConnectionError(f"Metadati di connessione non trovati per il worker {worker_name}")
+
+                    print(f"[{self.orchestrator_name}-Thread] Invio Task {task_id} ({trees_to_fit} alberi: {s_start}-{s_end}) al nodo federato: {worker_name}")
+                    
+                    conn = rpyc.classic.connect(worker_info["host"], worker_info["port"], timeout=60)
+                    worker_service = conn.root
+
+                    # Invocazione federata: Non passiamo alcun dataset path assoluto del Master!
+                    # Il worker cercherà internamente il suo file pre-assegnato (es. train_shard.csv nella sua cache/cartella)
+                    remote_trees_serialized = worker_service.train_federated_shard(
+                        shard_path=None,  # il worker sa dove sono i suoi dati
+                        n_estimators=trees_to_fit,
+                        max_depth=max_depth,
+                        min_samples_split=min_samples_split,
+                        is_classification=is_classification,
+                        random_state=t_seed,
+                        dataset_type=dataset_type
+                    )
+
+                    remote_trees = pickle.loads(remote_trees_serialized)
+                    extracted_trees = obtain(remote_trees)
+
+                    with trees_lock:
+                        all_trained_trees.extend(extracted_trees)
+                        current_count = len(all_trained_trees)
+                    
+                    print(f"[{self.orchestrator_name}-Thread] [RPC <- {worker_name}] Task {task_id} completato. Ricevuti {len(extracted_trees)} alberi.")
+                    
+                    # Scrittura atomica del checkpoint logico e salvataggio file pickle fisico
+                    self._save_checkpoint(job_id, current_count, payload.get("retries", 0), seed)
+                    checkpoint_trees_path = self._get_trees_checkpoint_path(job_id)
+                    with trees_lock:
+                        with open(checkpoint_trees_path, "wb") as f:
+                            pickle.dump(all_trained_trees, f)
+                    
+                    conn.close()
+                    task_queue.task_done()
+
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}-Thread] [ERRORE RPC] Fallimento del worker federato {worker_name} sul Task {task_id}: {e}")
+                    # Riposizionamento istantaneo in coda in totale allineamento con la logica centralizzata
+                    task_queue.put(task)
+                    task_queue.task_done()
+                    time.sleep(2)
+
+        # 5. Esecuzione Multi-Thread in parallelo
+        num_threads = max(1, len(active_worker_names))
+        threads = []
+        for _ in range(num_threads):
+            t = threading.Thread(target=thread_consumer)
+            t.daemon = True
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        return len(all_trained_trees)
     
     def _execute_inference_step(self, payload: dict):
         job_id = payload.get("job_id", "unknown_job")
@@ -525,19 +460,15 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         print("═" * 75 + "\n")
 
-        # ─────────────────────────────────────────────────────────────────────────
-        # CHECKPOINT (override del centralizzato)
-        # ─────────────────────────────────────────────────────────────────────────
-
     def _get_trees_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
             return f"s3://my-cluster-datasets-bucket/checkpoints/federated_trees_{job_id}.pkl"
-        return f"./.local_storage/federated_trees_{job_id}.pkl"
+        return f"./.local_storage/checkpoints/federated_trees_{job_id}.pkl"
 
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/federated_inference_{job_id}.pkl"
-        return f"./.local_storage/federated_inference_{job_id}.pkl"
+            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
+        return f"./.local_storage/inference_chunks_{job_id}.pkl"
 
     def _load_inference_checkpoint(self, job_id: str) -> list:
         path = self._get_inference_checkpoint_path(job_id)
@@ -552,27 +483,21 @@ class FederatedOrchestrator(BaseOrchestrator):
         return []
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
-        """
-        Override: estende il checkpoint della classe base aggiungendo il salvataggio
-        fisico degli alberi federati aggregati (identico al centralizzato).
-        """
-        # 1. Checkpoint logico sul DB (via classe base)
+        
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
 
-        # 2. Checkpoint fisico degli alberi su disco/S3
         if alberi_reali is not None and len(alberi_reali) > 0:
             checkpoint_trees_path = self._get_trees_checkpoint_path(job_id)
             try:
+                os.makedirs(os.path.dirname(checkpoint_trees_path), exist_ok=True)
                 with open(checkpoint_trees_path, "wb") as f:
                     pickle.dump(alberi_reali, f)
-                print(f"[{self.orchestrator_name}] [FEDERATED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi salvati in storage.")
+                print(f"[{self.orchestrator_name}] [FEDERATED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi archiviati.")
             except Exception as e:
-                print(f"[{self.orchestrator_name}] [ERRORE STORAGE] Fallito salvataggio fisico degli alberi: {e}")
+                print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile persistere gli alberi: {e}")
 
     def _clean_checkpoint(self, job_id: str):
-        """
-        Override: rimuove checkpoint fisici degli alberi e dell'inferenza.
-        """
+        
         super()._clean_checkpoint(job_id)
 
         for path in [
@@ -584,7 +509,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     os.remove(path)
                     print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso checkpoint federato: {path}")
                 except Exception as e:
-                    print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {path}: {e}")
+                    print(f"[{self.orchestrator_name}] [CLEAN WARN] Errore cancellazione {path}: {e}")
 
 
 if __name__ == "__main__":

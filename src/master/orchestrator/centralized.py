@@ -111,7 +111,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Esegue lo step di addestramento distribuito centralizzato.
         Restituisce il numero REALE di alberi totali validati e salvati con successo.
         """
-
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
         if self.train_data_path is None:
             expected_job_id = payload.get("job_id", "unknown_job")
@@ -714,6 +713,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
         return []
+    
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
     orchestrator = CentralizedOrchestrator()
