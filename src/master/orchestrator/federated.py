@@ -1,9 +1,11 @@
+import json
 import pickle
 import os
 import random
 import socket
 import threading
 import time
+import queue
 import rpyc
 from rpyc.utils.classic import obtain
 import traceback
@@ -34,180 +36,274 @@ class FederatedOrchestrator(BaseOrchestrator):
             return str(dataset_type).strip().lower()
         return "real"
     
-    def _get_trees_checkpoint_path(self, job_id: str) -> str:
-        if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/trained_trees_{job_id}.pkl"
-        return f"./.local_storage/checkpoints/trained_trees_{job_id}.pkl"
+    
 
-    def _get_inference_checkpoint_path(self, job_id: str) -> str:
-        if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
-        return f"./.local_storage/inference_chunks_{job_id}.pkl"
-
-    def _process_job(self, payload: dict, receipt_handle=None):
-        """
-        Punto di ingresso principale del Job Federato.
-        Segue lo schema statico: interroga i worker associati agli shard,
-        raccoglie gli alberi disponibili e applica lo scarto uniforme sul pool ottenuto.
-        """
-        job_id = payload.get("job_id")
-        self.current_job_id = job_id
-        hyperparameters = payload.get("hyperparameters", {})
-        n_estimators = hyperparameters.get("n_estimators", 100)
-        base_seed = hyperparameters.get("random_state", 42)
-
-        print(f"\n[{self.orchestrator_name}] >>> Preso in carico Job Federato {job_id[:8]} <<<")
-        
-        try:
-            # 1. Fase di addestramento parallelo (senza loop di riallocazione)
-            totale_alberi = self._execute_training_step(
-                payload=payload,
-                target_alberi=n_estimators,
-                seed=base_seed
-            )
-            
-            # Ricarica la foresta finale (eventualmente campionata) per la validazione globale
-            checkpoint_trees_path = self._get_trees_checkpoint_path(job_id)
-            with open(checkpoint_trees_path, "rb") as f:
-                foresta_globale = pickle.load(f)
-
-            # 2. Validazione distribuita fault-tolerant sui soli nodi superstiti
-            report_metriche = self._validate_global_forest(payload, foresta_globale)
-
-            # 3. Salvataggio Report finale
-            if report_metriche:
-                report_path = f"./.local_storage/reports/report_federated_{job_id}.json"
-                os.makedirs(os.path.dirname(report_path), exist_ok=True)
-                with open(report_path, "w", encoding="utf-8") as rf:
-                    import json
-                    json.dump(report_metriche, rf, indent=4)
-                print(f"[{self.orchestrator_name}] [SUCCESS] Report federato archiviato in {report_path}")
-
-            if hasattr(self, 'state_manager') and self.state_manager:
-                self.state_manager.update_request_status(job_id, "SUCCESSFUL", self.orchestrator_name)
-                
-            self._clean_checkpoint(job_id)
-            print(f"[{self.orchestrator_name}] Job {job_id[:8]} completato con successo.")
-
-        except Exception as e:
-            print(f"[{self.orchestrator_name}] [CRITICAL ERRORE JOB] Pipeline fallita: {e}")
-            traceback.print_exc()
-            if hasattr(self, 'state_manager') and self.state_manager:
-                self.state_manager.update_request_status(job_id, "FAILED", self.orchestrator_name)
-        finally:
-            if receipt_handle and hasattr(self, 'sqs_queue') and self.sqs_queue:
-                try:
-                    self.sqs_queue.delete_message(ReceiptHandle=receipt_handle)
-                except Exception as ex:
-                    print(f"[{self.orchestrator_name}] Impossibile eliminare messaggio SQS: {ex}")
-
-    def _execute_training_step(self, payload: dict, target_alberi: int, seed: int) -> int:
+    
+    def _execute_training_step(self, payload: dict,start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Invia la richiesta a ciascun worker attivo per il proprio shard locale.
         Se un worker fallisce, viene registrato il dropout e si prosegue con i rimanenti.
         Alla fine, se gli alberi totali superano il target (over-provisioning), applica lo scarto uniforme.
         """
-        job_id = payload.get("job_id")
-        hyperparameters = payload.get("hyperparameters", {})
-        dataset_type = self._resolve_dataset_type(payload)
-
-        registry = ServiceRegistry()
-        active_workers = list(registry.get_active_workers())
-
-        if not active_workers:
-            raise RuntimeError("Nessun worker attivo nel registro. Impossibile addestrare.")
-
-        # Calcolo della quota base per worker (ipotizzando che tutti rispondano)
-        quota_per_worker = max(1, (target_alberi + len(active_workers) - 1) // len(active_workers))
-        print(f"[{self.orchestrator_name}] Allocazione iniziale: {quota_per_worker} alberi per ciascuno dei {len(active_workers)} worker.")
-
-        collected_trees = []
-        threads = []
-        round_data = {}
-        lock = threading.Lock()
-        live_workers_at_validation = []
-
-        def contact_worker(w_name, idx):
-            try:
-                w_info = registry.get_worker_info(w_name)
-                if not w_info:
-                    raise ConnectionError("Metadati worker mancanti nel registro")
-                
-                # Connessione RPC al worker proprietario dello shard
-                conn = rpyc.connect(w_info["host"], w_info["port"], config={"allow_public_attrs": True})
-                
-                worker_payload = {
-                    "job_id": job_id,
-                    "dataset_type": dataset_type,
-                    "n_estimators_local": quota_per_worker,
-                    "worker_index": idx,
-                    "hyperparameters": {
-                        **hyperparameters, 
-                        "random_state": seed + (idx * 1000)
-                    }
-                }
-                
-                raw_trees = conn.root.exposed_train_local_federated_forest(worker_payload)
-                trained_list = obtain(raw_trees)
-                conn.close()
-
-                with lock:
-                    round_data[w_name] = trained_list
-                    live_workers_at_validation.append(w_name)
-                    print(f"[{self.orchestrator_name}] -> Worker '{w_name}' ha risposto con {len(trained_list)} alberi.")
-            except (socket.error, EOFError, Exception) as ex:
-                # Se il worker muore, non c'è riassegnazione: i suoi dati sono locali e inaccessibili.
-                print(f"[{self.orchestrator_name}] [CLIENT DROPOUT] Worker '{w_name}' non raggiungibile. Escluso dall'aggregazione: {ex}")
-
-        # Esecuzione parallela
-        for i, worker_name in enumerate(active_workers):
-            t = threading.Thread(target=contact_worker, args=(worker_name, i))
-            threads.append(t)
-            t.start()
-
-        for t in threads:
-            t.join()
-
-        # Raccolta degli alberi inviati dai nodi superstiti
-        for w_name, trees in round_data.items():
-            if trees:
-                collected_trees.extend(trees)
-
-        if not collected_trees:
-            raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
-
-        # APPLICAZIONE SCARTO UNIFORME FINALE
-        # Se i nodi rimasti hanno prodotto una foresta più grande (o se vogliamo troncare al target dell'utente)
-        if len(collected_trees) > target_alberi:
-            print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(collected_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
-            collected_trees = random.sample(collected_trees, target_alberi)
+        self.current_job_id = payload.get("job_id")
+        feature_selezionate = None
+        config_path = ".output_baseline/config.json"
+       
+        if self.environment == "aws":
+            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
         else:
-            print(f"[{self.orchestrator_name}] Raccolti in totale {len(collected_trees)} alberi dai worker superstiti.")
+            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
+            os.makedirs("./.local_storage", exist_ok=True)
 
-        # Salvataggio del modello globale sul file system locale o S3
-        checkpoint_trees_path = self._get_trees_checkpoint_path(job_id)
-        os.makedirs(os.path.dirname(checkpoint_trees_path), exist_ok=True)
-        with open(checkpoint_trees_path, "wb") as f:
-            pickle.dump(collected_trees, f)
-        
-        tree_type = hyperparameters.get("tree_type", "classifier")
-        final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
-        
-        # Salvataggio checkpoint logico finale
-        self._save_checkpoint(job_id, final_count, payload.get("retries", 0), seed)
-        return final_count
+        all_trained_trees = []
 
-    def _validate_global_forest(self, payload: dict, trained_trees: list) -> dict:
+        if start_alberi > 0:
+            print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Rilevato start_alberi = {start_alberi}. Ripristino checkpoint fisico...")
+            if os.path.exists(checkpoint_trees_path):
+                try:
+                    with open(checkpoint_trees_path, "rb") as f:
+                        all_trained_trees = pickle.load(f)
+                    print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
+                    # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
+                    start_alberi = len(all_trained_trees)
+                except Exception as e_load:
+                    print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
+                    start_alberi = 0
+                    all_trained_trees = []
+            else:
+                print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
+                start_alberi = 0
+        total_step_trees = target_alberi - start_alberi
+        print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
+
+        if total_step_trees <= 0:
+            print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
+        else:
+            print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
+            while True:
+                available_workers = ServiceRegistry.get_available_workers(self.environment)
+                if available_workers:
+                    print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
+                    break
+                
+                print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
+                time.sleep(10)
+            worker_names = list(available_workers.keys())
+            num_workers = len(worker_names)
+
+            hp = payload.get("hyperparameters", {})
+            max_depth = hp.get("max_depth", None)
+            tree_type = hp.get("tree_type", "classifier")
+
+            CHUNK_SIZE = max(1, total_step_trees // (num_workers*2))  # Distribuzione iniziale più conservativa
+            print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
+
+            # 4. Configurazione della Coda di Sotto-Task locale
+            task_queue = queue.Queue()
+            sub_start = start_alberi
+            task_id_counter = 1
+            
+            while sub_start < target_alberi:
+                sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
+                # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
+                task_seed = seed + sub_start
+                # Usiamo sub_start come offset assoluto rispetto al seed iniziale del JOB
+                task_queue.put((task_id_counter, sub_start, sub_end, task_seed))
+                task_id_counter += 1
+                sub_start = sub_end
+            
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r") as f:
+                        config_dati = json.load(f)
+                    feature_selezionate = config_dati.get("feature_selezionate", None)
+                    print(f"[{self.orchestrator_name}] Config caricata. Trovate {len(feature_selezionate)} feature pronte per la distribuzione.")
+                except Exception as e_cfg:
+                    print(f"[{self.orchestrator_name}] [ATTENZIONE] Errore nel leggere {config_path}: {e_cfg}")
+            else:
+                print(f"[{self.orchestrator_name}] [ATTENZIONE] File {config_path} non trovato!")
+
+        
+            collected_trees = []
+            
+            
+            results_lock = threading.Lock()
+            connessioni_attive = []
+            connessioni_lock = threading.Lock()
+            active_worker_names = list(worker_names)
+
+            def contact_worker(w_name, idx):
+                w_info = available_workers[w_name]
+                worker_conn = None
+                try:
+                    print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                    worker_conn = rpyc.connect(
+                        w_info["host"], 
+                        w_info["port"], 
+                        config={
+                            'allow_pickle': True,
+                            'sync_request_timeout': 600,
+                            'keepalive': True
+                        }
+                    )
+                    with connessioni_lock:
+                        connessioni_attive.append(worker_conn)
+
+                    while len(all_trained_trees) < target_alberi:
+                        try: 
+                            task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=2)
+                        except queue.Empty:
+                            with results_lock:
+                                total_attuali = len(all_trained_trees)
+                                num_worker_attivi = len(active_worker_names)
+                            
+                            if total_attuali >= target_alberi or num_worker_attivi <= 1:
+                                break
+                            time.sleep(1)
+                            continue
+                        quota_chunk = end_t - start_t
+                        print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+                        try:
+                            result_raw = worker_conn.root.exposed_train_local_federated_forest(
+                                job_id=self.current_job_id,
+                                dataset_type=self._resolve_dataset_type(payload),
+                                n_estimators_local=quota_chunk,
+                                worker_index=idx,
+                                hyperparameters={
+                                    **hp, 
+                                    "random_state": chunk_seed + (idx * 1000),
+                                    "feature_selezionate": feature_selezionate
+                                },
+                            )
+                            result_trees = pickle.loads(obtain(result_raw))
+                            with results_lock:
+                                all_trained_trees.extend(result_trees)
+                                current_total = len(all_trained_trees)
+                                # SALVATAGGIO FISICO ATOMICO PROGRESSIVO
+                                try:
+                                    with open(checkpoint_trees_path, "wb") as f_chk:
+                                        pickle.dump(all_trained_trees, f_chk)
+                                    print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
+                                except Exception as e_fs:
+                                    print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+                                
+                                # Sincronizziamo in tempo reale anche il contatore logico nel Database/State Manager
+                                if hasattr(self, 'state_manager') and self.state_manager:
+                                    try:
+                                        self.state_manager.update_request_status(
+                                            job_id=self.current_job_id,
+                                            status="PROCESSING",
+                                            orchestrator_id=self.orchestrator_name,
+                                            retries=payload.get("retries", 0),
+                                            base_random_state=chunk_seed + (idx*1000),
+                                            alberi_addestrati=current_total,
+                                        )
+                                    except Exception as e_db:
+                                        print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                                
+                            print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                            task_queue.task_done()
+                        except Exception as e:
+                            print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
+                            
+                            # FAULT TOLERANCE REALE: Reinserimento immediato del chunk per la fault tolerance
+                            task_queue.put((task_id, start_t, end_t, chunk_seed))
+                            print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
+                            
+                            with results_lock:
+                                if w_name in active_worker_names:
+                                    active_worker_names.remove(w_name)
+                            break 
+                except Exception as conn_err:
+                    print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
+                    with results_lock:
+                        if w_name in active_worker_names:
+                            active_worker_names.remove(w_name)
+                finally:
+                    if worker_conn:
+                        try:
+                            worker_conn.close()
+                            with connessioni_lock:
+                                if worker_conn in connessioni_attive:
+                                    connessioni_attive.remove(worker_conn)
+                        except:
+                            pass
+            threads = []
+            # Esecuzione parallela
+            for i, worker_name in enumerate(worker_names):
+                t = threading.Thread(target=contact_worker, args=(worker_name, i))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+            if not task_queue.empty() and len(active_worker_names) == 0:
+                print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
+                raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
+
+            
+            if not all_trained_trees:
+                raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
+
+            # APPLICAZIONE SCARTO UNIFORME FINALE
+            if len(all_trained_trees) > target_alberi:
+                print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
+                collected_trees = random.sample(all_trained_trees, target_alberi)
+            else:
+                print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
+                collected_trees = all_trained_trees
+
+            # Salvataggio del modello globale sul file system locale o S3
+            checkpoint_trees_path = self._get_trees_checkpoint_path(self.current_job_id)
+            os.makedirs(os.path.dirname(checkpoint_trees_path), exist_ok=True)
+            with open(checkpoint_trees_path, "wb") as f:
+                pickle.dump(collected_trees, f)
+            
+            tree_type = hp.get("tree_type", "classifier")
+            final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
+            
+            # Salvataggio checkpoint logico finale
+            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
+            return final_count
+
+    def _execute_inference_step(self, payload: dict) -> dict:
         """
         Invia la foresta globale finale ai soli nodi che hanno partecipato o sono online
         per validare il modello complessivo ciascuno sul proprio set di test locale.
         """
         print(f"\n[{self.orchestrator_name}] == AVVIO VALIDAZIONE FEDERATA DISTRIBUITA ==")
         job_id = payload.get("job_id")
+        if not job_id:
+            print(f"[{self.orchestrator_name}] [ERRORE] payload mancante di 'job_id'.")
+            return {}
+        checkpoint_path = self._get_trees_checkpoint_path(job_id)
+        print(f"[{self.orchestrator_name}] Caricamento alberi globali dal checkpoint: {checkpoint_path}")
+
+        trained_trees = None
+        if self.environment == "local":
+            if os.path.exists(checkpoint_path):
+                with open(checkpoint_path, "rb") as f:
+                    trained_trees = pickle.load(f)
+        else:
+            # Ambiente AWS S3
+            try:
+                import boto3
+                s3_client = boto3.client("s3")
+                # Estraiamo bucket e chiave dalla stringa s3://...
+                bucket = "my-cluster-datasets-bucket"
+                key = f"checkpoints/trained_trees_{job_id}.pkl"
+                response = s3_client.get_object(Bucket=bucket, Key=key)
+                trained_trees = pickle.loads(response['Body'].read())
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] Errore nel download del checkpoint da S3: {e}")
+        if not trained_trees:
+            print(f"[{self.orchestrator_name}] [ERRORE CRITICO] Impossibile trovare o caricare gli alberi per il job {job_id}.")
+            return {}
+        print(f"[{self.orchestrator_name}] Caricati con successo {len(trained_trees)} alberi globali. Distribuzione ai worker...")
         forest_bytes = pickle.dumps(trained_trees)
-        
-        registry = ServiceRegistry()
-        active_worker_names = registry.get_active_workers()
+        available_workers = ServiceRegistry.get_available_workers(self.environment) 
+        active_worker_names = list(available_workers.keys())
+
         
         y_pred_global = []
         y_true_global = []
@@ -216,12 +312,12 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         def validate_worker(w_name):
             try:
-                w_info = registry.get_worker_info(w_name)
+                w_info = available_workers[w_name]
                 if not w_info:
                     return
                 
-                conn = rpyc.connect(w_info["host"], w_info["port"], config={"allow_public_attrs": True})
-                raw_response = conn.root.exposed_predict_subset_forest(forest_bytes)
+                conn = rpyc.connect(w_info["host"], w_info["port"], config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300})
+                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({"forest": forest_bytes }))
                 worker_data = pickle.loads(obtain(raw_response))
                 conn.close()
 
@@ -270,21 +366,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             "timestamp": time.time()
         }
 
-    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
-        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
-
-    def _clean_checkpoint(self, job_id: str):
-        super()._clean_checkpoint(job_id)
-        for path in [
-            self._get_trees_checkpoint_path(job_id),
-            self._get_inference_checkpoint_path(job_id)
-        ]:
-            if self.environment == "local" and os.path.exists(path):
-                try:
-                    os.remove(path)
-                    print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso file temporaneo: {path}")
-                except Exception as e:
-                    print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile rimuovere {path}: {e}")
+   
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         """
@@ -328,6 +410,59 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
             traceback.print_exc()
             return len(all_trained_trees)
+        
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
+        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
+
+        if alberi_reali is not None and len(alberi_reali) > 0:
+            if self.environment == "aws":
+                checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+            else:
+                checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+            try: 
+                with open(checkpoint_trees_path, "wb") as f:
+                    pickle.dump(alberi_reali, f)
+                print(f"[{self.orchestrator_name}] Checkpoint alberi salvato in {checkpoint_trees_path}.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile salvare checkpoint alberi: {e}")
+
+    def _clean_checkpoint(self, job_id: str):
+        super()._clean_checkpoint(job_id)
+        if self.environment == "aws":
+            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+        else:
+            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+        if os.path.exists(checkpoint_trees_path):
+            try:
+                os.remove(checkpoint_trees_path)
+                print(f"[{self.orchestrator_name}] Checkpoint alberi rimosso da {checkpoint_trees_path}.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint alberi: {e}")
+        inference_cp = self._get_inference_checkpoint_path(job_id)
+        if os.path.exists(inference_cp):
+            os.remove(inference_cp)
+        
+    def _get_trees_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://my-cluster-datasets-bucket/checkpoints/trained_trees_{job_id}.pkl"
+        return f"./.local_storage/checkpoints/trained_trees_{job_id}.pkl"
+
+    def _get_inference_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
+        return f"./.local_storage/inference_chunks_{job_id}.pkl"
+    
+    def _load_inference_checkpoint(self, job_id: str):
+        path = self._get_inference_checkpoint_path(job_id)
+        if self.environment == "local" and os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    chunks = pickle.load(f)
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Caricati {len(chunks)} chunk di inferenza dal checkpoint.")
+                return chunks
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
+        return []
 
 
 if __name__ == "__main__":

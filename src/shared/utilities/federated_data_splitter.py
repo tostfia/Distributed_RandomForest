@@ -2,7 +2,7 @@ import os
 import numpy as np
 import boto3
 from botocore.exceptions import ClientError
-from Distributed_RandomForest.src.shared.utilities.datasplitter import StratifiedDataSplitter
+from src.shared.utilities.datasplitter import StratifiedDataSplitter
 
 class FederatedDataSplitter:
 
@@ -33,8 +33,23 @@ class FederatedDataSplitter:
         test_df = test_df.sample(frac=1, random_state=self.random_state).reset_index(drop=True)
         
         # 3. Suddivisione orizzontale equa dei chunk per i worker
-        train_shards = np.array_split(train_df, num_workers)
-        test_shards = np.array_split(test_df, num_workers)
+        # 3. Suddivisione orizzontale equa dei chunk per i worker
+        chunk_size_train = int(np.ceil(len(train_df) / num_workers))
+        chunk_size_test = int(np.ceil(len(test_df) / num_workers))
+
+        # Generazione controllata basata esattamente sul numero di worker
+        train_shards = []
+        test_shards = []
+        for idx in range(num_workers):
+            start_tr = idx * chunk_size_train
+            end_tr = min(start_tr + chunk_size_train, len(train_df))
+            train_shards.append(train_df.iloc[start_tr:end_tr])
+
+            start_te = idx * chunk_size_test
+            end_te = min(start_te + chunk_size_test, len(test_df))
+            test_shards.append(test_df.iloc[start_te:end_te])
+
+        
 
         if environment == "local":
             # --- SCENARIO LOCALE / DOCKER (File System Condiviso) ---

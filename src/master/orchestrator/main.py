@@ -1,8 +1,9 @@
 import sys
 import os
 import socket
-from Distributed_RandomForest.src.shared.utilities.federated_data_splitter import FederatedDataSplitter
-from Distributed_RandomForest.src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
+from src.shared.binding.serviceregistry import ServiceRegistry
+from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.config import SystemConfig
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
@@ -31,8 +32,18 @@ def main():
         
         # Eseguiamo il bootstrap dei file CSV LOCALI SOLO se siamo in ambiente di sviluppo "local"
         if environment == "local":
-            print(f"[INFO] Ambiente Locale rilevato. Avvio fase di Setup/Bootstrap degli Shard su File System...")
-            num_workers = int(getattr(cfg, "num_workers", 3)) 
+            try:
+                workers_attivi = ServiceRegistry.get_available_workers("local")
+                num_workers = len(workers_attivi)
+                if num_workers > 0:
+                    print(f"[BOOTSTRAP] Rilevati dinamicamente {num_workers} worker attivi nel ServiceRegistry: {workers_attivi}")
+                else:
+                    # Fallback: se l'orchestratore parte un secondo prima dei worker, il registry potrebbe essere vuoto
+                    num_workers = int(getattr(cfg, "num_workers", 3))
+                    print(f"[BOOTSTRAP INFO] Nessun worker ancora registrato. Uso il fallback da configurazione: {num_workers}")
+            except Exception as e:
+                num_workers = int(getattr(cfg, "num_workers", 3))
+                print(f"[BOOTSTRAP WARN] Impossibile leggere il ServiceRegistry ({e}). Fallback su configurazione: {num_workers}")
             
             # --- BOOTSTRAP DATASET REALE (Solo Local) ---
             try:
@@ -44,9 +55,9 @@ def main():
                 if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
                     data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
 
-                print(f" • Cartella sorgente identificata per bootstrap federato: '{data_folder}'")
+                #print(f" • Cartella sorgente identificata per bootstrap federato: '{data_folder}'")
                 
-                data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=123)
+                data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
                 splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
                 
                 # Lo splitter genererà i file 'train_shard.csv' e 'test_shard.csv' nei folder dei singoli worker

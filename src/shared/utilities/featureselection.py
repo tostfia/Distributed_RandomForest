@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List
 import pandas as pd
 import numpy as np
 
@@ -16,6 +16,7 @@ class CICIDSFeatureSelector:
         self.target_column = target_column
         self.correlation_threshold = correlation_threshold
         self.columns_to_drop_: List[str] = []
+        self.feature_summary_: Dict[str, List[str]] = {}
 
     def fit(self, train_df: pd.DataFrame) -> "CICIDSFeatureSelector":
         if self.target_column not in train_df.columns:
@@ -63,6 +64,14 @@ class CICIDSFeatureSelector:
 
         # Rimuove duplicati mantenendo ordine
         self.columns_to_drop_ = list(dict.fromkeys(columns_to_drop))
+
+        tutte_le_feature = [col for col in train_df.columns if col != self.target_column]
+        feature_salvate = [col for col in tutte_le_feature if col not in self.columns_to_drop_]
+
+        self.feature_summary_ = {
+            "eliminate": self.columns_to_drop_,
+            "salvate": feature_salvate
+        }
 
         print(f"\n [FeatureSelector] Totale feature univoche contrassegnate per la rimozione: {len(self.columns_to_drop_)}")
 

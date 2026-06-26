@@ -103,6 +103,7 @@ def run_baseline():
         fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
+        dizionario_feature = fs.feature_summary_
         
         etl_time = time.perf_counter() - preprocess_start_time
         print(f"[OK] Trasformazione e Feature Selection completate in {etl_time:.4f} secondi.")
@@ -171,6 +172,8 @@ def run_baseline():
         "mode": "distributed",
         "dataset_type": dataset_type,
         "dataset_path": data_folder if dataset_type == "real" else "synthetic",
+        "feature_eliminata" : dizionario_feature["eliminate"],
+        "feature_selezionate" : dizionario_feature["salvate"],
         "hyperparameters": {
             "n_estimators": int(best_params.get("n_estimators", 10)),
             "max_depth": best_params.get("max_depth") ,
