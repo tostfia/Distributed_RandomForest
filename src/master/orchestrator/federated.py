@@ -273,6 +273,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         """
         print(f"\n[{self.orchestrator_name}] == AVVIO VALIDAZIONE FEDERATA DISTRIBUITA ==")
         job_id = payload.get("job_id")
+        hyperparameters = payload.get("hyperparameters", {})
         if not job_id:
             print(f"[{self.orchestrator_name}] [ERRORE] payload mancante di 'job_id'.")
             return {}
@@ -317,7 +318,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     return
                 
                 conn = rpyc.connect(w_info["host"], w_info["port"], config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300})
-                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({"forest": forest_bytes }))
+                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({"forest": forest_bytes, "iperparametri": hyperparameters }))
                 worker_data = pickle.loads(obtain(raw_response))
                 conn.close()
 

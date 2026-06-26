@@ -302,11 +302,12 @@ class FederatedWorker(BaseWorker):
         forest = payload["forest"]
 
         if self._cached_X_test is None or self._cached_y_test is None:
+              # Forza il caricamento dello shard reale se non presente
             print(f"[{self.worker_name}] Cache vuota. Ricarico lo shard locale in memoria...")
-            
+            iperparametri = payload.get("hyperparameters", {})
+            self._load_and_preprocess_real_shard(self.worker_index, iperparametri)
 
-            raise ValueError("Nessun dataset di test in cache.")
-            
+   
         unpacked_model = pickle.loads(forest)
         
         if isinstance(unpacked_model, list):
