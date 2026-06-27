@@ -34,7 +34,7 @@ def _train_single_fed_tree(args):
     
     global _fed_child_X, _fed_child_y
     
-    tree_seed, max_depth, max_samples, bootstrap, tree_class = args
+    tree_seed, max_depth, max_samples, bootstrap, tree_class, class_weight = args
     np.random.seed(tree_seed)
     
     n_samples = _fed_child_X.shape[0]
@@ -55,11 +55,19 @@ def _train_single_fed_tree(args):
         X_sampled = _fed_child_X
         y_sampled = _fed_child_y
         
-    # Istanziazione dell'albero specifico richiesto
+    # 2. Prepariamo i parametri per l'inizializzazione dell'albero in modo dinamico
+    kwargs = {"random_state": tree_seed}
+    
     if max_depth is not None:
-        tree = tree_class(random_state=tree_seed, max_depth=max_depth)
-    else:
-        tree = tree_class(random_state=tree_seed)
+        kwargs["max_depth"] = max_depth
+        
+    # 3. CONTROLLO CRUCIALE: Aggiungiamo class_weight solo se l'albero è un classificatore
+    # Evita il TypeError su DecisionTreeRegressor sia in Docker che in locale
+    if class_weight is not None and "Classifier" in tree_class.__name__:
+        kwargs["class_weight"] = class_weight
+        
+    # Istanziazione dell'albero specifico richiesto con i parametri validati
+    tree = tree_class(**kwargs)
         
     tree.fit(X_sampled, y_sampled)
     return tree
@@ -92,13 +100,6 @@ class FederatedWorker(BaseWorker):
         self.target_column = target_column
         self.tree_type = tree_type
         
-        # Gestione asimmetrica della cache locale in base all'ambiente
-        if self.environment == "aws":
-            self.local_cache_dir = f"/tmp/{worker_name}_cache"
-        else:
-            self.local_cache_dir = f"./{worker_name}_cache"
-            
-        os.makedirs(self.local_cache_dir, exist_ok=True)
         
         # Cache dello stato interno
         self._cached_job_id = None
@@ -107,12 +108,30 @@ class FederatedWorker(BaseWorker):
         self._cached_X_test = None
         self._cached_y_test = None
         self.local_sample_count = 0
+        self.worker_index = 1
 
-        self.worker_index = 0
-        for char in worker_name.split("-"):
-            if char.isdigit():
-                self.worker_index = int(char)
-                break
+        env_index = os.environ.get("WORKER_INDEX")
+        if env_index and env_index.isdigit():
+            self.worker_index = int(env_index)
+        else:
+            # Fallback per l'esecuzione locale senza Docker
+            self.worker_index = 0
+            for char in worker_name.split("-"):
+                if char.isdigit():
+                    self.worker_index = int(char)
+                    break
+            
+            # Se ancora non lo trova ed è a 0, metti un default di sicurezza (es. 1)
+            if self.worker_index == 0:
+                self.worker_index = 1
+        # Gestione asimmetrica della cache locale in base all'ambiente
+        if self.environment == "aws":
+            self.local_cache_dir = f"/tmp/{worker_name}_cache"
+        else:
+            worker_id_uniforme = f"Worker-Locale-0{self.worker_index}" if self.worker_index < 9 else f"Worker-Locale-{self.worker_index}"
+            self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
+            
+        os.makedirs(self.local_cache_dir, exist_ok=True)
 
         print(
             f"[FederatedWorker] Inizializzato in ambiente: {self.environment.upper()} — "
@@ -174,11 +193,12 @@ class FederatedWorker(BaseWorker):
         tree_class = self._get_tree_class()
         totale_core = os.cpu_count() or 1
         allocated_cores = max(1, totale_core - 1) if totale_core > 2 else totale_core
-
+        
+        class_weight = hyperparameters.get("class_weight", None)
         worker_tasks = []
         for i in range(n_estimators_local):
             seed = base_seed + i
-            worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class))
+            worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, class_weight))
 
         # Addestramento parallelo locale
         # 5. Ottimizzazione anti-crash: esecuzione diretta se richiesto un solo albero

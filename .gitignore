@@ -15,6 +15,7 @@ outputs_baseline/
 
 # Escludi i dataset CSV (sia il dataset originale che quello campionato)
 data/*.csv
+workers_cache/*.csv
 
 # === PYTHON CACHE / BYTECODE ===
 # File generati automaticamente da Python

@@ -38,14 +38,21 @@ if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
     exit 1
 fi
 
-# Richiesta dinamica del numero di Worker
-echo -n "Quanti nodi Worker vuoi avviare (1-7)? "
-read NUM_WORKERS
-
-if ! [[ "$NUM_WORKERS" =~ ^[1-7]$ ]]; then
-    echo "Errore: inserisci un numero compreso tra 1 e 7."
+if [ -f .env ]; then
+    # 2. Esporta le variabili del file .env nella sessione Bash corrente
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+else
+    echo "[ERRORE] File .env non trovato!"
     exit 1
 fi
+
+# 3. Verifica che NUM_WORKERS sia stato letto correttamente
+if [ -z "$NUM_WORKERS" ]; then
+    echo "[ERRORE] NUM_WORKERS non definito nel file .env"
+    exit 1
+fi
+
+echo "[SYSTEM] Rilevati $NUM_WORKERS worker dal file .env"
 
 # Configurazione della rete
 if [ "$MODE" = "delay" ]; then
@@ -72,7 +79,7 @@ for ((i=1; i<=NUM_WORKERS; i++)); do
     PORT=$((PORT_BASE + i - 1))
     echo "[START] Avvio $WORKER_NAME sulla porta $PORT..."
     
-    $TERM_CMD bash -c "python -m src.worker.main $WORKER_NAME $PORT centralized local; exec bash"
+    $TERM_CMD bash -c "python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
 done
 
 sleep 2

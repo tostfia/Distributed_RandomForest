@@ -52,10 +52,11 @@ class FederatedDataSplitter:
         
 
         if environment == "local":
+            base_cache_dir = "./workers_cache"
             # --- SCENARIO LOCALE / DOCKER (File System Condiviso) ---
             for i in range(num_workers):
                 worker_id = f"Worker-Locale-0{i+1}" if i < 9 else f"Worker-Locale-{i+1}"
-                cache_dir = f"./{worker_id}_cache"
+                cache_dir = os.path.join(base_cache_dir, worker_id)
                 os.makedirs(cache_dir, exist_ok=True)
                 train_shards[i].to_csv(os.path.join(cache_dir, "train_shard.csv"), index=False)
                 test_shards[i].to_csv(os.path.join(cache_dir, "test_shard.csv"), index=False)

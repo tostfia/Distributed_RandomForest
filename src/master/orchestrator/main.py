@@ -24,19 +24,18 @@ def main():
     print("=====================================================\n")
 
     if mode == "centralized":
+        num_workers = int(getattr(cfg, "num_workers", 3))
+        print(f" Numero di worker configurato da .env: {num_workers}")
         print(f"[INFO] Istanzio l'Orchestratore Centralizzato...")
         orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
         
     elif mode == "federated":
         print(f"[INFO] Modalità Federata rilevata.")
-        
+        num_workers = int(getattr(cfg, "num_workers", 3))
+        print(f" Numero di worker configurato da .env: {num_workers}")
         # Eseguiamo il bootstrap dei file CSV LOCALI SOLO se siamo in ambiente di sviluppo "local"
         if environment == "local":
-            
-            
-            num_workers = int(getattr(cfg, "num_workers", 3))
-            print(f"[BOOTSTRAP] Numero di worker configurato da .env: {num_workers}")
-            
+
             # --- BOOTSTRAP DATASET REALE (Solo Local) ---
             try:
                 
@@ -47,10 +46,11 @@ def main():
                 if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
                     data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
                 shards_esistenti = True
+                base_cache_dir = "./workers_cache"
                 for i in range(1, num_workers + 1):
                     # Controlliamo sia il formato con zero-padding (01, 02) che quello standard (1, 2)
-                    dir_padded = f"./Worker-Locale-{i:02d}_cache"
-                    dir_unpadded = f"./Worker-Locale-{i}_cache"
+                    dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
+                    dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
                     
                     train_p = os.path.join(dir_padded, "train_shard.csv")
                     test_p = os.path.join(dir_padded, "test_shard.csv")

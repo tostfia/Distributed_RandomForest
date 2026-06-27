@@ -4,6 +4,7 @@ services:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID}:${MY_GID}"
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - ENV_MODE=${ENV_MODE:-local}
@@ -11,11 +12,13 @@ services:
       - EC2_ID=${EC2_ID:-Locale}
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - RUNNING_IN_DOCKER=true
+      - WORKER_INDEX={{.Task.Slot}}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
+      - ./workers_cache:/app/workers_cache:z
     command: >
       sh -c "ORCHESTRATOR_ID=Orchestrator-${EC2_ID:-Locale}-${TRAINING_MODE:-centralized}-$$(hostname)
       python -m src.master.orchestrator.main"
@@ -31,9 +34,10 @@ services:
       replicas: ${NUM_WORKERS:-2}
       resources:
         limits:
-          cpus: '0.5'
-          memory: 512M
+          cpus: '2.0'
+          memory: 2048M
     environment:
+      - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - RPC_PORT=18861
@@ -41,11 +45,13 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - WORKER_INDEX={{.Task.Slot}}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
+      - ./workers_cache:/app/workers_cache:z
     command: >
       sh -c "
         if command -v tc >/dev/null; then
