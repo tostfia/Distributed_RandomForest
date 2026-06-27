@@ -11,7 +11,7 @@ from rpyc.utils.classic import obtain
 import traceback
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, precision_score, recall_score, f1_score
 
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -46,8 +46,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         Alla fine, se gli alberi totali superano il target (over-provisioning), applica lo scarto uniforme.
         """
         self.current_job_id = payload.get("job_id")
-        feature_selezionate = None
-        config_path = ".output_baseline/config.json"
+        
        
         if self.environment == "aws":
             checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
@@ -111,19 +110,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                 task_queue.put((task_id_counter, sub_start, sub_end, task_seed))
                 task_id_counter += 1
                 sub_start = sub_end
-            
-            if os.path.exists(config_path):
-                try:
-                    with open(config_path, "r") as f:
-                        config_dati = json.load(f)
-                    feature_selezionate = config_dati.get("feature_selezionate", None)
-                    print(f"[{self.orchestrator_name}] Config caricata. Trovate {len(feature_selezionate)} feature pronte per la distribuzione.")
-                except Exception as e_cfg:
-                    print(f"[{self.orchestrator_name}] [ATTENZIONE] Errore nel leggere {config_path}: {e_cfg}")
-            else:
-                print(f"[{self.orchestrator_name}] [ATTENZIONE] File {config_path} non trovato!")
-
-        
+            feature_selezionate = []
+            feature_selezionate = self.select_from_config()
             collected_trees = []
             
             
@@ -259,7 +247,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             with open(checkpoint_trees_path, "wb") as f:
                 pickle.dump(collected_trees, f)
             
-            tree_type = hp.get("tree_type", "classifier")
+            
             final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
             
             # Salvataggio checkpoint logico finale
@@ -267,106 +255,153 @@ class FederatedOrchestrator(BaseOrchestrator):
             return final_count
 
     def _execute_inference_step(self, payload: dict) -> dict:
-        """
-        Invia la foresta globale finale ai soli nodi che hanno partecipato o sono online
-        per validare il modello complessivo ciascuno sul proprio set di test locale.
-        """
+    
         print(f"\n[{self.orchestrator_name}] == AVVIO VALIDAZIONE FEDERATA DISTRIBUITA ==")
         job_id = payload.get("job_id")
         hyperparameters = payload.get("hyperparameters", {})
-        if not job_id:
-            print(f"[{self.orchestrator_name}] [ERRORE] payload mancante di 'job_id'.")
-            return {}
-        checkpoint_path = self._get_trees_checkpoint_path(job_id)
-        print(f"[{self.orchestrator_name}] Caricamento alberi globali dal checkpoint: {checkpoint_path}")
+        tree_type = hyperparameters.get("tree_type", "classifier")
 
-        trained_trees = None
-        if self.environment == "local":
-            if os.path.exists(checkpoint_path):
-                with open(checkpoint_path, "rb") as f:
-                    trained_trees = pickle.load(f)
+        inference_start_time = time.perf_counter()
+
+        # 1. RISOLUZIONE PERCORSO MODELLO
+        if self.environment == "aws":
+            model_path = f"s3://my-cluster-datasets-bucket/saved_models/fed_model_{job_id}.pkl"
         else:
-            # Ambiente AWS S3
-            try:
-                import boto3
-                s3_client = boto3.client("s3")
-                # Estraiamo bucket e chiave dalla stringa s3://...
-                bucket = "my-cluster-datasets-bucket"
-                key = f"checkpoints/trained_trees_{job_id}.pkl"
-                response = s3_client.get_object(Bucket=bucket, Key=key)
-                trained_trees = pickle.loads(response['Body'].read())
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] Errore nel download del checkpoint da S3: {e}")
-        if not trained_trees:
-            print(f"[{self.orchestrator_name}] [ERRORE CRITICO] Impossibile trovare o caricare gli alberi per il job {job_id}.")
-            return {}
-        print(f"[{self.orchestrator_name}] Caricati con successo {len(trained_trees)} alberi globali. Distribuzione ai worker...")
-        forest_bytes = pickle.dumps(trained_trees)
-        available_workers = ServiceRegistry.get_available_workers(self.environment) 
-        active_worker_names = list(available_workers.keys())
+            model_path = os.path.join("./saved_models", f"fed_model_{job_id}.pkl")
 
-        
+        # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
+        if self.environment == "local":
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+            print(f"[{self.orchestrator_name}] Caricamento della foresta locale da {model_path}...")
+            with open(model_path, "rb") as f:
+                global_model = pickle.load(f)
+        else:
+            print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
+            local_fallback_path = os.path.join("./saved_models", f"fed_model_{job_id}.pkl")
+            with open(local_fallback_path, "rb") as f:
+                global_model = pickle.load(f)
+
+        all_trees = global_model.estimators_
+        total_trees = len(all_trees)
+        print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
+
+        # 3. SCOPERTA WORKER
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+        if num_workers == 0:
+            raise RuntimeError("Nessun worker disponibile per l'inferenza federata.")
+        print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
+
+        # 4. SERIALIZZAZIONE UNICA DELLA FORESTA INTERA (inviata identica a ogni worker)
+        forest_bytes = pickle.dumps(all_trees)
+        feature_selezionate = self.select_from_config()
+
+        # 5. STRUTTURE DATI CONDIVISE
+        # Usiamo liste mutabili per evitare nonlocal su tipi immutabili
         y_pred_global = []
         y_true_global = []
-        results_lock = threading.Lock()
-        threads = []
+        total_samples_ref = [0]   # [0] = contenitore mutabile, no nonlocal needed
+        failed_workers = set()
 
-        def validate_worker(w_name):
+        results_lock = threading.Lock()
+        connessioni_attive = []
+        connessioni_lock = threading.Lock()
+        active_worker_names = list(worker_names)
+
+        # 6. FUNZIONE CONSUMATRICE: una chiamata RPC per worker, foresta intera
+        def validate_worker(w_name, idx):
+            conn = None
             try:
                 w_info = available_workers[w_name]
                 if not w_info:
                     return
-                
-                conn = rpyc.connect(w_info["host"], w_info["port"], config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300})
-                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({"forest": forest_bytes, "iperparametri": hyperparameters }))
+
+                print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300}
+                )
+                with connessioni_lock:
+                    connessioni_attive.append(conn)
+
+                print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
+                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
+                    "forest": forest_bytes,
+                    "job_id": job_id,
+                    "worker_index": idx,
+                    "hyperparameters": {
+                        **hyperparameters,
+                        "dataset_type": self._resolve_dataset_type(payload),
+                        "feature_selezionate": feature_selezionate,
+                        "tree_type": tree_type,
+                    }
+                }))
                 worker_data = pickle.loads(obtain(raw_response))
-                conn.close()
 
                 with results_lock:
                     y_pred_global.extend(worker_data["y_pred"])
                     y_true_global.extend(worker_data["y_true"])
+                    total_samples_ref[0] += worker_data["n_samples"]
                     print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' ({worker_data['n_samples']} record).")
-            except (socket.error, EOFError, Exception) as ex:
-                print(f"[{self.orchestrator_name}] [VALIDATION DROPOUT] Impossibile validare su '{w_name}', saltato: {ex}")
 
-        for worker_name in active_worker_names:
-            t = threading.Thread(target=validate_worker, args=(worker_name,))
-            threads.append(t)
+            except Exception as ex:
+                print(f"   [ERRORE INF] Fallimento su '{w_name}': {ex}")
+                with results_lock:
+                    if w_name in active_worker_names:
+                        active_worker_names.remove(w_name)
+                    failed_workers.add(w_name)
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                        with connessioni_lock:
+                            if conn in connessioni_attive:
+                                connessioni_attive.remove(conn)
+                    except:
+                        pass
+
+        # 7. AVVIO MULTI-THREADING (un thread per worker)
+        rpc_start_time = time.perf_counter()
+        threads = []
+        for idx, name in enumerate(worker_names):
+            t = threading.Thread(target=validate_worker, args=(name, idx))
             t.start()
+            threads.append(t)
 
         for t in threads:
             t.join()
 
+        # Chiusura precauzionale connessioni residue
+        with connessioni_lock:
+            for conn in connessioni_attive:
+                try: conn.close()
+                except Exception: pass
+
+        rpc_inference_time = time.perf_counter() - rpc_start_time
+
+        # 8. GUARD: almeno un worker deve aver risposto
         if not y_pred_global:
-            print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker attivo ha risposto alla validazione finale.")
+            print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
             return {}
 
-        y_pred_arr = np.array(y_pred_global, dtype=np.int64)
-        y_true_arr = np.array(y_true_global, dtype=np.int64)
+        if failed_workers:
+            print(f"[{self.orchestrator_name}] [WARN] {len(failed_workers)} worker non hanno risposto: {failed_workers}. Metriche calcolate sui rimanenti.")
 
-        acc = accuracy_score(y_true_arr, y_pred_arr)
-        prec = precision_score(y_true_arr, y_pred_arr, zero_division=0)
-        rec = recall_score(y_true_arr, y_pred_arr, zero_division=0)
-        f1 = f1_score(y_true_arr, y_pred_arr, zero_division=0)
-        rep = classification_report(y_true_arr, y_pred_arr, zero_division=0)
+        total_inference_time = time.perf_counter() - inference_start_time
 
-        print(f"\n[{self.orchestrator_name}] === VALUTAZIONE AGGREGATA FEDERATA ===")
-        print(f" • Accuracy:  {acc:.4f}")
-        print(f" • Precision: {prec:.4f}")
-        print(f" • Recall:    {rec:.4f}")
-        print(f" • F1-Score:  {f1:.4f}")
-
-        return {
-            "job_id": job_id,
-            "orchestrator": self.orchestrator_name,
-            "accuracy": acc,
-            "precision": prec,
-            "recall": rec,
-            "f1_score": f1,
-            "classification_report": rep,
-            "timestamp": time.time()
-        }
-
+        # 9. CALCOLO E STAMPA METRICHE AGGREGATE
+        self._print_and_validate_metrics_federated(
+            y_pred=np.array(y_pred_global, dtype=np.int64),
+            y_true=np.array(y_true_global, dtype=np.int64),
+            tree_type=tree_type,
+            testing_set_size=total_samples_ref[0],
+            job_id=job_id,
+            total_inference_time=total_inference_time,
+            rpc_inference_time=rpc_inference_time
+        )
+            
    
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
@@ -411,6 +446,56 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
             traceback.print_exc()
             return len(all_trained_trees)
+        
+    def _print_and_validate_metrics_federated(
+        self,
+        y_pred: np.ndarray,
+        y_true: np.ndarray,
+        tree_type: str,
+        testing_set_size: int,
+        job_id: str,
+        total_inference_time: float,
+        rpc_inference_time: float
+    ):
+        
+
+        print("\n" + "═" * 75)
+        print(f"  VALUTAZIONE PRESTAZIONI MODELLO FEDERATO (JOB: {job_id[:8]})")
+        print("═" * 75)
+        print(f"  TEMPO TOTALE DI INFERENZA:              {total_inference_time:.4f} secondi")
+        print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
+        print("═" * 75 + "\n")
+
+        if tree_type == "classifier":
+            final_predictions = y_pred.astype(int)
+            y_true = y_true.astype(int)
+
+            accuracy  = np.mean(final_predictions == y_true)
+            precision = precision_score(y_true, final_predictions, zero_division=0)
+            recall    = recall_score(y_true, final_predictions, zero_division=0)
+            f1        = f1_score(y_true, final_predictions, zero_division=0)
+            cm        = confusion_matrix(y_true, final_predictions)
+
+            print(f"  Tipo di Modello:                        CLASSIFICATORE FEDERATO")
+            print(f"  Testing Set size (aggregato):           {testing_set_size} campioni")
+            print("-" * 75)
+            print(f"  ACCURACY FINALE FEDERATA:               {accuracy * 100:.2f} %")
+            print(f"  PRECISION FEDERATA:                     {precision * 100:.2f} %")
+            print(f"  RECALL FEDERATA:                        {recall * 100:.2f} %")
+            print(f"  F1-SCORE FEDERATO:                      {f1 * 100:.2f} %")
+            print("-" * 75)
+            print("  Matrice di Confusione:")
+            print(cm)
+            print("\n  Classification Report Completo:")
+            print(classification_report(y_true, final_predictions, zero_division=0))
+        else:
+            final_predictions = y_pred.astype(float)
+            mae = np.mean(np.abs(final_predictions - y_true.astype(float)))
+            print(f"  Tipo di Modello:                        REGRESSORE FEDERATO")
+            print(f"  Testing Set size (aggregato):           {testing_set_size} campioni")
+            print(f"  MAE FINALE FEDERATO:                    {mae:.4f}")
+
+        print("═" * 75 + "\n")
         
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
@@ -464,6 +549,33 @@ class FederatedOrchestrator(BaseOrchestrator):
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
         return []
+    
+    def select_from_config(self):
+        # Percorso 1: relativo al cwd (funziona se lanciato da root con python main.py)
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", "config.json")
+        
+        # Percorso 2: fallback risalendo dalla posizione del file sorgente
+        if not os.path.exists(config_path):
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
+            config_path = os.path.join(project_root, "outputs_baseline", "config.json")
+
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    config_dati = json.load(f)
+                feature_selezionate = config_dati.get("feature_selezionate", None)
+                if not feature_selezionate:
+                    print(f"[{self.orchestrator_name}] [ATTENZIONE] 'feature_selezionate' assente o vuoto nel config.")
+                    return None
+                print(f"[{self.orchestrator_name}] Config caricata da {config_path}. Trovate {len(feature_selezionate)} feature.")
+                return feature_selezionate
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE] Lettura config fallita: {e}")
+        else:
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] config.json non trovato in nessuno dei percorsi:")
+            print(f"  • {config_path}")
+        return None
 
 
 if __name__ == "__main__":

@@ -32,18 +32,10 @@ def main():
         
         # Eseguiamo il bootstrap dei file CSV LOCALI SOLO se siamo in ambiente di sviluppo "local"
         if environment == "local":
-            try:
-                workers_attivi = ServiceRegistry.get_available_workers("local")
-                num_workers = len(workers_attivi)
-                if num_workers > 0:
-                    print(f"[BOOTSTRAP] Rilevati dinamicamente {num_workers} worker attivi nel ServiceRegistry: {workers_attivi}")
-                else:
-                    # Fallback: se l'orchestratore parte un secondo prima dei worker, il registry potrebbe essere vuoto
-                    num_workers = int(getattr(cfg, "num_workers", 3))
-                    print(f"[BOOTSTRAP INFO] Nessun worker ancora registrato. Uso il fallback da configurazione: {num_workers}")
-            except Exception as e:
-                num_workers = int(getattr(cfg, "num_workers", 3))
-                print(f"[BOOTSTRAP WARN] Impossibile leggere il ServiceRegistry ({e}). Fallback su configurazione: {num_workers}")
+            
+            
+            num_workers = int(getattr(cfg, "num_workers", 3))
+            print(f"[BOOTSTRAP] Numero di worker configurato da .env: {num_workers}")
             
             # --- BOOTSTRAP DATASET REALE (Solo Local) ---
             try:
@@ -54,15 +46,34 @@ def main():
                 data_folder = getattr(cfg, "dataset_path", None)
                 if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
                     data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
-
-                #print(f" • Cartella sorgente identificata per bootstrap federato: '{data_folder}'")
+                shards_esistenti = True
+                for i in range(1, num_workers + 1):
+                    # Controlliamo sia il formato con zero-padding (01, 02) che quello standard (1, 2)
+                    dir_padded = f"./Worker-Locale-{i:02d}_cache"
+                    dir_unpadded = f"./Worker-Locale-{i}_cache"
+                    
+                    train_p = os.path.join(dir_padded, "train_shard.csv")
+                    test_p = os.path.join(dir_padded, "test_shard.csv")
+                    train_up = os.path.join(dir_unpadded, "train_shard.csv")
+                    test_up = os.path.join(dir_unpadded, "test_shard.csv")
+                    
+                    # Se per un worker mancano i file in entrambe le possibili varianti di cartella, dobbiamo ricalcolare
+                    if not ((os.path.exists(train_p) and os.path.exists(test_p)) or 
+                            (os.path.exists(train_up) and os.path.exists(test_up))):
+                        shards_esistenti = False
+                        break
                 
-                data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
-                splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
                 
-                # Lo splitter genererà i file 'train_shard.csv' e 'test_shard.csv' nei folder dei singoli worker
-                splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
-                print("[BOOTSTRAP OK] Shard reali distribuiti nelle cartelle locali dei Worker.")
+                if shards_esistenti:
+                    print(f"[BOOTSTRAP] Shard già presenti su disco per tutti i {num_workers} worker. Salto il ricalcolo.")
+                else:
+                    print("[BOOTSTRAP] Shard incompleti o assenti. Avvio Generazione Shard per DATASET REALE...")
+                    data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
+                    splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
+                    
+                    # Lo splitter genererà i file 'train_shard.csv' e 'test_shard.csv' nei folder dei singoli worker
+                    splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
+                    print("[BOOTSTRAP OK] Shard reali distribuiti nelle cartelle locali dei Worker.")
             except Exception as e:
                 print(f"[BOOTSTRAP WARN] Salto bootstrap reale locale (es. cartella o file non trovati in {data_folder}): {e}")
         else:

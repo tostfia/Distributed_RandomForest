@@ -153,9 +153,6 @@ class FederatedWorker(BaseWorker):
     
     def exposed_train_local_federated_forest(self,job_id: str, dataset_type: str, n_estimators_local: int, worker_index: int, hyperparameters: dict) -> list:
                                               
-        """Metodo esposto tramite RPC richiesto dall'Orchestratore per avviare l'addestramento.
-        Chiama il caricamento dinamico dei dati e restituisce gli alberi locali in formato binario.
-        """
         """Metodo RPC esposto all'Orchestratore per l'addestramento locale."""
         
         hyperparameters = obtain(hyperparameters)
@@ -243,8 +240,7 @@ class FederatedWorker(BaseWorker):
         df_train_clean = preprocessor.process(df_train_bin)
         df_test_clean = preprocessor.process(df_test_bin)
 
-        # 4. Allineamento Forzato delle Feature (Sincronizzazione tramite Master)
-        # L'orchestratore includerà nel payload la lista esatta 'selected_features' decisa a monte
+        
         
         selected_features = hyperparameters.get("feature_selezionate", None)
         
@@ -300,38 +296,53 @@ class FederatedWorker(BaseWorker):
     def exposed_predict_subset_forest(self, payload: dict) -> bytes:
         payload = pickle.loads(payload)
         forest = payload["forest"]
+        job_id = payload.get("job_id", None)
+        worker_index = payload.get("worker_index", None)
+        hyperparameters = payload.get("hyperparameters", {})
+        dataset_type = hyperparameters.get("dataset_type", "real")
+        tree_type = hyperparameters.get("tree_type", "classifier")
 
-        if self._cached_X_test is None or self._cached_y_test is None:
-              # Forza il caricamento dello shard reale se non presente
-            print(f"[{self.worker_name}] Cache vuota. Ricarico lo shard locale in memoria...")
-            iperparametri = payload.get("hyperparameters", {})
-            self._load_and_preprocess_real_shard(self.worker_index, iperparametri)
+        if self._cached_job_id != job_id or self._cached_X_test is None or self._cached_y_test is None:
+            print(f"[{self.worker_name}] Rigenerazione cache di test tramite pipeline ufficiale...")
+            if dataset_type == "synthetic":
+                self._load_synthetic_data(hyperparameters)
+            else:
+                self._load_and_preprocess_real_shard(worker_index, hyperparameters)
+        self._cached_job_id = job_id
 
-   
         unpacked_model = pickle.loads(forest)
-        
+
         if isinstance(unpacked_model, list):
-            if self.is_regression():
+            from sklearn.tree import DecisionTreeRegressor as DTR
+            actual_is_regressor = isinstance(unpacked_model[0], DTR)
+
+            if actual_is_regressor != (tree_type == "regressor"):
+                print(
+                    f"[{self.worker_name}] [WARN] Mismatch tree_type: payload='{tree_type}' "
+                    f"ma alberi ricevuti={'Regressor' if actual_is_regressor else 'Classifier'}. "
+                    f"Uso il tipo reale degli alberi."
+                )
+
+            if actual_is_regressor:
                 rf = RandomForestRegressor(n_estimators=len(unpacked_model))
             else:
                 rf = RandomForestClassifier(n_estimators=len(unpacked_model))
                 rf.classes_ = np.array([0, 1], dtype=np.int64)
                 rf.n_classes_ = 2
-                
+
             rf.estimators_ = unpacked_model
             rf.n_features_in_ = self._cached_X_test.shape[1]
             rf.n_outputs_ = 1
             y_pred = rf.predict(self._cached_X_test)
         else:
             y_pred = unpacked_model.predict(self._cached_X_test)
-            
+
         return pickle.dumps({
             "y_pred": y_pred.tolist() if isinstance(y_pred, np.ndarray) else list(y_pred),
             "y_true": self._cached_y_test.tolist() if isinstance(self._cached_y_test, np.ndarray) else list(self._cached_y_test),
-            "n_samples": self.local_sample_count
+            "n_samples": len(self._cached_X_test)
         })
-
-   
+    
 
     def exposed_get_local_y_test(self) -> bytes:
         if self._cached_y_test is None:

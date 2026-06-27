@@ -54,7 +54,7 @@ def main():
         "queue_name": "centralized_queue" if mode == "centralized" else "federated_queue",
         "tree_class_reference": DecisionTreeClassifier if tree_type == "classifier" else DecisionTreeRegressor,
         "max_samples": None,  
-        "bootstrap": True if mode == "centralized" else False,  
+        "bootstrap": True ,  
     }
 
     # 4. Istanziamo il Worker corretto in base a SYS_MODE del file .env
@@ -63,7 +63,7 @@ def main():
         worker = CentralizedWorker(**common_params, target_column="Label")
     elif mode == "federated":
         print(f"[*] Istanziazione in corso: comportamento FEDERATO per {worker_name}")
-        worker = FederatedWorker(**common_params, target_column="Label")
+        worker = FederatedWorker(**common_params, target_column="Label", tree_type=tree_type)
     else:
         print(f"[ERRORE] SYS_MODE '{mode}' non valida nel file .env. Scegliere 'centralized' o 'federated'.")
         sys.exit(1)
