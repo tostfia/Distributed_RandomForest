@@ -1,11 +1,15 @@
 import json
 import os
+import socket
 import sys
-
+import threading
+from src.master.orchestrator.centralized import CentralizedOrchestrator
+from src.master.orchestrator.federated import FederatedOrchestrator
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
+from src.testing.engine import TestEngine
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -49,9 +53,27 @@ def load_hyperparameters_from_config(mode:str) -> Hyperparameters:
 
 def run_predefined_tests():
     """Esegue test predefiniti per verificare il sistema senza input utente."""
+    cfg = SystemConfig()
+    mode = getattr(cfg, "mode", "centralized").strip().lower()
+
+    ec2_id = os.environ.get("EC2_ID", "Locale")
+    hostname = socket.gethostname()
+    orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
+    if mode == "federated":
+        orchestrator = FederatedOrchestrator(orchestrator_name=orchestrator_name)
+    else:
+        orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
     print("\n=== AVVIO TEST DI SISTEMA PREDEFINITI ===")
-    print("[INFO] Funzionalità di test automatico globale non ancora implementata.")
-    return
+    try: 
+        orch_thread = threading.Thread(target=orchestrator.start, daemon = True)
+        orch_thread.start()
+        test_engine = TestEngine(config_path="testing/test_config.json", orchestrator=orchestrator)
+        test_engine.run_scenarios()
+    except Exception as e:
+        print(f"\n[ERRORE] Durante l'esecuzione dei test: {e}")
+
+
+    
 
 
 def handle_inference():
