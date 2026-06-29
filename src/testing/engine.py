@@ -8,18 +8,19 @@ from src.testing.scenarios.network import NetworkSimulationScenario
 from src.testing.scenarios.performance import PerformanceAndMetricsScenario
 from src.testing.scenarios.scalability import ScalabilityScenario
 
-
+CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), "test_config.json")
 
 class TestEngine:
     """Engine principale che orchestra l'esecuzione di tutte le suite di test."""
-    def __init__(self, config_path: str, orchestrator):
-        self.config_path = config_path
+    def __init__(self, orchestrator):
+        self.config_path = CONFIG_FILE_PATH
         self.orchestrator = orchestrator
         self.config = self._load_config()
         self.global_reports = {}
         self.worker_processes = []
 
     def _load_config(self) -> dict:
+
         try:
             with open(self.config_path, "r") as f:
                 return json.load(f)
@@ -35,8 +36,7 @@ class TestEngine:
             worker_name = f"Worker-Locale-{i:02d}"
             port = port_base + i -1
             print(f"[ENGINE SYSTEM] Avvio {worker_name} sulla porta {port}...")
-            #si blocca su macchine senza gui gnome-terminal
-            cmd = ["gnome-terminal", "--", "bash", "-c", f"python -m src.worker.main {worker_name} {port}; exec bash"]
+            cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.worker_processes.append(p)
         print(f"[ENGINE SYSTEM] Avvio dei {num_workers} Worker completato. Attendere 5 secondi per l'inizializzazione...")
@@ -119,8 +119,9 @@ class TestEngine:
         print(json.dumps(self.global_reports, indent=2))
         print("==================================================")
 
-        output_dir = "./.local_storage"
-        output_path = os.path.join(output_dir, "test_report.json")
+        output_dir = "./test_reports"
+        test_name = "all_tests" if len(self.global_reports) != 1 else next(iter(self.global_reports.keys()))
+        output_path = os.path.join(output_dir, f"test_report_{test_name}.json")
         
         try:
             

@@ -10,15 +10,11 @@ class NetworkSimulationScenario(BaseTestScenario):
 
     Supporta due modalità, configurabili via test_config.json:
 
-    - "apply_and_measure" (default): questo scenario applica lui stesso
+    -  questo scenario applica lui stesso
       il delay su 'lo' via tc, esegue il training RPC, poi ripristina.
-      Si usa quando lanci i test direttamente senza run_local.sh.
+      Si usa quando lanci i test direttamente senza run_local.sh."""
 
-    - "measure_only": il delay è già stato applicato da run_local.sh
-      prima dell'avvio del cluster. Lo scenario si limita a misurare
-      la latenza percepita senza toccare tc, evitando il doppio apply.
-      Si usa quando lanci con: ./run_local.sh delay
-    """
+    
 
     # ------------------------------------------------------------------ #
     # tc helpers                                                           #

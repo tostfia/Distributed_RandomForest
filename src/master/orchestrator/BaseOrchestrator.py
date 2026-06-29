@@ -19,6 +19,8 @@ class BaseOrchestrator(ABC):
         
         self.orchestrator_name = orchestrator_name
         self.queue_name = queue_name
+        self.connessioni_attive = []
+        self.connessioni_lock = threading.Lock()
         
         try:
             self.sqs_queue, self.state_manager = get_aws_services(self.environment)

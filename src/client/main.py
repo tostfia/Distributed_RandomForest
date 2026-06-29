@@ -67,7 +67,7 @@ def run_predefined_tests():
     try: 
         orch_thread = threading.Thread(target=orchestrator.start, daemon = True)
         orch_thread.start()
-        test_engine = TestEngine(config_path="testing/test_config.json", orchestrator=orchestrator)
+        test_engine = TestEngine(orchestrator=orchestrator)
         test_engine.run_scenarios()
     except Exception as e:
         print(f"\n[ERRORE] Durante l'esecuzione dei test: {e}")

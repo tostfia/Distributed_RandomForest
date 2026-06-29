@@ -116,8 +116,8 @@ class FederatedOrchestrator(BaseOrchestrator):
             
             
             results_lock = threading.Lock()
-            connessioni_attive = []
-            connessioni_lock = threading.Lock()
+            
+            
             active_worker_names = list(worker_names)
 
             def contact_worker(w_name, idx):
@@ -134,8 +134,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                             'keepalive': True
                         }
                     )
-                    with connessioni_lock:
-                        connessioni_attive.append(worker_conn)
+                    with self.connessioni_lock:
+                        self.connessioni_attive.append(worker_conn)
 
                     while len(all_trained_trees) < target_alberi:
                         try: 
@@ -211,9 +211,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                     if worker_conn:
                         try:
                             worker_conn.close()
-                            with connessioni_lock:
-                                if worker_conn in connessioni_attive:
-                                    connessioni_attive.remove(worker_conn)
+                            with self.connessioni_lock:
+                                if worker_conn in self.connessioni_attive:
+                                    self.connessioni_attive.remove(worker_conn)
                         except:
                             pass
             threads = []
@@ -306,8 +306,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         failed_workers = set()
 
         results_lock = threading.Lock()
-        connessioni_attive = []
-        connessioni_lock = threading.Lock()
         active_worker_names = list(worker_names)
 
         # 6. FUNZIONE CONSUMATRICE: una chiamata RPC per worker, foresta intera
@@ -323,8 +321,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                     w_info["host"], w_info["port"],
                     config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300}
                 )
-                with connessioni_lock:
-                    connessioni_attive.append(conn)
+                with self.connessioni_lock:
+                    self.connessioni_attive.append(conn)
 
                 print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
                 raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
@@ -356,9 +354,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                 if conn:
                     try:
                         conn.close()
-                        with connessioni_lock:
-                            if conn in connessioni_attive:
-                                connessioni_attive.remove(conn)
+                        with self.connessioni_lock:
+                            if conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(conn)
                     except:
                         pass
 
@@ -374,8 +372,8 @@ class FederatedOrchestrator(BaseOrchestrator):
             t.join()
 
         # Chiusura precauzionale connessioni residue
-        with connessioni_lock:
-            for conn in connessioni_attive:
+        with self.connessioni_lock:
+            for conn in self.connessioni_attive:
                 try: conn.close()
                 except Exception: pass
 

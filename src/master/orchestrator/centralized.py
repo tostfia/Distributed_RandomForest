@@ -202,8 +202,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 sub_start = sub_end
 
             results_lock = threading.Lock()
-            connessioni_attive = []
-            connessioni_lock = threading.Lock()
+            
             active_worker_names = list(worker_names)
 
             # 5. Definizione della funzione consumatrice per i thread
@@ -221,8 +220,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             'keepalive': True
                         }
                     )
-                    with connessioni_lock:
-                        connessioni_attive.append(worker_conn)
+                    with self.connessioni_lock:
+                        self.connessioni_attive.append(worker_conn)
                     
                     # ─── Il thread resta attivo finché non raccogliamo la quota di alberi globale ───
                     while len(all_trained_trees) < target_alberi:
@@ -305,9 +304,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     if worker_conn:
                         try:
                             worker_conn.close()
-                            with connessioni_lock:
-                                if worker_conn in connessioni_attive:
-                                    connessioni_attive.remove(worker_conn)
+                            with self.connessioni_lock:
+                                if worker_conn in self.connessioni_attive:
+                                    self.connessioni_attive.remove(worker_conn)
                         except:
                             pass
 
@@ -327,9 +326,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
 
             # Chiusura pulita delle connessioni
-            print(f"[*] Pulizia risorse: chiusura di {len(connessioni_attive)} connessioni RPyC residue...")
-            with connessioni_lock:
-                for conn in connessioni_attive:
+            print(f"[*] Pulizia risorse: chiusura di {len(self.connessioni_attive)} connessioni RPyC residue...")
+            with self.connessioni_lock:
+                for conn in self.connessioni_attive:
                     try: conn.close()
                     except Exception: pass
 
@@ -443,8 +442,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         predictions_chunks = self._load_inference_checkpoint(job_id)  # Tentativo di ripristino da checkpoint
         already_done_ranges = {start for start, _ in predictions_chunks}
         results_lock = threading.Lock()
-        connessioni_attive = []
-        connessioni_lock = threading.Lock()
+       
         active_worker_names = list(worker_names)
         
         while tree_start < total_trees:
@@ -478,8 +476,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         'keepalive': True
                     }
                 )
-                with connessioni_lock:
-                    connessioni_attive.append(worker_conn)
+                with self.connessioni_lock:
+                    self.onnessioni_attive.append(worker_conn)
                 
                 while True:
                     try:
@@ -540,9 +538,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 if worker_conn:
                     try:
                         worker_conn.close()
-                        with connessioni_lock:
-                            if worker_conn in connessioni_attive:
-                                connessioni_attive.remove(worker_conn)
+                        with self.connessioni_lock:
+                            if worker_conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(worker_conn)
                     except:
                         pass
          
@@ -564,8 +562,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
 
         # Chiusura precauzionale di socket RPyC rimasti aperti
-        with connessioni_lock:
-            for conn in connessioni_attive:
+        with self.connessioni_lock:
+            for conn in self.connessioni_attive:
                 try: conn.close()
                 except Exception: pass
 

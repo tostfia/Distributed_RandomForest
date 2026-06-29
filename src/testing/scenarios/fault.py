@@ -10,17 +10,25 @@ class FaultToleranceScenario(BaseTestScenario):
         print("\n--- [SCENARIO 5] Sperimentazione della Tolleranza ai Guasti (Kill Worker) ---")
         
         def kill_worker_target():
-            time.sleep(ft_cfg["kill_worker_after_seconds"])
+            
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
             # Logica per simulare il crash di un worker. 
             # Esempio: chiudere forzatamente una delle connessioni RPyC nell'orchestratore
-            if hasattr(self.orchestrator, "worker_channels") and self.orchestrator.worker_channels:
-                try:
-                    target_worker = list(self.orchestrator.worker_channels.keys())[0]
-                    self.orchestrator.worker_channels[target_worker].close()
-                    print(f"[TEST TRIGGER] Connessione con il Worker {target_worker} interrotta.")
-                except Exception as e:
-                    print(f"[TEST TRIGGER ERRORE] Impossibile chiudere il worker: {e}")
+            while not (hasattr(self.orchestrator, "connessioni_attive") and len(self.orchestrator.connessioni_attive) > 0):
+                time.sleep(ft_cfg["kill_worker_after_seconds"])
+            
+            print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
+            try:
+                with self.orchestrator.connessioni_lock:
+                    if self.orchestrator.connessioni_attive:
+                        # Prendiamo in modo sicuro la prima connessione aperta
+                        target_conn = self.orchestrator.connessioni_attive[0]
+                        target_conn.close()
+                        print("[TEST TRIGGER] Connessione RPyC interrotta con successo!")
+                    else:
+                        print("[TEST TRIGGER WARNING] Nessuna connessione attiva rimasta al momento del kill.")
+            except Exception as e:
+                print(f"[TEST TRIGGER ERRORE] Impossibile chiudere il worker: {e}")
 
         # Avvia il thread killer in background che agirà durante l'addestramento
         killer_thread = threading.Thread(target=kill_worker_target)
