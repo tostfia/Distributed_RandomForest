@@ -3,12 +3,12 @@ import os
 import subprocess
 import time
 
-from src.testing.scenarios import (
-    PerformanceAndMetricsScenario,
-    ScalabilityScenario,
-    NetworkSimulationScenario,
-    FaultToleranceScenario
-)
+from testing.scenarios.fault import FaultToleranceScenario
+from testing.scenarios.network import NetworkSimulationScenario
+from testing.scenarios.performance import PerformanceAndMetricsScenario
+from testing.scenarios.scalability import ScalabilityScenario
+
+
 
 class TestEngine:
     """Engine principale che orchestra l'esecuzione di tutte le suite di test."""
@@ -35,6 +35,7 @@ class TestEngine:
             worker_name = f"Worker-Locale-{i:02d}"
             port = port_base + i -1
             print(f"[ENGINE SYSTEM] Avvio {worker_name} sulla porta {port}...")
+            #si blocca su macchine senza gui gnome-terminal
             cmd = ["gnome-terminal", "--", "bash", "-c", f"python -m src.worker.main {worker_name} {port}; exec bash"]
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.worker_processes.append(p)
