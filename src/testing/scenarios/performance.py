@@ -1,6 +1,6 @@
 
 import time
-from testing.scenarios import BaseTestScenario
+from src.testing.scenarios.base import BaseTestScenario
 
 
 
