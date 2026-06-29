@@ -51,11 +51,7 @@ class ScalabilityScenario(BaseTestScenario):
                 duration = time.perf_counter() - start_time
                 
                 throughput = num_trees / duration if duration > 0 else 0
-                results[f"worker_count_{worker_count}"] = {
-                    "duration": duration,
-                    "throughput": throughput,
-                    "trees": num_trees
-                }
+                
                 print(f"-> Worker: {worker_count} | Tempo: {duration:.2f}s | Throughput: {throughput:.2f} alberi/s")
             
             finally:
@@ -64,4 +60,11 @@ class ScalabilityScenario(BaseTestScenario):
             
            
             
-        return results
+        return {
+            "scenario_description": "Analisi del throughput e della scalabilità debole al variare dei worker attivi.",
+            "environment": env, 
+            "total_registered_workers": total_available, 
+            "worker_counts_planned": scal_cfg["worker_counts_to_test"],
+            "worker_counts_executed": workers_to_test,
+            "metrics_per_scale": results
+        }

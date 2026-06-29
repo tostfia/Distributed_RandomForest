@@ -477,7 +477,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     }
                 )
                 with self.connessioni_lock:
-                    self.onnessioni_attive.append(worker_conn)
+                    self.connessioni_attive.append(worker_conn)
                 
                 while True:
                     try:

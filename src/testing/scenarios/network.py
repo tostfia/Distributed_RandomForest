@@ -142,14 +142,13 @@ class NetworkSimulationScenario(BaseTestScenario):
             duration = time.perf_counter() - t0
 
             return {
-                "mode": "network_test",
-                "status": "SUCCESS" if trees_built == n_trees else "PARTIAL",
-                "trees_built": trees_built,
-                "duration_seconds": duration,
-                "probe_rpc_latency_ms": round(probe_time * 1000, 2),
-                "applied_latency_ms": latency_ms if tc_applied else 0,
-                "applied_loss_percent": loss_percentage if tc_applied else 0,
-                "tc_rules_applied": tc_applied,
+                "scenario_description": "Valutazione dell'impatto dei ritardi e della perdita di pacchetti sulle chiamate RPC.",
+                "status": "SUCCESS" if trees_built == n_trees else "PARTIAL", 
+                "applied_latency_ms": latency_ms if tc_applied else 0, 
+                "applied_loss_percent": loss_percentage if tc_applied else 0, 
+                "probe_rpc_baseline_ms": round(probe_time * 1000, 2), 
+                "duration_seconds": duration, 
+                "tc_rules_successfully_injected": tc_applied 
             }
 
         finally:

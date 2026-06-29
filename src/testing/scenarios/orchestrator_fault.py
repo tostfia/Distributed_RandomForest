@@ -137,8 +137,10 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             print(f"\n[TEST FAILED] Failover fallito o timeout raggiunto. Alberi completati: {trees_built}/{target_alberi}")
 
         return {
-            "status": test_status,
-            "duration_seconds": duration,
-            "trees_built": trees_built,
-            "recovered_by": "Master-2-Standby" if job_completed else "None"
+            "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
+            "status": test_status, 
+            "original_leader": orch_leader.orchestrator_name, 
+            "recovered_by": "Master-2-Standby" if job_completed else "None", 
+            "duration_seconds": duration, 
+            "trees_built": trees_built 
         }

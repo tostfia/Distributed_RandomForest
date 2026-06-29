@@ -51,7 +51,9 @@ class FaultToleranceScenario(BaseTestScenario):
         
         status = "SUCCESS" if num_trees >= ft_cfg["expected_min_trees"] else "FAILED"
         return {
-            "status": status,
-            "duration_seconds": duration,
-            "trees_built": num_trees
+            "scenario_description": "Verifica della tolleranza ai guasti in caso di crash improvviso di un Worker RPC a metà computazione.",
+            "status": status, 
+            "kill_triggered_after_seconds": ft_cfg["kill_worker_after_seconds"], 
+            "trees_built": num_trees, 
+            "duration_seconds": duration 
         }
