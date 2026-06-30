@@ -60,6 +60,13 @@ def run_baseline():
         df_clean = loader.load()
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
         train_df, test_df = splitter.split(df_clean)
+        # Misura l'I/O di caricamento dei file grezzi dal disco
+        io_start_time = time.perf_counter()
+        # Istanziamo il RawCSVDataLoader passandogli la CARTELLA CACHE.
+        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
+        df_raw = loader.load()
+        io_time = time.perf_counter() - io_start_time
+        print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
     else:
         data_folder = getattr(sys_cfg, "dataset_path", None)
         
@@ -86,7 +93,7 @@ def run_baseline():
         # Istanziamo i componenti di trasformazione
         preprocessor = CICIDSPreprocessor(target_column=target_col)
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
-
+    
         print(" • Binarizzazione sul dato intero...")
         df_binarized = preprocessor.binarize_target(df_raw)
         
@@ -105,9 +112,9 @@ def run_baseline():
         test_df = fs.transform(test_df)
         dizionario_feature = fs.feature_summary_
         
-        etl_time = time.perf_counter() - preprocess_start_time
+        
         print(f"[OK] Trasformazione e Feature Selection completate in {etl_time:.4f} secondi.")
-    
+    etl_time = time.perf_counter() - preprocess_start_time
     # Separazione delle Feature dalle Label
     X_train = train_df.drop(columns=[target_col])
     y_train = train_df[target_col]
@@ -151,8 +158,9 @@ def run_baseline():
         verbose=1,
         random_state=RANDOM_SEED
     )
-
+    start_tuning = time.perf_counter()
     search.fit(X_train, y_train)
+    tempo_tuning = time.perf_counter() - start_tuning
     best_params = search.best_params_
     best_index = search.best_index_
     print(f"[OK] Tuning completato. Iperparametri ottimali: {best_params}")
@@ -196,11 +204,10 @@ def run_baseline():
         'test_accuracy': [search.cv_results_[f'split{i}_test_accuracy'][best_index] for i in range(5)],
         'test_precision': [search.cv_results_[f'split{i}_test_precision'][best_index] for i in range(5)],
         'test_recall': [search.cv_results_[f'split{i}_test_recall'][best_index] for i in range(5)],
-        'test_f1': [search.cv_results_[f'split{i}_test_f1'][best_index] for i in range(5)],
-        'fit_time': [search.cv_results_['mean_fit_time'][best_index]] * 5
+        'test_f1': [search.cv_results_[f'split{i}_test_f1'][best_index] for i in range(5)]
     }
     tempo_medio_fold_tuning = search.cv_results_['mean_fit_time'][best_index]
-    tempo_totale_tuning_config = tempo_medio_fold_tuning * 5
+    
 
     # ---------------------------------------------------------
     # FASE 4: ADDESTRAMENTO FINALE & INFERENZA LOCALE
@@ -242,7 +249,7 @@ def run_baseline():
         "modello_addestrato": tree_clf,
         "features_mappate": list(X_train.columns),
         "baseline_tempi_locali": {
-            "tempo_totale_cv": tempo_totale_tuning_config,
+            "tempo_totale_cv": tempo_tuning,
             "tempo_medio_fold": tempo_medio_fold_tuning,
             "t_seq": t_seq,
             "tempo_inferenza_totale": tempo_inferenza_totale
@@ -268,8 +275,7 @@ def run_baseline():
               f"{cv_results_extracted['test_accuracy'][i]*100:10.2f}% | "
               f"{cv_results_extracted['test_precision'][i]*100:10.2f}% | "
               f"{cv_results_extracted['test_recall'][i]*100:10.2f}% | "
-              f"{cv_results_extracted['test_f1'][i]*100:10.2f}% | "
-              f"{cv_results_extracted['fit_time'][i]:.3f}s")
+              f"{cv_results_extracted['test_f1'][i]*100:10.2f}% | ")
     print(LINEA_SINGOLA)
 
     print(f"\n2. METRICHE AGGREGATE DA TUNING (MEDIE ± DEVIAZIONE STANDARD)")
@@ -297,7 +303,7 @@ def run_baseline():
 
     print(f"\n4. DIAGNOSTICA TEMPORALE E PROFILAZIONE HARDWARE")
     print(LINEA_SINGOLA)
-    print(f"  • Tempo Totale di Cross-Validation     : {tempo_totale_tuning_config:8.4f} s")
+    print(f"  • Tempo Totale di Cross-Validation     : {tempo_tuning:8.4f} s")
     print(f"  • Tempo Medio per Singolo Fold (CV)    : {tempo_medio_fold_tuning:8.4f} s")
     print(f"  • Tempo di Caricamento Dati (I/O)      : {io_time:8.4f} s")
     print(f"  • Tempo di Trasformazione (Process)    : {etl_time:8.4f} s")
