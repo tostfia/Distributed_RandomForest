@@ -225,21 +225,39 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
 
     # 4. Configurazione Iperparametri
-    print(f"\n[4] Configurazione Iperparametri ({'SINTETICO/Regressione' if dataset_type == 'synthetic' else 'REALE/Classificazione'}):")
+    print(f"\n[4] Configurazione Iperparametri:")
+    
+    # LOGICA: Chiedi il tipo di task SOLO se il dataset è sintetico
+    selected_tree_type = "classifier" # Default
+    if dataset_type == "synthetic":
+        print("  [INFO] Dataset SINTETICO rilevato.")
+        print("  Scegli il tipo di esperimento:")
+        print("    [1] Classificazione")
+        print("    [2] Regressione")
+        task_choice = get_input("  Scelta [Default: 1]: ", "1")
+        selected_tree_type = "classifier" if task_choice == "1" else "regressor"
+    else:
+        print("  [INFO] Dataset REALE rilevato (uso default dalla baseline).")
+
     try:
         hp_obj = load_hyperparameters_from_config(mode, dataset_type)
-        print(f"  [OK] Iperparametri caricati da baseline: n_estimators={hp_obj.n_estimators}, max_depth={hp_obj.max_depth}, class_weight={hp_obj.class_weight}, bootstrap={hp_obj.bootstrap}, max_samples={hp_obj.max_samples}, tree_type={hp_obj.tree_type}")
-    except FileNotFoundError as e:
-        print(f"\n[ERRORE] {e}")
-        return
+        
+        # Sovrascriviamo il tipo di task nell'oggetto HP
+        hp_obj.tree_type = selected_tree_type
+        
+        # Pulizia opzionale: se è regressione, togliamo i pesi di classe
+        if selected_tree_type == "regressor":
+            hp_obj.class_weight = None
+
+        print(f"  [OK] Task configurato come: {hp_obj.tree_type.upper()}")
+        print(f"  [OK] Parametri: n_estimators={hp_obj.n_estimators}, max_depth={hp_obj.max_depth}")
+        
     except Exception as e:
-        print(f"\n[ERRORE] Impossibile caricare gli iperparametri dalla baseline: {e}")
+        print(f"\n[ERRORE] Impossibile caricare gli iperparametri: {e}")
         return   
             
-
     # 5. Validazione Pydantic
     try:
-        
         
         request = TrainingRequest(
             environment=environment,
@@ -285,21 +303,28 @@ def handle_baseline_selection():
     
     dtype = "synthetic" if choice == "2" else "real"
     
-    # Prepariamo la configurazione di boot minima per la baseline
+    # AGGIORNAMENTO: Chiedi la natura del task se viene selezionato il dataset sintetico
+    selected_tree_type = "classifier"
+    if dtype == "synthetic":
+        print("\n  Scegli il tipo di esperimento per la baseline sintetica:")
+        print("    [1] Classificazione")
+        print("    [2] Regressione")
+        task_choice = get_input("  Scelta [Default: 1]: ", "1")
+        selected_tree_type = "classifier" if task_choice == "1" else "regressor"
+
+    # Prepariamo la configurazione di boot da condividere con run_baseline()
     boot_config = {
-        "dataset_type": dtype
+        "dataset_type": dtype,
+        "tree_type": selected_tree_type
     }
     
-    # Usiamo il path centralizzato CONFIG_PATH (./.local_storage/config.json) 
-    # o assicurati che run_baseline legga dallo stesso path.
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(boot_config, f, indent=2)
-    print(f"[OK] Boot configuration registrata per dataset: {dtype.upper()}")
+    print(f"[OK] Boot configuration registrata: {dtype.upper()} | TASK: {selected_tree_type.upper()}")
         
     # Avviamo il processo analitico isolato
     run_baseline()
-
 
 def main():
     while True:

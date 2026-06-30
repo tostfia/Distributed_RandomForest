@@ -40,6 +40,7 @@ def run_baseline():
     OUTPUT_DIR = "./outputs_baseline"
     REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config.json")
     dataset_type = "real"
+    user_tree_type = "classifier"
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
@@ -54,6 +55,7 @@ def run_baseline():
             try:
                 tmp_cfg = json.load(f)
                 dataset_type = tmp_cfg.get("dataset_type", "real")
+                user_tree_type = tmp_cfg.get("tree_type", "classifier")
                 print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except Exception as e:
                 print(f" [ATTENZIONE] Errore nel parsing di {BOOT_CONFIG_PATH}: {e}")
@@ -62,13 +64,21 @@ def run_baseline():
         print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
     if dataset_type == "synthetic":
-
         if not os.path.exists(REAL_CONFIG_PATH):
             raise FileNotFoundError(
                 f"Per eseguire la baseline sintetica serve aver già eseguito il tuning sul "
                 f"dataset reale: '{REAL_CONFIG_PATH}' non trovato. Eseguire prima la baseline "
                 f"sul dataset reale (opzione 1)."
             )
+        else:
+            print(f" [INFO] '{REAL_CONFIG_PATH}' non trovato. Uso iperparametri di fallback di default.")
+            best_hp_reale = {
+                "n_estimators": 10,
+                "max_depth": 10,
+                "min_samples_split": 2,
+                "bootstrap": True,
+                "max_samples": 1.0
+            }
         with open(REAL_CONFIG_PATH, "r") as f:
             real_config = json.load(f)
         best_hp_reale = real_config["hyperparameters"]
@@ -91,9 +101,12 @@ def run_baseline():
         n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
         noise = tmp_cfg.get("noise", 10.0)
 
-        print(f" • Tipo Dataset: Sintetico (Stress Test Task 2 - REGRESSIONE)")
+        task_str = "regression" if user_tree_type == "regressor" else "classification"
+        print(f" • Tipo Dataset: Sintetico (Stress Test Task - {user_tree_type.upper()})")
+
+        # Corretto il typo "ttask" -> "task"
         loader = SyntheticDataLoader(
-            task="regression",
+            task=task_str,
             n_samples=n_samples,
             n_features=n_features,
             random_seed=RANDOM_SEED,
@@ -118,18 +131,13 @@ def run_baseline():
         print(f" • Cartella sorgente identificata per dati reali: '{data_folder}'")
         print(f" • Tipo Dataset: Reale (Campionamento probabilistico 1%, Seed: {RANDOM_SEED})")
 
-        # [TIMER 1]: Misura l'I/O di caricamento dei file grezzi dal disco
         io_start_time = time.perf_counter()
-        # 2. Istanziamo il RawCSVDataLoader passandogli la CARTELLA CACHE.
         loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=SAMPLE_FRACTION, dataset_seed=RANDOM_SEED)
         df_raw = loader.load()
         io_time = time.perf_counter() - io_start_time
         print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
 
-        # [TIMER 2]: Parte esattamente prima di istanziare i componenti di trasformazione computazionale
         preprocess_start_time = time.perf_counter()
-        
-        # Istanziamo i componenti di trasformazione
         preprocessor = CICIDSPreprocessor(target_column=target_col)
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
     
@@ -152,7 +160,6 @@ def run_baseline():
         dizionario_feature = fs.feature_summary_
         etl_time = time.perf_counter() - preprocess_start_time
 
-    # Separazione delle Feature dalle Label
     X_train = train_df.drop(columns=[target_col])
     y_train = train_df[target_col]
     X_test = test_df.drop(columns=[target_col])
@@ -168,11 +175,10 @@ def run_baseline():
     config_path_final = os.path.join(OUTPUT_DIR, "config.json")
     pickle_path_final = os.path.join(
         OUTPUT_DIR,
-        "baseline_random_forest_regressione.pkl" if dataset_type == "synthetic" else "baseline_random_forest_completa.pkl"
+        f"baseline_random_forest_{user_tree_type}.pkl" if dataset_type == "synthetic" else "baseline_random_forest_completa.pkl"
     )
 
     if dataset_type == "real":
-
     # ---------------------------------------------------------
     # FASE 2: TUNING MULTI-METRICA (RandomizedSearch 5-Fold)
     # ---------------------------------------------------------
@@ -237,7 +243,7 @@ def run_baseline():
                 "class_weight": best_params.get("class_weight", None),
                 "bootstrap": best_booststrap,
                 "max_samples": float(best_params.get("max_samples", 1.0)) if best_booststrap else 1.0,
-                "tree_type": "classifier",
+                "tree_type": user_tree_type,
                 "target_column": target_col,
                 "random_state": int(RANDOM_SEED)
             }
@@ -247,7 +253,6 @@ def run_baseline():
             json.dump(config_data, f, indent=2)
         print(f"[OK] Manifesto 'config.json' salvato correttamente in: '{config_path_final}'")
 
-        # Estrazione metriche storiche aggregate
         cv_results_extracted = {
             'test_accuracy': [search.cv_results_[f'split{i}_test_accuracy'][best_index] for i in range(5)],
             'test_precision': [search.cv_results_[f'split{i}_test_precision'][best_index] for i in range(5)],
@@ -257,11 +262,10 @@ def run_baseline():
         tempo_medio_fold_tuning = search.cv_results_['mean_fit_time'][best_index]
     
     else:
-    
         print("\n>>> FASE 2: SALTATA — riuso iperparametri ottenuti dal tuning sul dataset reale")
         tempo_tuning = 0.0
         tempo_medio_fold_tuning = 0.0
-        cv_results_extracted = None  # nessuna cross-validation per il sintetico
+        cv_results_extracted = None  
 
         best_bootstrap = bool(best_hp_reale.get("bootstrap", True))
         config_data = {
@@ -276,17 +280,17 @@ def run_baseline():
                 "min_samples_split": int(best_hp_reale.get("min_samples_split", 2)),
                 "bootstrap": best_bootstrap,
                 "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
-                "tree_type": "regressor",
+                "tree_type": user_tree_type, # Modificato da "regressor" a dinamico user_tree_type
                 "target_column": target_col,
                 "random_state": int(RANDOM_SEED)
             }
         }
 
-        # File separato per non sovrascrivere il config.json del tuning reale
         config_path_synthetic = os.path.join(OUTPUT_DIR, "config_synthetic.json")
         with open(config_path_synthetic, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
-        print(f"[OK] Manifesto sintetico (regressione) salvato in: '{config_path_synthetic}'")
+        print(f"[OK] Manifesto sintetico ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+
     # ---------------------------------------------------------
     # FASE 4: ADDESTRAMENTO FINALE & INFERENZA LOCALE
     # ---------------------------------------------------------
@@ -304,8 +308,9 @@ def run_baseline():
     if hp["bootstrap"]:
         rf_kwargs["max_samples"] = hp["max_samples"]
 
-    if dataset_type == "real":
-        rf_kwargs["class_weight"] = hp["class_weight"]
+    if user_tree_type == "classifier":
+        if dataset_type == "real":
+            rf_kwargs["class_weight"] = hp["class_weight"]
         tree_clf = RandomForestClassifier(**rf_kwargs)
     else:
         tree_clf = RandomForestRegressor(**rf_kwargs)
@@ -318,23 +323,23 @@ def run_baseline():
     print("\n[LOCAL] Calcolo delle predizioni e latenza sul Test Set indipendente...")
     start_inferenza = time.perf_counter()
     local_preds = tree_clf.predict(X_test)
-    if dataset_type == "real":
+    
+    # Gestione delle probabilità legata al TASK, non al dataset
+    if user_tree_type == "classifier":
         local_proba = tree_clf.predict_proba(X_test)[:, 1]
     else:
         local_proba = None
     tempo_inferenza_totale = time.perf_counter() - start_inferenza
 
     # ---------------------------------------------------------
-    # Valutazione, diramata per tipo di task
+    # Valutazione, diramata per tipo di task (user_tree_type)
     # ---------------------------------------------------------
-    if dataset_type == "real":
-        local_proba = tree_clf.predict_proba(X_test)[:, 1]
+    if user_tree_type == "classifier":
         test_accuracy = np.mean(local_preds == y_test)
         test_precision = precision_score(y_test, local_preds, zero_division=0)
         test_recall = recall_score(y_test, local_preds, zero_division=0)
         test_f1 = f1_score(y_test, local_preds, zero_division=0)
-        test_roc_auc = roc_auc_score(y_test, local_proba)
-        fpr, tpr, thresholds = roc_curve(y_test, local_proba)
+        test_roc_auc = roc_auc_score(y_test, local_proba) if local_proba is not None else 0.0
         cm = confusion_matrix(y_test, local_preds)
 
         metriche_test = {
@@ -357,7 +362,6 @@ def run_baseline():
             "r2": test_r2
         }
 
-    # Persistenza coordinata dei metadati locali
     metadata_pipeline = {
         "modello_addestrato": tree_clf,
         "features_mappate": list(X_train.columns),
@@ -375,7 +379,7 @@ def run_baseline():
     print(f"[OK] Pipeline locale (file .pkl) salvata in: '{pickle_path_final}'")
 
     # ---------------------------------------------------------
-    # FASE 5: OUTPUT REPORT COMPLETO
+    # FASE 5: OUTPUT REPORT COMPLETO Condizionato sul Task
     # ---------------------------------------------------------
     print("\n" + DOPPIA_LINEA)
     print(f"{'REPORT ESTESO DI VALIDAZIONE E BENCHMARK':^{LUNGHEZZA_LINEA}}")
@@ -411,9 +415,9 @@ def run_baseline():
         print(LINEA_SINGOLA)
         print(f"  ▸ Iperparametri applicati: {hp}")
 
-    print(f"\n3. PERFORMANCE REALI SUL TEST SET ({'CLASSIFICAZIONE' if dataset_type == 'real' else 'REGRESSIONE'})")
+    print(f"\n3. PERFORMANCE REALI SUL TEST SET ({user_tree_type.upper()})")
     print(LINEA_SINGOLA)
-    if dataset_type == "real":
+    if user_tree_type == "classifier":
         print(f"  ▸ ACCURACY SUL TEST SET   : {metriche_test['accuracy'] * 100:6.2f}%")
         print(f"  ▸ PRECISION SUL TEST SET  : {metriche_test['precision'] * 100:6.2f}%")
         print(f"  ▸ RECALL SUL TEST SET     : {metriche_test['recall'] * 100:6.2f}%")
