@@ -53,10 +53,12 @@ class TestEngine:
                 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.worker_processes.append(p)
             print(f"[ENGINE SYSTEM] Avvio dei {num_workers} Worker completato. Attendere 5 secondi per l'inizializzazione...")
-            time.sleep(5)  # Attendere che i worker siano pronti
+            time.sleep(5)
 
     def _wait_for_docker_workers(self,timeout = 60, poll_interval = 2):
-        env = getattr(self.orchestrator, "environment", "local")
+
+        env = os.environ.get("ENV_MODE", getattr(self.orchestrator, "environment", "local"))
+
         waited = 0
         while waited < timeout:
             try: 
@@ -128,7 +130,6 @@ class TestEngine:
                 self._print_final_summary()
         finally:
             self._cleanup_workers()
-            
     
     def _run_all_scenarios(self):
         print("\n--- Esecuzione di tutti gli scenari di test ---")

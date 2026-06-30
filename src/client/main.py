@@ -64,14 +64,24 @@ def run_predefined_tests():
     ec2_id = os.environ.get("EC2_ID", "Locale")
     hostname = socket.gethostname()
     orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
+    
+    running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
+
     if mode == "federated":
         orchestrator = FederatedOrchestrator(orchestrator_name=orchestrator_name)
     else:
         orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
+        
     print("\n=== AVVIO TEST DI SISTEMA PREDEFINITI ===")
     try: 
-        orch_thread = threading.Thread(target=orchestrator.start, daemon = True)
-        orch_thread.start()
+        # Lanciamo il thread dell'orchestratore SOLO se siamo fuori da Docker (in locale puro).
+        if not running_in_docker:
+            print("[INFO] Avvio dell'Orchestratore locale in un thread dedicato...")
+            orch_thread = threading.Thread(target=orchestrator.start, daemon=True)
+            orch_thread.start()
+        else:
+            print("[INFO] Esecuzione in Docker rilevata. L'Orchestratore principale è già attivo in background.")
+
         test_engine = TestEngine(orchestrator=orchestrator)
         test_engine.run_scenarios()
     except Exception as e:
