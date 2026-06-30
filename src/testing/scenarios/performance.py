@@ -4,9 +4,9 @@ from src.testing.scenarios.base import BaseTestScenario
 from sklearn.metrics import precision_score, recall_score, f1_score
 import numpy as np
 class PerformanceAndMetricsScenario(BaseTestScenario):
-    """Copre lo Scenario 1 e 4: Valutazione Prestazioni (Classif./Regr.) e Analisi Metriche."""
+    """Copre lo Scenario 1: Valutazione Prestazioni (Classif./Regr.) e Analisi Metriche."""
     def run(self) -> dict:
-        print(f"\n--- [SCENARIO 1 & 4] Test Prestazioni e Metriche per: {self.config['selected_task']} ---")
+        print(f"\n--- [SCENARIO 1 ] Test Prestazioni e Metriche per: {self.config['selected_task']} ---")
         task_type = self.config["selected_task"]
         target_trees = self.config["target_trees"]
         job_id = f"test_perf_{int(time.time())}"
@@ -23,7 +23,7 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         
         start_time = time.perf_counter()
         # Invoca la logica dell'orchestrator passato come dipendenza
-        num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=42)
+        num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
         end_time = time.perf_counter()
         
         duration = end_time - start_time
@@ -52,7 +52,11 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         def intercept_metrics_federated(y_pred, y_true, tree_type, **kwargs):
             nonlocal accuracy_metrics
             if tree_type == "classifier":
-                final_predictions = y_pred.astype(int)
+                if np.issubdtype(y_pred.dtype, np.floating):
+                    final_predictions = (y_pred >= 0.5).astype(int)
+                else:
+                    final_predictions = y_pred.astype(int)
+                    
                 y_true = y_true.astype(int)
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_true)),

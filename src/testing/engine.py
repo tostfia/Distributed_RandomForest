@@ -2,7 +2,12 @@ import json
 import os
 import subprocess
 import time
-
+import socket
+import threading
+from src.shared.config import SystemConfig
+from src.master.orchestrator.centralized import CentralizedOrchestrator
+from src.master.orchestrator.federated import FederatedOrchestrator
+from src.shared.binding.serviceregistry import ServiceRegistry
 from src.testing.scenarios.fault import FaultToleranceScenario
 from src.testing.scenarios.network import NetworkSimulationScenario
 from src.testing.scenarios.performance import PerformanceAndMetricsScenario
@@ -20,6 +25,8 @@ class TestEngine:
         self.global_reports = {}
         self.worker_processes = []
 
+        self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
+
     def _load_config(self) -> dict:
 
         try:
@@ -30,20 +37,47 @@ class TestEngine:
             return {"selected_task": "classifier", "dataset_path": "synthetic/synthetic_dataset.csv"}
         
     def _start_local_workers(self):
-        print("\n[ENGINE SYSTEM] Avvio automatico dei Worker in background...")
-        num_workers = int(os.environ.get("NUM_WORKERS", 2))
-        port_base = 18861
-        for i in range(1, num_workers + 1):
-            worker_name = f"Worker-Locale-{i:02d}"
-            port = port_base + i -1
-            print(f"[ENGINE SYSTEM] Avvio {worker_name} sulla porta {port}...")
-            cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.worker_processes.append(p)
-        print(f"[ENGINE SYSTEM] Avvio dei {num_workers} Worker completato. Attendere 5 secondi per l'inizializzazione...")
-        time.sleep(5)  # Attendere che i worker siano pronti
+        if self.running_in_docker:
+            print("[ENGINE SYSTEM] Esecuzione in ambiente Docker rilevata. I Worker sono già avviati.")
+            self._wait_for_docker_workers()
+            return
+        else:
+            print("\n[ENGINE SYSTEM] Avvio automatico dei Worker in background...")
+            num_workers = int(os.environ.get("NUM_WORKERS", 2))
+            port_base = 18861
+            for i in range(1, num_workers + 1):
+                worker_name = f"Worker-Locale-{i:02d}"
+                port = port_base + i -1
+                print(f"[ENGINE SYSTEM] Avvio {worker_name} sulla porta {port}...")
+                cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
+                p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.worker_processes.append(p)
+            print(f"[ENGINE SYSTEM] Avvio dei {num_workers} Worker completato. Attendere 5 secondi per l'inizializzazione...")
+            time.sleep(5)  # Attendere che i worker siano pronti
+
+    def _wait_for_docker_workers(self,timeout = 60, poll_interval = 2):
+        env = getattr(self.orchestrator, "environment", "local")
+        waited = 0
+        while waited < timeout:
+            try: 
+                workers = ServiceRegistry.get_available_workers(env)
+            except Exception as e:
+                print(f"[ENGINE SYSTEM] Errore durante il recupero dei worker disponibili: {e}")
+                workers = {}
+            if workers:
+                print(f"[ENGINE SYSTEM] Rilevati {len(workers)} Worker disponibili in Docker.")
+                return
+            time.sleep(poll_interval)
+            waited += poll_interval
+        print(f"[ENGINE SYSTEM WARNING] Nessun Worker disponibile rilevato in Docker dopo {timeout} secondi. Continuo comunque l'esecuzione dei test.")
+
+              
+                
 
     def _cleanup_workers(self):
+        if self.running_in_docker:
+            print("[ENGINE SYSTEM] Esecuzione in ambiente Docker rilevata. Non arresto i Worker Docker.")
+            return
         print("\n[ENGINE SYSTEM] Arresto dei Worker in background...")
         for p in self.worker_processes:
             try: 
@@ -143,3 +177,28 @@ class TestEngine:
             print(f"[ENGINE SYSTEM] Report delle metriche salvato in: '{output_path}'")
         except IOError as e:
             print(f"[ENGINE ERRORE] Impossibile salvare il report su disco: {e}")
+
+
+
+if __name__ == "__main__":
+    
+
+    cfg = SystemConfig()
+    mode = getattr(cfg, "mode", "centralized").strip().lower()
+
+    ec2_id = os.environ.get("EC2_ID", "Locale")
+    hostname = socket.gethostname()
+    orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
+
+    if mode == "federated":
+        orchestrator = FederatedOrchestrator(orchestrator_name=orchestrator_name)
+    else:
+        orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
+
+    print("\n=== AVVIO TEST DI SISTEMA PREDEFINITI (DOCKER ENTRY POINT) ===")
+
+    orch_thread = threading.Thread(target=orchestrator.start, daemon=True)
+    orch_thread.start()
+
+    test_engine = TestEngine(orchestrator=orchestrator)
+    test_engine.run_scenarios()

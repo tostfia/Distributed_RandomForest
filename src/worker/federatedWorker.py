@@ -124,12 +124,17 @@ class FederatedWorker(BaseWorker):
             # Se ancora non lo trova ed è a 0, metti un default di sicurezza (es. 1)
             if self.worker_index == 0:
                 self.worker_index = 1
+
+        index_was_explicit = bool(env_index and env_index.isdigit())
         # Gestione asimmetrica della cache locale in base all'ambiente
         if self.environment == "aws":
             self.local_cache_dir = f"/tmp/{worker_name}_cache"
-        else:
+        elif index_was_explicit:
             worker_id_uniforme = f"Worker-Locale-0{self.worker_index}" if self.worker_index < 9 else f"Worker-Locale-{self.worker_index}"
             self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
+        else:
+           
+            self.local_cache_dir = os.path.join("./workers_cache", worker_name)
             
         os.makedirs(self.local_cache_dir, exist_ok=True)
 

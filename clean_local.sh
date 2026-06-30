@@ -5,11 +5,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # Definisce i percorsi
 TARGET_DIRS=(
-    "$SCRIPT_DIR/.local_storage"
-    "$SCRIPT_DIR/saved_models"
+    "$SCRIPT_DIR/.local_storage/"
+    "$SCRIPT_DIR/saved_models/"
+    "$SCRIPT_DIR/workers_cache/"
 )
 
-echo "[CLEANUP] Avvio pulizia delle cartelle di progetto..."
+echo "[CLEANUP] Avvio pulizia selettiva dei contenuti..."
 
 for DIR in "${TARGET_DIRS[@]}"; do
     if [ ! -d "$DIR" ]; then
@@ -17,14 +18,15 @@ for DIR in "${TARGET_DIRS[@]}"; do
         continue
     fi
 
-    echo "Pulizia in corso nella cartella: $DIR"
+    echo "Svuotamento dei contenuti in: $DIR"
 
-    find "$DIR" -maxdepth 1 \
-        ! -name "." \
+    # MODIFICA: 'mindepth 1' evita di toccare la cartella radice.
+    # L'esclusione di .gitkeep protegge il file di placeholder.
+    find "$DIR" -mindepth 1 \
         ! -name ".gitkeep" \
         -exec rm -rf {} +
 
-    echo " [OK] Contenuto di $DIR pulito (tranne .gitkeep)."
+    echo " [OK] Contenuto di $DIR svuotato (struttura radice e .gitkeep preservati)."
 done
 
-echo -e "[CLEANUP] Pulizia completata!\n"
+echo -e "[CLEANUP] Pulizia completata con successo!\n"
