@@ -28,8 +28,12 @@ def run_baseline():
     print("   AVVIO FASE TUNING & BASELINE SPECULARE AL CLUSTER ")
     print("=====================================================\n")
 
-    # Seme globale sincronizzato con il cluster e Colab
+    # Variabili di configurazione
     RANDOM_SEED = 123
+    TEST_SIZE = 0.2
+    SAMPLE_FRACTION = 0.01
+    CORRELATION_THRESHOLD = 0.05
+
     target_col = "Label"
     BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
     SYNTHETIC_CONFIG_PATH = os.path.join("./synthetic", "synthetic_config.json")
@@ -66,10 +70,10 @@ def run_baseline():
                 except Exception as e:
                     print(f" [ATTENZIONE] Errore nel parsing di {SYNTHETIC_CONFIG_PATH}: {e}")
                     pass
-        n_samples = tmp_cfg.get("n_samples", 100000)
-        n_features = tmp_cfg.get("n_features", 20)
+        n_samples = tmp_cfg.get("n_samples", 500000)
+        n_features = tmp_cfg.get("n_features", 30)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
-        n_redundant = tmp_cfg.get("n_redundant", 2)
+        n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
         flip_y = tmp_cfg.get("flip_y", 0.01)
         weight = tmp_cfg.get("weight", [0.9, 0.1])
@@ -85,12 +89,12 @@ def run_baseline():
                                      flip_y=flip_y,
                                      weight=weight)
         df_clean = loader.load()
-        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
+        splitter = StratifiedDataSplitter(target_column=target_col, test_size=TEST_SIZE, random_state=RANDOM_SEED)
         train_df, test_df = splitter.split(df_clean)
         # Misura l'I/O di caricamento dei file grezzi dal disco
         io_start_time = time.perf_counter()
         # Istanziamo il RawCSVDataLoader passandogli la CARTELLA CACHE.
-        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
+        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=SAMPLE_FRACTION, dataset_seed=RANDOM_SEED)
         df_raw = loader.load()
         io_time = time.perf_counter() - io_start_time
         print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
@@ -109,7 +113,7 @@ def run_baseline():
         # [TIMER 1]: Misura l'I/O di caricamento dei file grezzi dal disco
         io_start_time = time.perf_counter()
         # 2. Istanziamo il RawCSVDataLoader passandogli la CARTELLA CACHE.
-        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
+        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=SAMPLE_FRACTION, dataset_seed=RANDOM_SEED)
         df_raw = loader.load()
         io_time = time.perf_counter() - io_start_time
         print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
@@ -134,7 +138,7 @@ def run_baseline():
         test_df = preprocessor.process(test_df)
 
         print(" • Applicazione Feature Selection Bilaterale...")
-        fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
+        fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=CORRELATION_THRESHOLD)
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
         dizionario_feature = fs.feature_summary_

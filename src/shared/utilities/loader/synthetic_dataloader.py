@@ -42,10 +42,10 @@ class SyntheticDataLoader(DatasetLoader):
                 print(f"Errore durante la lettura del file di configurazione: {e}")
 
         # La proporzione di feature informative è fissa all'80% per garantire un certo grado di complessità.
-        self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 100000)
-        self.n_features = n_features if n_features is not None else config.get("n_features", 20)
+        self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 500000)
+        self.n_features = n_features if n_features is not None else config.get("n_features", 30)
         self.n_informative = n_informative if n_informative is not None else config.get("n_informative", int(self.n_features * 0.35))
-        self.n_redundant = n_redundant if n_redundant is not None else config.get("n_redundant", 2)
+        self.n_redundant = n_redundant if n_redundant is not None else config.get("n_redundant", 5)
         self.n_clusters_per_class = n_clusters_per_class if n_clusters_per_class is not None else config.get("n_clusters_per_class", 2)
         self.flip_y = flip_y if flip_y is not None else config.get("flip_y", 0.01)
         self.weight = weight if weight is not None else config.get("weight", [0.9, 0.1])
