@@ -7,6 +7,7 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
+      - NUM_WORKERS=${NUM_WORKERS:-2}
       - ENV_MODE=${ENV_MODE:-local}
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - EC2_ID=${EC2_ID:-Locale}
@@ -45,7 +46,6 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-centralized}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
-      - WORKER_INDEX={{.Task.Slot}}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z
