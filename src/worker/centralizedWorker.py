@@ -6,11 +6,8 @@ from src.worker.BaseWorker import BaseWorker
 
 
 class CentralizedWorker(BaseWorker):
-    """Worker per la gestione dell'addestramento in modalità centralizzata.
     
-    Carica il dataset tramite il DAO specifico per l'ambiente e separa
-    le feature dalla colonna target convertendole in matrici NumPy.
-    """
+    """Worker per la gestione dell'addestramento in modalità centralizzata."""
 
     def __init__(
         self,
@@ -22,7 +19,6 @@ class CentralizedWorker(BaseWorker):
         bootstrap: bool = True,
         tree_type: str = "classifier"
     ):
-        # Passiamo i parametri alla classe base (l'ambiente viene letto in automatico dal .env)
         super().__init__(
             worker_name=worker_name,
             queue_name=queue_name,
@@ -80,7 +76,6 @@ class CentralizedWorker(BaseWorker):
         y_df = df[actual_target]
         X_df = df.drop(columns=[actual_target])
 
-        # Conversione esplicita in matrici NumPy stabili per Scikit-Learn
         X = X_df.to_numpy(dtype=np.float64)
         if y_df.dtype == 'object' or y_df.nunique() > 20:
             y = y_df.to_numpy(dtype=np.float64)
