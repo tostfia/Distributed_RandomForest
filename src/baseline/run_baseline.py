@@ -35,10 +35,10 @@ def run_baseline():
     CORRELATION_THRESHOLD = 0.05
 
     target_col = "Label"
-    BOOT_CONFIG_PATH = os.path.join("./.local_storage", "real_config.json")
+    BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
     SYNTHETIC_CONFIG_PATH = os.path.join("./synthetic", "synthetic_config.json")
     OUTPUT_DIR = "./outputs_baseline"
-    REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config.json")
+    REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "real_config.json")
     dataset_type = "real"
     user_tree_type = "classifier"
     
