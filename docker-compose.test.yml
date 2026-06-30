@@ -1,0 +1,31 @@
+# docker-compose.test.yml
+#
+# Override da usare INSIEME al docker-compose.yml principale per eseguire
+# la suite di test (TestEngine) invece dell'orchestrator di produzione.
+#
+# Uso consigliato (per via dell'input() interattivo, vedi note sotto):
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d worker
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml run --rm orchestrator
+#
+# Note:
+# - orchestrator.deploy.replicas forzato a 1: lo Scenario 5
+#   (OrchestratorFailoverScenario) istanzia GIA' lui stesso un secondo
+#   orchestratore di standby in-process. Con 2 repliche reali in più,
+#   avresti più "leader" in competizione sul lock, falsando lo scenario.
+# - Il comando ora chiama direttamente `python -m src.testing.engine`,
+#   che ha un blocco __main__ dedicato (bootstrap identico a
+#   run_predefined_tests() in src/client/main.py): istanzia l'orchestrator
+#   corretto (Centralized/Federated in base a SystemConfig.mode), lo avvia
+#   in un thread, e lancia TestEngine.run_scenarios().
+# - stdin_open/tty servono per l'input() interattivo del menu scenario;
+#   con `docker compose up` il multiplexing dei log di più servizi non
+#   garantisce un attach corretto dello stdin, per questo si consiglia
+#   `run --rm` per il solo container orchestrator.
+
+services:
+  orchestrator:
+    command: ["python", "-u", "-m", "src.testing.engine"]
+    deploy:
+      replicas: 1
+    stdin_open: true
+    tty: true

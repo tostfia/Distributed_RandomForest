@@ -7,6 +7,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 TARGET_DIRS=(
     "$SCRIPT_DIR/.local_storage"
     "$SCRIPT_DIR/saved_models"
+    "$SCRIPT_DIR/workers_cache"
+
 )
 
 echo "[CLEANUP] Avvio pulizia delle cartelle di progetto..."
