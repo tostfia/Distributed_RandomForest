@@ -32,23 +32,28 @@ def get_input(prompt: str, default: str = "") -> str:
     return user_input if user_input else default
 
 
-def load_hyperparameters_from_config(mode:str) -> Hyperparameters:
-    if not os.path.exists(BASELINE_CONFIG_PATH):
-        raise FileNotFoundError(f"Il file di configurazione '{BASELINE_CONFIG_PATH}' non è stato trovato."  )
-    
-    with open(BASELINE_CONFIG_PATH, "r", encoding="utf-8") as f:
+def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> Hyperparameters:
+    config_path = (
+        os.path.join("outputs_baseline", "config_synthetic.json")
+        if dataset_type == "synthetic"
+        else os.path.join("outputs_baseline", "config.json")
+    )
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Il file di configurazione '{config_path}' non è stato trovato.")
+
+    with open(config_path, "r", encoding="utf-8") as f:
         baseline_data = json.load(f)
     raw_hp = baseline_data.get("hyperparameters", {})
     if not raw_hp:
         raise ValueError("La sezione 'hyperparameters' è mancante o vuota nel file di configurazione della baseline.")
+
     known_fields = {"n_estimators", "max_depth", "class_weight", "max_samples", "bootstrap", "tree_type", "target_column"}
-    hp_data  = {k:v for k, v in raw_hp.items() if k in known_fields}
+    hp_data = {k: v for k, v in raw_hp.items() if k in known_fields}
     if mode == "federated":
         hp_data["bootstrap"] = False
         hp_data["max_samples"] = 1.0
-    hp_data.setdefault("target_column", "Label")
+    hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
     return Hyperparameters(**hp_data)
-
 
 
 def run_predefined_tests():
@@ -72,10 +77,6 @@ def run_predefined_tests():
     except Exception as e:
         print(f"\n[ERRORE] Durante l'esecuzione dei test: {e}")
 
-
-    
-
-
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     
@@ -93,7 +94,7 @@ def handle_inference():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved_config = json.load(f)
-                if saved_config.get("job_id") == job_id or get_input("Usa iperparametri dell'ultimo training locale? (S/N): ", "S").upper() == "S":
+                if saved_config.get("job_id") == job_id or get_input(...) == "S":
                     hp_data = saved_config.get("hyperparameters", {})
                     hp_obj = Hyperparameters(**hp_data)
                     print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
@@ -173,7 +174,6 @@ def handle_model_request():
         elif job_status.upper() == "COMPLETED":
             print(f"\n[COMPLETATO] L'addestramento per il Job {job_id[:8]} è terminato con successo! ")
             
-            # I modelli finali aggregati rimangono nella cartella radice o in './saved_models'
             model_filename = f"model_federated_{job_id}.pkl" if cfg.mode == "federated" else f"model_{job_id}.pkl"
             model_path = os.path.join("./saved_models", model_filename)
             
@@ -225,18 +225,16 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
 
     # 4. Configurazione Iperparametri
-    print("\n[4] Configurazione Iperparametri da '{BASELINE_CONFIG_PATH}':")
+    print(f"\n[4] Configurazione Iperparametri ({'SINTETICO/Regressione' if dataset_type == 'synthetic' else 'REALE/Classificazione'}):")
     try:
-        hp_obj = load_hyperparameters_from_config(mode)
+        hp_obj = load_hyperparameters_from_config(mode, dataset_type)
         print(f"  [OK] Iperparametri caricati da baseline: n_estimators={hp_obj.n_estimators}, max_depth={hp_obj.max_depth}, class_weight={hp_obj.class_weight}, bootstrap={hp_obj.bootstrap}, max_samples={hp_obj.max_samples}, tree_type={hp_obj.tree_type}")
     except FileNotFoundError as e:
         print(f"\n[ERRORE] {e}")
         return
     except Exception as e:
         print(f"\n[ERRORE] Impossibile caricare gli iperparametri dalla baseline: {e}")
-        return
-        
-        
+        return   
             
 
     # 5. Validazione Pydantic

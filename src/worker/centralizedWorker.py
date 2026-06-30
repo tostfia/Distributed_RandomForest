@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from src.dataset.dataset_dao_factory import DatasetDAOFactory
 from src.worker.BaseWorker import BaseWorker
 
@@ -47,8 +48,11 @@ class CentralizedWorker(BaseWorker):
         return self.tree_type == "regressor"
     
     def _get_tree_class(self) -> type:
-        """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
-        return self.tree_class_reference
+        """Restituisce la classe corretta in base al tipo di task rilevato."""
+        if self.is_regression():
+            return DecisionTreeRegressor
+        else:
+            return DecisionTreeClassifier
 
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
         
@@ -61,23 +65,30 @@ class CentralizedWorker(BaseWorker):
             print("[CentralizedWorker] Utilizzo dei dati già caricati in cache.")
             return self._cached_X, self._cached_y
         print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da: {source_info}")
+
         df: pd.DataFrame = self.dao.load_dataset(source_info)
         
-        if self.target_column not in df.columns:
-            raise ValueError(
-                f"Colonna target '{self.target_column}' non trovata nel dataset."
-            )
+        feature_cols = [c for c in df.columns if c.startswith("Feature_")]
+        target_cols = [c for c in df.columns if c not in feature_cols]
         
-        y_df = df[self.target_column]
-        X_df = df.drop(columns=[self.target_column])
+        if not target_cols:
+            raise ValueError("Nessuna colonna target trovata nel dataset.")
+            
+        actual_target = target_cols[0] 
+        print(f"[CentralizedWorker] Rilevata colonna target dinamica: '{actual_target}'")
+        
+        y_df = df[actual_target]
+        X_df = df.drop(columns=[actual_target])
 
         # Conversione esplicita in matrici NumPy stabili per Scikit-Learn
         X = X_df.to_numpy(dtype=np.float64)
-        if self.tree_type == "regressor":
+        if y_df.dtype == 'object' or y_df.nunique() > 20:
             y = y_df.to_numpy(dtype=np.float64)
+            self.tree_type = "regressor"
         else:
             y = y_df.to_numpy(dtype=np.int64)
-        
+            self.tree_type = "classifier"
+                
         self._cached_source = source_info
         self._cached_X = X
         self._cached_y = y

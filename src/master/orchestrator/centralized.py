@@ -9,8 +9,9 @@ import traceback
 from rpyc.utils.classic import obtain
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import train_test_split
 from sklearn.utils.extmath import weighted_mode
-from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score
+from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
@@ -20,6 +21,8 @@ from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
+
+TEST_SIZE = 0.2
 
 
 class CentralizedOrchestrator(BaseOrchestrator):
@@ -47,19 +50,22 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.current_job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
         dataset_type = self._resolve_dataset_type(payload)
-        target_col = "Label"
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
+        target_col = "Target" if (dataset_type == "synthetic" and tree_type == "regressor") else "Label"
+
+        splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(target_column=target_col, test_size=TEST_SIZE, random_state=base_seed)
 
         print(f"\n[{self.orchestrator_name}] Avvio ETL. Tipo: {dataset_type}")
 
-        # Inizializziamo lo splitter
-        splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(
-            target_column=target_col, test_size=0.2, random_state=base_seed
-        )
-
-        # --- ESTRAZIONE ---
         if dataset_type == "synthetic":
-            loader = SyntheticDataLoader()
-            train_df, test_df = splitter.split(loader.load())
+            loader = SyntheticDataLoader(task="regression" if tree_type == "regressor" else "classification", target_column=target_col)
+            df_full = loader.load()
+
+            if tree_type == "regressor":
+                train_df, test_df = train_test_split(df_full, test_size=TEST_SIZE, random_state=base_seed)
+            else:
+                train_df, test_df = splitter.split(df_full)
         else:
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
@@ -68,10 +74,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
             
             # Istanziamo il nuovo preprocessor modificato
             preprocessor = CICIDSPreprocessor(target_column=target_col)
-
             # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO ───
             df_binarized = preprocessor.binarize_target(df_raw)
-            
             # ─── FASE 2: SPLIT STRATIFICATO ADESSO SICURO ───
             print(f"[{self.orchestrator_name}] Esecuzione Split Stratificato...")
             train_df, test_df = splitter.split(df_binarized)
@@ -351,7 +355,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 TARGET_DIR = "./saved_models"
                 os.makedirs(TARGET_DIR, exist_ok=True)
-                model_path = os.path.join(TARGET_DIR, f"cen_model_{self.current_job_id}.pkl")
+                model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
                 
                 with open(model_path, "wb") as f:
                     pickle.dump(global_model, f)
@@ -378,7 +382,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         job_id = payload.get("job_id")
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
-        target_col = "Label"
+        target_col = "Target" if tree_type == "regressor" else "Label"
 
         print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA FAULT-TOLERANT ===")
         inference_start_time = time.perf_counter()
@@ -642,12 +646,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(classification_report(y_test, final_predictions, zero_division=0))
             
         else:
-            # Caso Regressore: media aritmetica dei valori continui predetti dagli alberi
             final_predictions = np.mean(predictions_matrix, axis=0)
-            mae = np.mean(np.abs(final_predictions - y_test))
+            mse = mean_squared_error(y_test, final_predictions)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(y_test, final_predictions)
+            r2 = r2_score(y_test, final_predictions)
             print(f"  Tipo di Modello:                        REGRESSORE")
             print(f"  Testing Set size:                       {testing_set_size} campioni")
+            print("-" * 75)
+            print(f"  MSE FINALE DISTRIBUITO:                 {mse:.4f}")
+            print(f"  RMSE FINALE DISTRIBUITO:                {rmse:.4f}")
             print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
+            print(f"  R² FINALE DISTRIBUITO:                  {r2:.4f}")
 
         print("═" * 75 + "\n")
 
