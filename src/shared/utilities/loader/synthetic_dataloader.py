@@ -25,7 +25,12 @@ class SyntheticDataLoader(DatasetLoader):
         n_samples: int = None,
         n_features: int = None,
         random_seed: int = RANDOM_SEED,
-        target_column: str = None
+        target_column: str = None,
+        n_informative: int = None,
+        n_redundant: int = None,
+        n_clusters_per_class: int = None,
+        flip_y: float = None,
+        weight: list = None,
     ):
         config_path = "synthetic/synthetic_config.json"
         config = {}
@@ -39,7 +44,11 @@ class SyntheticDataLoader(DatasetLoader):
         # La proporzione di feature informative è fissa all'80% per garantire un certo grado di complessità.
         self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 100000)
         self.n_features = n_features if n_features is not None else config.get("n_features", 20)
-        self.n_informative = int(self.n_features * 0.8)
+        self.n_informative = n_informative if n_informative is not None else config.get("n_informative", int(self.n_features * 0.35))
+        self.n_redundant = n_redundant if n_redundant is not None else config.get("n_redundant", 2)
+        self.n_clusters_per_class = n_clusters_per_class if n_clusters_per_class is not None else config.get("n_clusters_per_class", 2)
+        self.flip_y = flip_y if flip_y is not None else config.get("flip_y", 0.01)
+        self.weight = weight if weight is not None else config.get("weight", [0.9, 0.1])
         self.random_seed = random_seed
         self.target_column = target_column if target_column is not None else config.get("target_column", "Label")
         self.filename = filename if (filename := config.get("filename")) is not None else "synthetic_dataset.csv"
@@ -58,10 +67,10 @@ class SyntheticDataLoader(DatasetLoader):
             n_samples=self.n_samples,
             n_features=self.n_features,
             n_informative=self.n_informative,
-            n_redundant=2,
-            n_clusters_per_class=2,
-            flip_y=0.01,
-            weights=[0.9, 0.1],
+            n_redundant=self.n_redundant,
+            n_clusters_per_class=self.n_clusters_per_class,
+            flip_y=self.flip_y,
+            weights=self.weight,
             random_state=self.random_seed,
         )
 
@@ -105,7 +114,7 @@ class SyntheticDataLoader(DatasetLoader):
         if self.n_informative <= 0:
             raise ValueError("n_informative deve essere maggiore di 0.")
 
-        if self.n_informative + 2 > self.n_features:
+        if self.n_informative + self.n_redundant > self.n_features:
             raise ValueError(
                 "n_informative + n_redundant non può superare n_features."
             )

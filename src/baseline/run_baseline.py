@@ -32,13 +32,14 @@ def run_baseline():
     RANDOM_SEED = 123
     target_col = "Label"
     BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
+    SYNTHETIC_CONFIG_PATH = os.path.join("./synthetic", "synthetic_config.json")
     dataset_type = "real"
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
     
     # ---------------------------------------------------------
-    # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO (Stile Colab)
+    # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO 
     # ---------------------------------------------------------
     print(">>> FASE 1: Estrazione e Preprocessing Dati")
     
@@ -48,15 +49,41 @@ def run_baseline():
                 tmp_cfg = json.load(f)
                 dataset_type = tmp_cfg.get("dataset_type", "real")
                 print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
-            except:
+            except Exception as e:
                 print(f" [ATTENZIONE] Errore nel parsing di {BOOT_CONFIG_PATH}: {e}")
                 pass
     else:
         print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
+    
+    
     if dataset_type == "synthetic":
+        if os.path.exists(SYNTHETIC_CONFIG_PATH):
+            with open(SYNTHETIC_CONFIG_PATH, "r") as f:
+                try:
+                    tmp_cfg = json.load(f)
+                    print(f" [INFO] Configurazione sintetica letta con successo da '{SYNTHETIC_CONFIG_PATH}'")
+                except Exception as e:
+                    print(f" [ATTENZIONE] Errore nel parsing di {SYNTHETIC_CONFIG_PATH}: {e}")
+                    pass
+        n_samples = tmp_cfg.get("n_samples", 100000)
+        n_features = tmp_cfg.get("n_features", 20)
+        n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
+        n_redundant = tmp_cfg.get("n_redundant", 2)
+        n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
+        flip_y = tmp_cfg.get("flip_y", 0.01)
+        weight = tmp_cfg.get("weight", [0.9, 0.1])
+
         print(f" • Tipo Dataset: Sintetico (Stress Test Task 2)")
-        loader = SyntheticDataLoader(n_samples=100000, random_seed=RANDOM_SEED, target_column=target_col)
+        loader = SyntheticDataLoader(n_samples=n_samples,
+                                     n_features=n_features,
+                                     random_seed=RANDOM_SEED,
+                                     target_column=target_col,
+                                     n_informative=n_informative,
+                                     n_redundant=n_redundant,
+                                     n_clusters_per_class=n_clusters_per_class,
+                                     flip_y=flip_y,
+                                     weight=weight)
         df_clean = loader.load()
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
         train_df, test_df = splitter.split(df_clean)
@@ -113,7 +140,8 @@ def run_baseline():
         dizionario_feature = fs.feature_summary_
         
         
-        print(f"[OK] Trasformazione e Feature Selection completate in {etl_time:.4f} secondi.")
+        
+    
     etl_time = time.perf_counter() - preprocess_start_time
     # Separazione delle Feature dalle Label
     X_train = train_df.drop(columns=[target_col])
