@@ -5,10 +5,10 @@ from botocore.exceptions import ClientError
 import boto3
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
+from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory 
@@ -145,8 +145,6 @@ class FederatedWorker(BaseWorker):
         """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
         return self.tree_class_reference
    
-
-
     def _load_data(self, dataset_tag: str):
         """Implementazione obbligatoria per la classe base."""
         
@@ -298,8 +296,23 @@ class FederatedWorker(BaseWorker):
         """Generazione di dati sintetici speculari in RAM."""
         hyperparameters = obtain(hyperparameters)
         seed = hyperparameters.get("random_state", 123)
-        X, y = make_classification(n_samples=20000, n_features=20, random_state=seed)
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.20, random_state=seed, stratify=y)
+        task = "regression" if self.is_regression() else "classification"
+        target_column = "Target" if task == "regression" else "Label"
+
+        loader = SyntheticDataLoader(task=task, random_seed=seed, target_column=target_column)
+        df = loader.load()
+
+        X = df.drop(columns=[target_column]).to_numpy(dtype=np.float64)
+        y = df[target_column].to_numpy()
+
+        if task == "classification":
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X, y, test_size=0.20, random_state=seed, stratify=y
+            )
+        else:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X, y, test_size=0.20, random_state=seed
+            )
         
         self._cached_X_train = X_tr.astype(np.float64)
         self._cached_X_test = X_te.astype(np.float64)

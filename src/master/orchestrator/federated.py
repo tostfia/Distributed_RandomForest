@@ -6,12 +6,16 @@ import socket
 import threading
 import time
 import queue
-import rpyc
-from rpyc.utils.classic import obtain
 import traceback
+import rpyc
 import numpy as np
+
+from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, precision_score, recall_score, f1_score
+from sklearn.metrics import (
+    classification_report, confusion_matrix, mean_absolute_error, 
+    mean_squared_error, precision_score, r2_score, recall_score, f1_score
+)
 
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -36,10 +40,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             return str(dataset_type).strip().lower()
         return "real"
     
-    
-
-    
-    def _execute_training_step(self, payload: dict,start_alberi: int, target_alberi: int, seed: int) -> int:
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Invia la richiesta a ciascun worker attivo per il proprio shard locale.
         Se un worker fallisce, viene registrato il dropout e si prosegue con i rimanenti.
@@ -47,7 +48,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         """
         self.current_job_id = payload.get("job_id")
         
-       
         if self.environment == "aws":
             checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
         else:
@@ -63,7 +63,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                     with open(checkpoint_trees_path, "rb") as f:
                         all_trained_trees = pickle.load(f)
                     print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
-                    # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
                     start_alberi = len(all_trained_trees)
                 except Exception as e_load:
                     print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
@@ -72,6 +71,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             else:
                 print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                 start_alberi = 0
+                
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 
@@ -87,37 +87,29 @@ class FederatedOrchestrator(BaseOrchestrator):
                 
                 print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
                 time.sleep(10)
+                
             worker_names = list(available_workers.keys())
             num_workers = len(worker_names)
 
             hp = payload.get("hyperparameters", {})
-            max_depth = hp.get("max_depth", None)
             tree_type = hp.get("tree_type", "classifier")
 
-            CHUNK_SIZE = max(1, total_step_trees // (num_workers*2))  # Distribuzione iniziale più conservativa
+            CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
             print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
 
-            # 4. Configurazione della Coda di Sotto-Task locale
             task_queue = queue.Queue()
             sub_start = start_alberi
             task_id_counter = 1
             
             while sub_start < target_alberi:
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
-                # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
                 task_seed = seed + sub_start
-                # Usiamo sub_start come offset assoluto rispetto al seed iniziale del JOB
                 task_queue.put((task_id_counter, sub_start, sub_end, task_seed))
                 task_id_counter += 1
                 sub_start = sub_end
-            feature_selezionate = []
+                
             feature_selezionate = self.select_from_config()
-            collected_trees = []
-            
-            
             results_lock = threading.Lock()
-            
-            
             active_worker_names = list(worker_names)
 
             def contact_worker(w_name, idx):
@@ -149,6 +141,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 break
                             time.sleep(1)
                             continue
+                            
                         quota_chunk = end_t - start_t
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         try:
@@ -164,10 +157,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 },
                             )
                             result_trees = pickle.loads(obtain(result_raw))
+                            
                             with results_lock:
                                 all_trained_trees.extend(result_trees)
                                 current_total = len(all_trained_trees)
-                                # SALVATAGGIO FISICO ATOMICO PROGRESSIVO
                                 try:
                                     with open(checkpoint_trees_path, "wb") as f_chk:
                                         pickle.dump(all_trained_trees, f_chk)
@@ -175,7 +168,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 except Exception as e_fs:
                                     print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
                                 
-                                # Sincronizziamo in tempo reale anche il contatore logico nel Database/State Manager
                                 if hasattr(self, 'state_manager') and self.state_manager:
                                     try:
                                         self.state_manager.update_request_status(
@@ -183,7 +175,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                             status="PROCESSING",
                                             orchestrator_id=self.orchestrator_name,
                                             retries=payload.get("retries", 0),
-                                            base_random_state=chunk_seed + (idx*1000),
+                                            base_random_state=chunk_seed + (idx * 1000),
                                             alberi_addestrati=current_total,
                                         )
                                     except Exception as e_db:
@@ -191,10 +183,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 
                             print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
                             task_queue.task_done()
+                            
                         except Exception as e:
                             print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
-                            
-                            # FAULT TOLERANCE REALE: Reinserimento immediato del chunk per la fault tolerance
                             task_queue.put((task_id, start_t, end_t, chunk_seed))
                             print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
                             
@@ -202,6 +193,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 if w_name in active_worker_names:
                                     active_worker_names.remove(w_name)
                             break 
+                            
                 except Exception as conn_err:
                     print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
                     with results_lock:
@@ -216,8 +208,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                                     self.connessioni_attive.remove(worker_conn)
                         except:
                             pass
+                            
             threads = []
-            # Esecuzione parallela
             for i, worker_name in enumerate(worker_names):
                 t = threading.Thread(target=contact_worker, args=(worker_name, i))
                 threads.append(t)
@@ -225,15 +217,14 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             for t in threads:
                 t.join()
+                
             if not task_queue.empty() and len(active_worker_names) == 0:
                 print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
                 raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
 
-            
             if not all_trained_trees:
                 raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
 
-            # APPLICAZIONE SCARTO UNIFORME FINALE
             if len(all_trained_trees) > target_alberi:
                 print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
                 collected_trees = random.sample(all_trained_trees, target_alberi)
@@ -241,21 +232,16 @@ class FederatedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
                 collected_trees = all_trained_trees
 
-            # Salvataggio del modello globale sul file system locale o S3
             checkpoint_trees_path = self._get_trees_checkpoint_path(self.current_job_id)
             os.makedirs(os.path.dirname(checkpoint_trees_path), exist_ok=True)
             with open(checkpoint_trees_path, "wb") as f:
                 pickle.dump(collected_trees, f)
             
-            
             final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
-            
-            # Salvataggio checkpoint logico finale
             self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
             return final_count
 
     def _execute_inference_step(self, payload: dict) -> dict:
-    
         print(f"\n[{self.orchestrator_name}] == AVVIO VALIDAZIONE FEDERATA DISTRIBUITA ==")
         job_id = payload.get("job_id")
         hyperparameters = payload.get("hyperparameters", {})
@@ -263,13 +249,11 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         inference_start_time = time.perf_counter()
 
-        # 1. RISOLUZIONE PERCORSO MODELLO
         if self.environment == "aws":
             model_path = f"s3://my-cluster-datasets-bucket/saved_models/fed_model_{job_id}.pkl"
         else:
             model_path = os.path.join("./saved_models", f"fed_model_{job_id}.pkl")
 
-        # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
         if self.environment == "local":
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
@@ -286,7 +270,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         total_trees = len(all_trees)
         print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
 
-        # 3. SCOPERTA WORKER
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         worker_names = list(available_workers.keys())
         num_workers = len(worker_names)
@@ -294,21 +277,17 @@ class FederatedOrchestrator(BaseOrchestrator):
             raise RuntimeError("Nessun worker disponibile per l'inferenza federata.")
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
-        # 4. SERIALIZZAZIONE UNICA DELLA FORESTA INTERA (inviata identica a ogni worker)
         forest_bytes = pickle.dumps(all_trees)
         feature_selezionate = self.select_from_config()
 
-        # 5. STRUTTURE DATI CONDIVISE
-        # Usiamo liste mutabili per evitare nonlocal su tipi immutabili
         y_pred_global = []
         y_true_global = []
-        total_samples_ref = [0]   # [0] = contenitore mutabile, no nonlocal needed
+        total_samples_ref = [0]
         failed_workers = set()
 
         results_lock = threading.Lock()
         active_worker_names = list(worker_names)
 
-        # 6. FUNZIONE CONSUMATRICE: una chiamata RPC per worker, foresta intera
         def validate_worker(w_name, idx):
             conn = None
             try:
@@ -360,7 +339,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                     except:
                         pass
 
-        # 7. AVVIO MULTI-THREADING (un thread per worker)
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names):
@@ -371,7 +349,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         for t in threads:
             t.join()
 
-        # Chiusura precauzionale connessioni residue
         with self.connessioni_lock:
             for conn in self.connessioni_attive:
                 try: conn.close()
@@ -379,7 +356,6 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         rpc_inference_time = time.perf_counter() - rpc_start_time
 
-        # 8. GUARD: almeno un worker deve aver risposto
         if not y_pred_global:
             print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
             return {}
@@ -389,47 +365,37 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         total_inference_time = time.perf_counter() - inference_start_time
 
-        # 9. CALCOLO E STAMPA METRICHE AGGREGATE
+        dtype_target = np.float64 if tree_type == "regressor" else np.int64
         self._print_and_validate_metrics_federated(
-            y_pred=np.array(y_pred_global, dtype=np.int64),
-            y_true=np.array(y_true_global, dtype=np.int64),
+            y_pred=np.array(y_pred_global, dtype=dtype_target),
+            y_true=np.array(y_true_global, dtype=dtype_target),
             tree_type=tree_type,
             testing_set_size=total_samples_ref[0],
             job_id=job_id,
             total_inference_time=total_inference_time,
             rpc_inference_time=rpc_inference_time
-        )
-            
-   
+        )   
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
-        """
-        Aggrega gli alberi raccolti in un oggetto RandomForest di Scikit-Learn
-        e lo serializza su disco.
-        """
         if not all_trained_trees:
             print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
             return 0
 
         print(f"[{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
         try:
-            # Assumiamo che gli alberi abbiano tutti lo stesso numero di feature di input
             n_features = all_trained_trees[0].n_features_in_
             
             if tree_type == "classifier":
                 global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                # Nota: assunzione di classificazione binaria standard come da tuo snippet
                 global_model.classes_ = np.array([0, 1], dtype=np.int64) 
                 global_model.n_classes_ = 2
             else:
                 global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
             
-            # Iniezione manuale degli stimatori nell'oggetto sklearn
             global_model.estimators_ = all_trained_trees
             global_model.n_features_in_ = n_features
             global_model.n_outputs_ = 1
             
-            # Salvataggio su disco
             TARGET_DIR = "./saved_models"
             os.makedirs(TARGET_DIR, exist_ok=True)
             model_path = os.path.join(TARGET_DIR, f"fed_model_{self.current_job_id}.pkl")
@@ -445,18 +411,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             traceback.print_exc()
             return len(all_trained_trees)
         
-    def _print_and_validate_metrics_federated(
-        self,
-        y_pred: np.ndarray,
-        y_true: np.ndarray,
-        tree_type: str,
-        testing_set_size: int,
-        job_id: str,
-        total_inference_time: float,
-        rpc_inference_time: float
-    ):
-        
-
+    def _print_and_validate_metrics_federated(self, y_pred: np.ndarray, y_true: np.ndarray, tree_type: str, testing_set_size: int, job_id: str, total_inference_time: float, rpc_inference_time: float):
         print("\n" + "═" * 75)
         print(f"  VALUTAZIONE PRESTAZIONI MODELLO FEDERATO (JOB: {job_id[:8]})")
         print("═" * 75)
@@ -488,10 +443,18 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(classification_report(y_true, final_predictions, zero_division=0))
         else:
             final_predictions = y_pred.astype(float)
-            mae = np.mean(np.abs(final_predictions - y_true.astype(float)))
+            y_true_f = y_true.astype(float)
+            mse = mean_squared_error(y_true_f, final_predictions)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(y_true_f, final_predictions)
+            r2 = r2_score(y_true_f, final_predictions)
             print(f"  Tipo di Modello:                        REGRESSORE FEDERATO")
             print(f"  Testing Set size (aggregato):           {testing_set_size} campioni")
+            print("-" * 75)
+            print(f"  MSE FINALE FEDERATO:                    {mse:.4f}")
+            print(f"  RMSE FINALE FEDERATO:                   {rmse:.4f}")
             print(f"  MAE FINALE FEDERATO:                    {mae:.4f}")
+            print(f"  R² FINALE FEDERATO:                     {r2:.4f}")
 
         print("═" * 75 + "\n")
         
@@ -549,10 +512,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         return []
     
     def select_from_config(self):
-        # Percorso 1: relativo al cwd (funziona se lanciato da root con python main.py)
         config_path = os.path.join(os.getcwd(), "outputs_baseline", "config.json")
         
-        # Percorso 2: fallback risalendo dalla posizione del file sorgente
         if not os.path.exists(config_path):
             current_file_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
