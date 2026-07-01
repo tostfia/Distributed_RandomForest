@@ -63,7 +63,6 @@ def main():
                         shards_esistenti = False
                         break
                 
-                
                 if shards_esistenti:
                     print(f"[BOOTSTRAP] Shard già presenti su disco per tutti i {num_workers} worker. Salto il ricalcolo.")
                 else:

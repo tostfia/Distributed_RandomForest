@@ -163,6 +163,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
+
+        hp = payload.get("hyperparameters", {})
+        max_depth = hp.get("max_depth", None)
+        tree_type = hp.get("tree_type", "classifier")
         
         # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
@@ -181,11 +185,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
             worker_names = list(available_workers.keys())
             num_workers = len(worker_names)
             source_info = self.train_data_path 
-        
-            # Estrazione iperparametri dal payload
-            hp = payload.get("hyperparameters", {})
-            max_depth = hp.get("max_depth", None)
-            tree_type = hp.get("tree_type", "classifier")
 
             # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
             CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
@@ -306,12 +305,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             active_worker_names.remove(w_name)
                 finally:
                     if worker_conn:
+                        with self.connessioni_lock:
+                            if worker_conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(worker_conn)
                         try:
                             worker_conn.close()
-                            with self.connessioni_lock:
-                                if worker_conn in self.connessioni_attive:
-                                    self.connessioni_attive.remove(worker_conn)
-                        except:
+                        except Exception:
                             pass
 
             # 6. Avvio dei thread
@@ -344,7 +343,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 if tree_type == "classifier":
                     global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                    global_model.classes_ = np.array([0, 1]) 
+                    global_model.classes_ = np.array([0, 1], dtype=np.int64)
                     global_model.n_classes_ = 2
                 else:
                     global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
@@ -540,12 +539,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         active_worker_names.remove(w_name)
             finally:
                 if worker_conn:
+                    with self.connessioni_lock:
+                        if worker_conn in self.connessioni_attive:
+                            self.connessioni_attive.remove(worker_conn)
                     try:
                         worker_conn.close()
-                        with self.connessioni_lock:
-                            if worker_conn in self.connessioni_attive:
-                                self.connessioni_attive.remove(worker_conn)
-                    except:
+                    except Exception:
                         pass
          
         # 6. AVVIO MULTI-THREADING E SINCRONIZZAZIONE DEI CONSUMATORI
@@ -559,17 +558,16 @@ class CentralizedOrchestrator(BaseOrchestrator):
         for t in threads:
             t.join()
         
-        if failed_tasks:
-            raise RuntimeError(f"Inferenza parziale: {len(failed_tasks)} chunk non completati.")
-        if not task_queue.empty() :
-            raise RuntimeError("Task in coda orfani: tutti i worker sono crashati.")
-
-
-        # Chiusura precauzionale di socket RPyC rimasti aperti
-        with self.connessioni_lock:
-            for conn in self.connessioni_attive:
-                try: conn.close()
-                except Exception: pass
+        try:
+            if failed_tasks:
+                raise RuntimeError(f"Inferenza parziale: {len(failed_tasks)} chunk non completati.")
+            if not task_queue.empty():
+                raise RuntimeError("Task in coda orfani: tutti i worker sono crashati.")
+        finally:
+            with self.connessioni_lock:
+                for conn in self.connessioni_attive:
+                    try: conn.close()
+                    except Exception: pass
 
         rpc_inference_time = time.perf_counter() - rpc_start_time
 

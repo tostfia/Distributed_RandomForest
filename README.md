@@ -88,3 +88,13 @@ Per lanciare: docker compose build, per poi eseguire docker compose up --scale w
 Lanciare i comandi dei worker separatamente. 
 
 Comando docker utile per eseguire in background: docker compose up --build --force-recreate -d
+
+Invece, per quanto riguarda le cartelle Docker, ogni volta che si aggiungono: 
+sudo chown -R $(id -u):$(id -g) workers_cache .local_storage saved_models
+sudo chmod -R 777 workers_cache .local_storage saved_models
+
+export MY_UID=$(id -u)
+export MY_GID=$(id -g)
+docker compose up
+
+docker compose exec orchestrator python -m src.client.main

@@ -78,7 +78,6 @@ class FederatedWorker(BaseWorker):
     Interpreta le stringhe sintetiche oppure scarica lo shard reale assegnato
     dall'Orchestratore salvandolo nella cache del disco rigido locale (EBS su AWS).
     """
-    
 
     def __init__(
         self,
@@ -364,9 +363,10 @@ class FederatedWorker(BaseWorker):
             if actual_is_regressor:
                 rf = RandomForestRegressor(n_estimators=len(unpacked_model))
             else:
-                rf = RandomForestClassifier(n_estimators=len(unpacked_model))
-                rf.classes_ = np.array([0, 1], dtype=np.int64)
-                rf.n_classes_ = 2
+                rf = RandomForestClassifier(n_estimators=len(unpacked_model), class_weight='balanced')
+                unique_classes = np.unique(self._cached_y_test)
+                rf.classes_ = unique_classes
+                rf.n_classes_ = len(unique_classes)
 
             rf.estimators_ = unpacked_model
             rf.n_features_in_ = self._cached_X_test.shape[1]

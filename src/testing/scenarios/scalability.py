@@ -53,12 +53,21 @@ class ScalabilityScenario(BaseTestScenario):
                 throughput = num_trees / duration if duration > 0 else 0
                 
                 print(f"-> Worker: {worker_count} | Tempo: {duration:.2f}s | Throughput: {throughput:.2f} alberi/s")
+
+                results[worker_count] = {
+                    "status": "SUCCESS" if num_trees == total_target else "PARTIAL",
+                    "trees_built": num_trees,
+                    "duration_seconds": round(duration, 4),
+                    "throughput_trees_per_sec": round(throughput, 4)
+                }
             
+            except Exception as e:
+                print(f"[ERRORE SCALABILITY] Test con {worker_count} worker fallito: {e}")
+                results[worker_count] = {"status": "FAILED", "error": str(e)}
+                
             finally:
                 # 4. Ripristiniamo SEMPRE il comportamento originale del ServiceRegistry per non rompere i test successivi
                 ServiceRegistry.get_available_workers = original_get_workers
-            
-           
             
         return {
             "scenario_description": "Analisi del throughput e della scalabilità debole al variare dei worker attivi.",

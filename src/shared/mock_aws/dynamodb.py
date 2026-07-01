@@ -64,7 +64,6 @@ class MockDynamoDB:
             return table, None
         self._locked_read_modify_write(table_name, modify)
         info = f"Stato: {value.get('status')}" if "status" in value else f"Dati: {list(value.keys())}"
-        print(f"[Mock DynamoDB] Tabella '{table_name}' -> Scritto ID: {str_key[:8]}... | {info}")
 
     def put_item_if_not_exists(self, table_name: str, key: str, value: dict) -> bool:
         """

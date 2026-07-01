@@ -12,11 +12,7 @@ import numpy as np
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import (
-    classification_report, confusion_matrix, mean_absolute_error, 
-    mean_squared_error, precision_score, r2_score, recall_score, f1_score
-)
-
+from sklearn.metrics import (classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score)
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
@@ -77,6 +73,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
+            return len(all_trained_trees)
         else:
             print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
             while True:
@@ -84,7 +81,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                 if available_workers:
                     print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
                     break
-                
                 print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
                 time.sleep(10)
                 
@@ -201,12 +197,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                             active_worker_names.remove(w_name)
                 finally:
                     if worker_conn:
+                        with self.connessioni_lock:
+                            if worker_conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(worker_conn)
                         try:
                             worker_conn.close()
-                            with self.connessioni_lock:
-                                if worker_conn in self.connessioni_attive:
-                                    self.connessioni_attive.remove(worker_conn)
-                        except:
+                        except Exception:
                             pass
                             
             threads = []
@@ -231,14 +227,9 @@ class FederatedOrchestrator(BaseOrchestrator):
             else:
                 print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
                 collected_trees = all_trained_trees
-
-            checkpoint_trees_path = self._get_trees_checkpoint_path(self.current_job_id)
-            os.makedirs(os.path.dirname(checkpoint_trees_path), exist_ok=True)
-            with open(checkpoint_trees_path, "wb") as f:
-                pickle.dump(collected_trees, f)
             
             final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
-            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
+            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
             return final_count
 
     def _execute_inference_step(self, payload: dict) -> dict:
@@ -331,12 +322,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                     failed_workers.add(w_name)
             finally:
                 if conn:
+                    with self.connessioni_lock:
+                        if conn in self.connessioni_attive:
+                            self.connessioni_attive.remove(conn)
                     try:
                         conn.close()
-                        with self.connessioni_lock:
-                            if conn in self.connessioni_attive:
-                                self.connessioni_attive.remove(conn)
-                    except:
+                    except Exception:
                         pass
 
         rpc_start_time = time.perf_counter()
@@ -365,16 +356,26 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         total_inference_time = time.perf_counter() - inference_start_time
 
-        dtype_target = np.float64 if tree_type == "regressor" else np.int64
-        self._print_and_validate_metrics_federated(
-            y_pred=np.array(y_pred_global, dtype=dtype_target),
-            y_true=np.array(y_true_global, dtype=dtype_target),
+        y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
+
+        metrics = self._print_and_validate_metrics_federated(
+            y_pred=np.array(y_pred_global, dtype=np.float64),
+            y_true=np.array(y_true_global, dtype=y_true_dtype),
             tree_type=tree_type,
             testing_set_size=total_samples_ref[0],
             job_id=job_id,
             total_inference_time=total_inference_time,
             rpc_inference_time=rpc_inference_time
-        )   
+        )
+
+        return {
+            "status": "SUCCESS" if not failed_workers else "PARTIAL",
+            "testing_set_size": total_samples_ref[0],
+            "failed_workers": list(failed_workers),
+            "total_inference_time": total_inference_time,
+            "rpc_inference_time": rpc_inference_time,
+            "metrics": metrics
+        }   
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:
@@ -420,8 +421,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         print("═" * 75 + "\n")
 
         if tree_type == "classifier":
-            final_predictions = y_pred.astype(int)
-            y_true = y_true.astype(int)
+            final_predictions = np.array(y_pred).astype(int) 
+            y_true = np.array(y_true).astype(int)
 
             accuracy  = np.mean(final_predictions == y_true)
             precision = precision_score(y_true, final_predictions, zero_division=0)
@@ -441,6 +442,12 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(cm)
             print("\n  Classification Report Completo:")
             print(classification_report(y_true, final_predictions, zero_division=0))
+            metrics = {
+                "accuracy": float(accuracy),
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1_score": float(f1)
+            }
         else:
             final_predictions = y_pred.astype(float)
             y_true_f = y_true.astype(float)
@@ -455,8 +462,14 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"  RMSE FINALE FEDERATO:                   {rmse:.4f}")
             print(f"  MAE FINALE FEDERATO:                    {mae:.4f}")
             print(f"  R² FINALE FEDERATO:                     {r2:.4f}")
-
+            metrics = {
+                "mean_squared_error": float(mse),
+                "rmse": float(rmse),
+                "mae": float(mae),
+                "r2_score": float(r2)
+            }
         print("═" * 75 + "\n")
+        return metrics
         
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
@@ -488,11 +501,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         inference_cp = self._get_inference_checkpoint_path(job_id)
         if os.path.exists(inference_cp):
             os.remove(inference_cp)
-        
-    def _get_trees_checkpoint_path(self, job_id: str) -> str:
-        if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/trained_trees_{job_id}.pkl"
-        return f"./.local_storage/checkpoints/trained_trees_{job_id}.pkl"
 
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
