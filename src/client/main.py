@@ -1,15 +1,11 @@
 import json
 import os
-import socket
 import sys
-import threading
-from src.master.orchestrator.centralized import CentralizedOrchestrator
-from src.master.orchestrator.federated import FederatedOrchestrator
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
-from src.testing.engine import TestEngine
+
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -56,36 +52,8 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     return Hyperparameters(**hp_data)
 
 
-def run_predefined_tests():
-    """Esegue test predefiniti per verificare il sistema senza input utente."""
-    cfg = SystemConfig()
-    mode = getattr(cfg, "mode", "centralized").strip().lower()
 
-    ec2_id = os.environ.get("EC2_ID", "Locale")
-    hostname = socket.gethostname()
-    orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
-    
-    running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
-
-    if mode == "federated":
-        orchestrator = FederatedOrchestrator(orchestrator_name=orchestrator_name)
-    else:
-        orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
-        
-    print("\n=== AVVIO TEST DI SISTEMA PREDEFINITI ===")
-    try: 
-        # Lanciamo il thread dell'orchestratore SOLO se siamo fuori da Docker (in locale puro).
-        if not running_in_docker:
-            print("[INFO] Avvio dell'Orchestratore locale in un thread dedicato...")
-            orch_thread = threading.Thread(target=orchestrator.start, daemon=True)
-            orch_thread.start()
-        else:
-            print("[INFO] Esecuzione in Docker rilevata. L'Orchestratore principale è già attivo in background.")
-
-        test_engine = TestEngine(orchestrator=orchestrator)
-        test_engine.run_scenarios()
-    except Exception as e:
-        print(f"\n[ERRORE] Durante l'esecuzione dei test: {e}")
+   
 
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
@@ -350,7 +318,11 @@ def main():
         config_mode = get_input("Scelta: ", "1")
 
         if config_mode == "2":
-            run_predefined_tests()
+            # Usiamo cfg.env per l'ambiente (local/aws) e cfg.mode per la topologia (centralized/federated)
+            cmd = f"{sys.executable} -m src.testing.automatedTestSuite --mode {cfg.env} --topology {cfg.mode} --exec {cfg.exec if hasattr(cfg, 'exec') else 'cmd'}"
+            print(f"\n[INFO] Avvio della Test Suite Automatica con comando:\n{cmd}\n")
+            os.system(cmd)
+            print("\n[INFO] Test Suite completata. Ritorno al menù principale.")
             continue
         elif config_mode == "3":
             print("\nChiusura del Client. Arrivederci!")
