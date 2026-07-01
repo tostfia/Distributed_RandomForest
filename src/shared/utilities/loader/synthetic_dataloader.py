@@ -35,6 +35,7 @@ class SyntheticDataLoader(DatasetLoader):
         weight: list = None,
         n_informative_reg: int = None,
         noise: float = None,
+        output_dir: str = "synthetic/",
     ):
         
         if task not in ("classification", "regression"):
@@ -54,6 +55,7 @@ class SyntheticDataLoader(DatasetLoader):
         self.n_features = n_features if n_features is not None else config.get("n_features", 30)
         self.random_seed = random_seed
         self.filename = filename if (filename := config.get("filename")) is not None else "synthetic_dataset.csv"
+        self.output_dir = output_dir if output_dir is not None else config.get("output_dir", "synthetic/")
 
         if self.task == "classification":
             self.n_informative = n_informative if n_informative is not None else config.get("n_informative", int(self.n_features * 0.35))
@@ -122,9 +124,9 @@ class SyntheticDataLoader(DatasetLoader):
         print("\n[OK] Dataset sintetico generato.")
         print(f" • Numero di righe:   {df.shape[0]}")
         print(f" • Numero di colonne: {df.shape[1]}")
-        output_dir = "synthetic/"
-        os.makedirs(output_dir, exist_ok=True)
-        final_path = os.path.join(output_dir, self.filename)
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        final_path = os.path.join(self.output_dir, self.filename)
         df.to_csv(final_path, index=False)
         print(f" • Dataset salvato in: {final_path}")
 

@@ -33,7 +33,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         )
         self.current_job_id = None
 
-    def _ensure_local_bootstrap(self):
+    def _ensure_local_bootstrap(self, payload: dict):
         """
         Esegue il bootstrap dei file CSV LOCALI se siamo in ambiente 'local'.
         Usa fcntl.flock per garantire mutua esclusione assoluta a livello di File System
@@ -42,7 +42,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment != "local":
             print(f"[{self.orchestrator_name}] Ambiente Cloud/AWS rilevato. Bootstrap locale saltato.")
             return
-
+        datasetype = self._resolve_dataset_type(payload)
         lock_dir = "./.local_storage"
         os.makedirs(lock_dir, exist_ok=True)
         bootstrap_mutex = os.path.join(lock_dir, "bootstrap_data.mutex")
@@ -54,6 +54,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                 num_workers = self.num_workers
                 print(f"[{self.orchestrator_name}] [BOOTSTRAP] Controllo shard per {num_workers} worker...")
                 
+                if datasetype == "synthetic":
+                    print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Il bootstrap e lo sharding sono delegati autonomamente ai singoli worker.")
+                    return
                 data_folder = getattr(self.cfg, "dataset_path", None)
                 if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
                     data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
@@ -89,7 +92,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
     def _perform_active_recovery(self):
         """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
-        self._ensure_local_bootstrap()
+        
         super()._perform_active_recovery()
 
     def _resolve_dataset_type(self, payload: dict) -> str:
@@ -110,6 +113,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
         else:
+            self._ensure_local_bootstrap(payload)
             checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
             os.makedirs("./.local_storage", exist_ok=True)
 
@@ -212,7 +216,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 hyperparameters={
                                     **hp, 
                                     "random_state": chunk_seed + (idx * 1000),
-                                    "feature_selezionate": feature_selezionate
+                                    "feature_selezionate": feature_selezionate,
+                                    
                                 },
                             )
                             result_trees = pickle.loads(obtain(result_raw))
@@ -367,6 +372,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "dataset_type": self._resolve_dataset_type(payload),
                         "feature_selezionate": feature_selezionate,
                         "tree_type": tree_type,
+                        "global_classes": global_model.classes_.tolist()
                     }
                 }))
                 worker_data = pickle.loads(obtain(raw_response))
@@ -484,7 +490,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         print("═" * 75 + "\n")
 
         if tree_type == "classifier":
-            final_predictions = np.array(y_pred).astype(int) 
+            final_predictions = (np.array(y_pred) >= 0.5).astype(int) 
             y_true = np.array(y_true).astype(int)
 
             accuracy  = np.mean(final_predictions == y_true)

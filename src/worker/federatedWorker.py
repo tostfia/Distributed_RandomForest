@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
@@ -210,7 +211,11 @@ class FederatedWorker(BaseWorker):
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters)
             self._cached_job_id = job_id
 
-        tree_class = self._get_tree_class()
+        tree_type = hyperparameters.get("tree_type", "classifier")
+        if tree_type == "classifier":
+            tree_class = DecisionTreeClassifier
+        else:
+            tree_class = DecisionTreeRegressor
         totale_core = os.cpu_count() or 1
         allocated_cores = max(1, totale_core - 1) if totale_core > 2 else totale_core
         
@@ -304,8 +309,8 @@ class FederatedWorker(BaseWorker):
         seed = hyperparameters.get("random_state", 123)
         task = "regression" if self.is_regression() else "classification"
         target_column = "Target" if task == "regression" else "Label"
-
-        loader = SyntheticDataLoader(task=task, random_seed=seed, target_column=target_column)
+        n_samples = 166666
+        loader = SyntheticDataLoader(task=task,n_samples=n_samples, random_seed=seed, target_column=target_column,output_dir=self.local_cache_dir)
         df = loader.load()
 
         X = df.drop(columns=[target_column]).to_numpy(dtype=np.float64)
@@ -365,10 +370,14 @@ class FederatedWorker(BaseWorker):
             if actual_is_regressor:
                 rf = RandomForestRegressor(n_estimators=len(unpacked_model))
             else:
-                rf = RandomForestClassifier(n_estimators=len(unpacked_model), class_weight='balanced')
-                unique_classes = np.unique(self._cached_y_test)
-                rf.classes_ = unique_classes
-                rf.n_classes_ = len(unique_classes)
+                rf = RandomForestClassifier(n_estimators=len(unpacked_model))
+                global_classes = hyperparameters.get("global_classes", [0, 1])
+                rf.classes_ = np.array(global_classes, dtype=np.int64)
+                rf.n_classes_ = len(rf.classes_)
+                local_unique = np.unique(self._cached_y_test)
+                if len(local_unique) < len(rf.classes_):
+                    print(f"[{self.worker_name}] [WARN] Il test-shard locale contiene solo le classi {local_unique.tolist()} "
+                        f"su {rf.classes_.tolist()} attese. Possibile shard sbilanciato o indice worker duplicato.")
 
             rf.estimators_ = unpacked_model
             rf.n_features_in_ = self._cached_X_test.shape[1]

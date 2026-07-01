@@ -60,7 +60,7 @@ services:
       if command -v tc >/dev/null; then
         tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms};
       fi;
-      python -m src.worker.main Worker-${EC2_ID:-Locale}-federated-$$(hostname) 18861 federated local
+      python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname) 18861 federated local
       "
     depends_on:
       - orchestrator

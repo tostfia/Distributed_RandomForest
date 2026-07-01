@@ -5,6 +5,7 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
+from testing.enigine import TestEngine
 
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
@@ -318,10 +319,8 @@ def main():
         config_mode = get_input("Scelta: ", "1")
 
         if config_mode == "2":
-            # Usiamo cfg.env per l'ambiente (local/aws) e cfg.mode per la topologia (centralized/federated)
-            cmd = f"{sys.executable} -m src.testing.automatedTestSuite --mode {cfg.env} --topology {cfg.mode} --exec {cfg.exec if hasattr(cfg, 'exec') else 'cmd'}"
-            print(f"\n[INFO] Avvio della Test Suite Automatica con comando:\n{cmd}\n")
-            os.system(cmd)
+            engine = TestEngine(mode=cfg.mode, env=cfg.env, exec = cfg.exec)
+            engine.run_scenarios()
             print("\n[INFO] Test Suite completata. Ritorno al menù principale.")
             continue
         elif config_mode == "3":
