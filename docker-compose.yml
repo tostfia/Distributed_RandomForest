@@ -2,22 +2,19 @@ services:
   orchestrator:
     build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    user: "${MY_UID}:${MY_GID}"
-    
-    stdin_open: true           
-    tty: true                  
-    
+    user: "${MY_UID:-1000}:${MY_GID:-1000}"
+    stdin_open: true
+    tty: true
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
       - PYTHONUNBUFFERED=1
       - NUM_WORKERS=${NUM_WORKERS:-2}
       - ENV_MODE=${ENV_MODE:-local}
-      - TRAINING_MODE=${TRAINING_MODE:-federated} 
+      - TRAINING_MODE=${TRAINING_MODE:-federated}
       - EC2_ID=${EC2_ID:-Locale}
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - RUNNING_IN_DOCKER=true
-      - WORKER_INDEX={{.Task.Slot}}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z
@@ -34,9 +31,9 @@ services:
   worker:
     build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
-    user: "${MY_UID}:${MY_GID}"
+    user: "${MY_UID:-1000}:${MY_GID:-1000}"
     ports:
-      - "18861-18865:18861"
+      - "18861-18870:18861"
     deploy:
       replicas: ${NUM_WORKERS:-2}
       resources:
@@ -49,7 +46,7 @@ services:
       - PYTHONUNBUFFERED=1
       - RPC_PORT=18861
       - ENV_MODE=${ENV_MODE:-local}
-      - TRAINING_MODE=${TRAINING_MODE:-federated} 
+      - TRAINING_MODE=${TRAINING_MODE:-federated}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
     volumes:
@@ -60,10 +57,10 @@ services:
       - ./workers_cache:/app/workers_cache:z
     command: >
       sh -c "
-        if command -v tc >/dev/null; then
-          tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms};
-        fi;
-        python -m src.worker.main Worker-${EC2_ID:-Locale}-federated-\$(hostname) 18861 federated local
+      if command -v tc >/dev/null; then
+        tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms};
+      fi;
+      python -m src.worker.main Worker-${EC2_ID:-Locale}-federated-$$(hostname) 18861 federated local
       "
     depends_on:
       - orchestrator

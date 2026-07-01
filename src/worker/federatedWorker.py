@@ -1,6 +1,8 @@
 from multiprocessing.pool import Pool
 import os
 import pickle
+from time import time
+import time as time_module
 from botocore.exceptions import ClientError
 import boto3
 import numpy as np
@@ -62,7 +64,6 @@ def _train_single_fed_tree(args):
         kwargs["max_depth"] = max_depth
         
     # 3. CONTROLLO CRUCIALE: Aggiungiamo class_weight solo se l'albero è un classificatore
-    # Evita il TypeError su DecisionTreeRegressor sia in Docker che in locale
     if class_weight is not None and "Classifier" in tree_class.__name__:
         kwargs["class_weight"] = class_weight
         
@@ -76,7 +77,7 @@ class FederatedWorker(BaseWorker):
     """Worker per la gestione dell'addestramento in modalità federata.
 
     Interpreta le stringhe sintetiche oppure scarica lo shard reale assegnato
-    dall'Orchestratore salvandolo nella cache del disco rigido locale (EBS su AWS).
+    dall'Orchestratore salvandolo nella cache del disco rigido locale.
     """
 
     def __init__(
@@ -99,7 +100,6 @@ class FederatedWorker(BaseWorker):
         self.target_column = target_column
         self.tree_type = tree_type
         
-        
         # Cache dello stato interno
         self._cached_job_id = None
         self._cached_X_train = None
@@ -107,54 +107,80 @@ class FederatedWorker(BaseWorker):
         self._cached_X_test = None
         self._cached_y_test = None
         self.local_sample_count = 0
-        self.worker_index = 1
+        
+        # Manteniamo aperto il file di lock come variabile d'istanza per impedire al Garbage Collector di distruggerlo
+        self._index_lock_file = None
 
-        env_index = os.environ.get("WORKER_INDEX")
-        if env_index and env_index.isdigit():
-            self.worker_index = int(env_index)
-        else:
-            # Fallback per l'esecuzione locale senza Docker
-            self.worker_index = 0
+        # --- GESTIONE COERENTE DEL REGISTRO DEI WORKER (FAULT-TOLERANT) ---
+        if self.environment == "aws":
+            self.worker_index = 1
             for char in worker_name.split("-"):
                 if char.isdigit():
                     self.worker_index = int(char)
                     break
-            
-            # Se ancora non lo trova ed è a 0, metti un default di sicurezza (es. 1)
-            if self.worker_index == 0:
-                self.worker_index = 1
-
-        index_was_explicit = bool(env_index and env_index.isdigit())
-        # Gestione asimmetrica della cache locale in base all'ambiente
-        if self.environment == "aws":
             self.local_cache_dir = f"/tmp/{worker_name}_cache"
-        elif index_was_explicit:
-            worker_id_uniforme = f"Worker-Locale-0{self.worker_index}" if self.worker_index < 9 else f"Worker-Locale-{self.worker_index}"
-            self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
         else:
-           
-            self.local_cache_dir = os.path.join("./workers_cache", worker_name)
+            # Siamo in ambiente "local" (Docker Compose Replicas)
+            # Acquisiamo un indice atomico non-bloccante tramite fcntl
+            num_workers = int(os.environ.get("NUM_WORKERS", 2))
+            self.worker_index = self._claim_worker_index(num_workers)
+            
+            # Generiamo il nome uniforme corrispondente alle directory generate dallo splitter dell'orchestratore
+            worker_id_uniforme = f"Worker-Locale-{self.worker_index:02d}"
+            self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
             
         os.makedirs(self.local_cache_dir, exist_ok=True)
 
         print(
-            f"[FederatedWorker] Inizializzato in ambiente: {self.environment.upper()} — "
-            f"Directory Cache locale: {self.local_cache_dir} — Target: {self.target_column}"
+            f"[{self.worker_name}] Inizializzato con successo. "
+            f"Indice Worker: {self.worker_index} — Cache Dir: {self.local_cache_dir}"
         )
+
+    def _claim_worker_index(self, num_workers: int) -> int:
+        import fcntl
+        
+        lock_dir = os.environ.get("LOCAL_STORAGE_PATH", os.path.abspath("./.local_storage"))
+        os.makedirs(lock_dir, exist_ok=True)
+
+        # Scansione atomica degli indici disponibili da 1 a NUM_WORKERS
+        for candidate in range(1, num_workers + 1):
+            lock_path = os.path.join(lock_dir, f"worker_{candidate}.lock")
+            
+            try:
+                # Apertura del file pointer associato alla sedia numerica
+                f = open(lock_path, "w")
+                
+                # Tentativo di acquisizione del lock esclusivo NON BLOCCANTE
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                
+                # Se la chiamata non genera BlockingIOError, la sedia è libera!
+                f.write(f"Occupato da {self.worker_name} al timestamp {time_module.time()}\n")
+                f.flush()
+                
+                # Preserviamo l'oggetto file aperto nell'istanza per mantenere attivo il lock a livello di kernel
+                self._index_lock_file = f 
+                
+                print(f"[{self.worker_name}] [AUTO-INDEX] Conquistato con successo l'indice stazionario: {candidate}")
+                return candidate
+
+            except BlockingIOError:
+                # Sedia occupata da un'altra replica concorrente, chiudiamo il descrittore locale e passiamo oltre
+                f.close()
+                continue
+
+        # Estremo fallback protettivo
+        print(f"[{self.worker_name}] [ATTENZIONE] Nessuna sedia libera trovata in .local_storage. Fallback forzato su indice 1.")
+        return 1
 
     def is_regression(self) -> bool:
         return self.tree_type == "regressor"
     
     def _get_tree_class(self) -> type:
-        """Restituisce il riferimento alla classe dell'albero (es. DecisionTreeClassifier)."""
         return self.tree_class_reference
    
     def _load_data(self, dataset_tag: str):
-        """Implementazione obbligatoria per la classe base."""
-        
         dao = DatasetDAOFactory.get_dao(self.environment)
         
-        # Carica dai percorsi standard definiti dallo splitter
         train_path = os.path.join(self.local_cache_dir, "train_shard.csv")
         test_path = os.path.join(self.local_cache_dir, "test_shard.csv")
         
@@ -167,31 +193,23 @@ class FederatedWorker(BaseWorker):
         self.y_test = test_df[self.target_column]
         return True
 
-
     def exposed_load_local_shard(self):
-        """Metodo RPC per forzare il caricamento."""
         return self._load_data("real")
     
-    def exposed_train_local_federated_forest(self,job_id: str, dataset_type: str, n_estimators_local: int, worker_index: int, hyperparameters: dict) -> list:
-                                              
-        """Metodo RPC esposto all'Orchestratore per l'addestramento locale."""
-        
+    def exposed_train_local_federated_forest(self, job_id: str, dataset_type: str, n_estimators_local: int, worker_index: int, hyperparameters: dict) -> list:
         hyperparameters = obtain(hyperparameters)
         max_depth = hyperparameters.get("max_depth")
         base_seed = int(hyperparameters.get("random_state", 123))
         
         print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
 
-        # Caricamento e Preprocessing dei dati (eseguito solo se cambia il Job ID o la cache è vuota)
         if self._cached_job_id != job_id or self._cached_X_train is None:
             if dataset_type == "synthetic":
                 self._load_synthetic_data(hyperparameters)
             else:
-                # Passiamo l'intero payload per estrarre la lista globale delle feature sincronizzate
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters)
             self._cached_job_id = job_id
 
-        
         tree_class = self._get_tree_class()
         totale_core = os.cpu_count() or 1
         allocated_cores = max(1, totale_core - 1) if totale_core > 2 else totale_core
@@ -202,8 +220,6 @@ class FederatedWorker(BaseWorker):
             seed = base_seed + i
             worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, class_weight))
 
-        # Addestramento parallelo locale
-        # 5. Ottimizzazione anti-crash: esecuzione diretta se richiesto un solo albero
         if n_estimators_local == 1:
             print(f"[{self.worker_name}] Ottimizzazione: 1 solo albero. Calcolo diretto senza Pool.")
             global _fed_child_X, _fed_child_y
@@ -211,7 +227,6 @@ class FederatedWorker(BaseWorker):
             _fed_child_y = self._cached_y_train
             local_trees = [_train_single_fed_tree(worker_tasks[0])]
         else:
-            # Creazione di un pool locale, temporaneo e isolato per questo round federato
             pool_size = min(n_estimators_local, allocated_cores)
             print(f"[{self.worker_name}] Istanziazione Pool locale indipendente con {pool_size} processi...")
             
@@ -220,12 +235,9 @@ class FederatedWorker(BaseWorker):
                 local_trees = pool.map(_train_single_fed_tree, worker_tasks)
 
         print(f"[+] [{self.worker_name}] Addestramento completato. Serializzazione in corso...")
-        
-        # 6. Ritorno diretto all'orchestratore
         return pickle.dumps(local_trees)
     
     def _load_and_preprocess_real_shard(self, worker_index: int, hyperparameters: dict):
-        """Scarica e processa lo shard reale garantendo l'allineamento delle feature."""
         train_filename = "train_shard.csv"
         test_filename = "test_shard.csv"
         local_train_path = os.path.join(self.local_cache_dir, train_filename)
@@ -233,7 +245,6 @@ class FederatedWorker(BaseWorker):
 
         hyperparameters = obtain(hyperparameters)
 
-        # 1. GESTIONE AWS S3 (Se applicabile)
         if self.environment == "aws":
             bucket_name = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
             s3_train_key = f"federated_shards/worker_{worker_index}/{train_filename}"
@@ -246,14 +257,12 @@ class FederatedWorker(BaseWorker):
             except ClientError as e:
                 raise IOError(f"[{self.worker_name}] Errore download shard da S3: {e}")
 
-        # 2. LETTURA SHARD GREZZI
         if not os.path.exists(local_train_path):
             raise FileNotFoundError(f"Shard non trovato in {local_train_path}")
             
         df_train_raw = pd.read_csv(local_train_path, low_memory=False)
         df_test_raw = pd.read_csv(local_test_path, low_memory=False)
 
-        # 3. PIPELINE DI PREPROCESSING SPECULARE
         preprocessor = CICIDSPreprocessor(target_column=self.target_column)
         
         df_train_bin = preprocessor.binarize_target(df_train_raw)
@@ -262,19 +271,14 @@ class FederatedWorker(BaseWorker):
         df_train_clean = preprocessor.process(df_train_bin)
         df_test_clean = preprocessor.process(df_test_bin)
 
-        
-        
         selected_features = hyperparameters.get("feature_selezionate", None)
         
         if selected_features is not None:
             print(f"[{self.worker_name}] Applicazione spazio feature sincronizzato dal Master ({len(selected_features)} colonne).")
-            # Ci assicuriamo che il target rimanga presente prima di isolare le matrici
             features_to_keep = [col for col in selected_features if col != self.target_column]
-            
             X_train_df = df_train_clean[features_to_keep]
             X_test_df = df_test_clean[features_to_keep]
         else:
-            # Fallback di sicurezza se non passate (es. esecuzione isolata)
             print(f"[{self.worker_name}] [ATTENZIONE] Nessuna lista feature passata. Uso il set completo.")
             X_train_df = df_train_clean.drop(columns=[self.target_column])
             X_test_df = df_test_clean.drop(columns=[self.target_column])
@@ -282,7 +286,6 @@ class FederatedWorker(BaseWorker):
         y_train_df = df_train_clean[self.target_column]
         y_test_df = df_test_clean[self.target_column]
 
-        # 5. CONVERSIONE IN MATRICI NUMPY STABILI (Identica a CentralizedWorker)
         self._cached_X_train = X_train_df.to_numpy(dtype=np.float64)
         self._cached_X_test = X_test_df.to_numpy(dtype=np.float64)
         
@@ -297,7 +300,6 @@ class FederatedWorker(BaseWorker):
         print(f"[{self.worker_name}] Shard caricato in cache. X_train Shape: {self._cached_X_train.shape}")
 
     def _load_synthetic_data(self, hyperparameters: dict):
-        """Generazione di dati sintetici speculari in RAM."""
         hyperparameters = obtain(hyperparameters)
         seed = hyperparameters.get("random_state", 123)
         task = "regression" if self.is_regression() else "classification"

@@ -1,3 +1,4 @@
+import fcntl
 import json
 import pickle
 import os
@@ -13,6 +14,8 @@ import numpy as np
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import (classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score)
+from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
@@ -20,14 +23,74 @@ from src.shared.config import SystemConfig
 
 class FederatedOrchestrator(BaseOrchestrator):
     
-    def __init__(self, orchestrator_name: str = None):
+    def __init__(self, orchestrator_name: str = None, num_workers: int = None):
         self.cfg = SystemConfig()
+        self.num_workers = num_workers or int(os.environ.get("NUM_WORKERS", getattr(self.cfg, "num_workers", 3)))
         name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
         super().__init__(
             orchestrator_name=name,
             queue_name="federated_queue"
         )
         self.current_job_id = None
+
+    def _ensure_local_bootstrap(self):
+        """
+        Esegue il bootstrap dei file CSV LOCALI se siamo in ambiente 'local'.
+        Usa fcntl.flock per garantire mutua esclusione assoluta a livello di File System
+        ed evitare race condition tra repliche concorrenti.
+        """
+        if self.environment != "local":
+            print(f"[{self.orchestrator_name}] Ambiente Cloud/AWS rilevato. Bootstrap locale saltato.")
+            return
+
+        lock_dir = "./.local_storage"
+        os.makedirs(lock_dir, exist_ok=True)
+        bootstrap_mutex = os.path.join(lock_dir, "bootstrap_data.mutex")
+
+        # Acquisiamo un lock esclusivo sul file di bootstrap prima di fare qualsiasi controllo o scrittura
+        with open(bootstrap_mutex, "a") as mutex:
+            fcntl.flock(mutex, fcntl.LOCK_EX)
+            try:
+                num_workers = self.num_workers
+                print(f"[{self.orchestrator_name}] [BOOTSTRAP] Controllo shard per {num_workers} worker...")
+                
+                data_folder = getattr(self.cfg, "dataset_path", None)
+                if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
+                    data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
+                
+                shards_esistenti = True
+                base_cache_dir = "./workers_cache"
+                for i in range(1, num_workers + 1):
+                    dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
+                    dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
+                    
+                    train_p = os.path.join(dir_padded, "train_shard.csv")
+                    test_p = os.path.join(dir_padded, "test_shard.csv")
+                    train_up = os.path.join(dir_unpadded, "train_shard.csv")
+                    test_up = os.path.join(dir_unpadded, "test_shard.csv")
+                    
+                    if not ((os.path.exists(train_p) and os.path.exists(test_p)) or 
+                            (os.path.exists(train_up) and os.path.exists(test_up))):
+                        shards_esistenti = False
+                        break
+                
+                if shards_esistenti:
+                    print(f"[{self.orchestrator_name}] [BOOTSTRAP] Shard già presenti su disco. Salto il ricalcolo.")
+                else:
+                    print(f"[{self.orchestrator_name}] [BOOTSTRAP] Shard incompleti o assenti. Avvio Generazione...")
+                    data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
+                    splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
+                    splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
+                    print(f"[{self.orchestrator_name}] [BOOTSTRAP OK] Shard reali distribuiti nelle cartelle locali dei Worker.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [BOOTSTRAP WARN] Fallimento durante il bootstrap locale: {e}")
+            finally:
+                fcntl.flock(mutex, fcntl.LOCK_UN)
+
+    def _perform_active_recovery(self):
+        """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
+        self._ensure_local_bootstrap()
+        super()._perform_active_recovery()
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
