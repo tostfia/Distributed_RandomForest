@@ -16,7 +16,7 @@ class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str):
         self.cfg = SystemConfig()
         self.environment = self.cfg.env
-        
+        self._stop_heartbeat = threading.Event()
         self.orchestrator_name = orchestrator_name
         self.queue_name = queue_name
         self.connessioni_attive = []
@@ -193,7 +193,7 @@ class BaseOrchestrator(ABC):
         ServiceRegistry.register_orchestrator(self.orchestrator_name)
 
         is_leader = False
-        self._stop_heartbeat = threading.Event()
+        
         self.hb_thread = None
 
         try:

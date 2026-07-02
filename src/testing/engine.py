@@ -43,18 +43,23 @@ class TestEngine:
         self._start_local_workers()
 
     def _start_local_workers(self):
-        num_workers = int(os.environ.get("NUM_WORKERS", 2))
-        port_base = 18861
-        print("[ENGINE] Avvio dei worker locali...")
-        for i in range(1, num_workers + 1):
-            worker_name = f"Worker-Locale-{i:02d}"
-            port = port_base + i-1
-            print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
-            cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.worker_processes.append(p)
-        time.sleep(1)  # Simula il tempo di avvio dei worker
-        print("[ENGINE] Worker locali avviati.")    
+        docker = os.environ.get("RUNNING_IN_DOCKER")
+        if docker == "true":
+            print("[ENGINE] Ambiente DOCKER rilevato: avviati già i worker come container...")
+            return
+        else:
+            num_workers = int(os.environ.get("NUM_WORKERS", 2))
+            port_base = 18861
+            print("[ENGINE] Avvio dei worker locali...")
+            for i in range(1, num_workers + 1):
+                worker_name = f"Worker-Locale-{i:02d}"
+                port = port_base + i-1
+                print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
+                cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
+                p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.worker_processes.append(p)
+            time.sleep(1)  # Simula il tempo di avvio dei worker
+            print("[ENGINE] Worker locali avviati.")    
 
     def _cleanup_workers(self):
         print("[ENGINE] Pulizia dei worker locali...")
@@ -103,8 +108,12 @@ class TestEngine:
             if config_mode != "all":
                 self._print_final_summary()
         finally:
+            docker = os.environ.get("RUNNING_IN_DOCKER")
+            if docker != "true":
+                print("[ENGINE] Pulizia dei worker locali...")
+                self._cleanup_workers()
             
-            self._cleanup_workers()
+            
     
     def _run_all_scenarios(self):
         print("\n--- Esecuzione di tutti gli scenari di test ---")

@@ -68,3 +68,25 @@ services:
       - orchestrator
     restart: on-failure
 
+  
+  test-engine:
+    build: .
+    image: ${IMAGE_NAME:-rf-worker-locale:latest}
+    user: "${MY_UID:-1000}:${MY_GID:-1000}"
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - ENV_MODE=${ENV_MODE:-local}
+      - TRAINING_MODE=${TRAINING_MODE:-federated}
+      - RUNNING_IN_DOCKER=true
+      - LOCAL_STORAGE_PATH=/app/.local_storage
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/app:z
+      - ./synthetic:/app/synthetic:z
+      - ./.local_storage:/app/.local_storage:z
+      - ./saved_models:/app/saved_models:z
+      - ./workers_cache:/app/workers_cache:z
+    command: python -m src.testing.engine
+    
+
