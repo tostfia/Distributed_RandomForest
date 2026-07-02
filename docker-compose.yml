@@ -5,6 +5,8 @@ services:
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     stdin_open: true
     tty: true
+    cap_add:
+      - NET_ADMIN
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
@@ -65,3 +67,4 @@ services:
     depends_on:
       - orchestrator
     restart: on-failure
+

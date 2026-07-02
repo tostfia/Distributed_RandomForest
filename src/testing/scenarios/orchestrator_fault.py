@@ -6,14 +6,17 @@ from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
 
 
+
 class OrchestratorFailoverScenario(BaseTestScenario):
     """
     Copre lo Scenario: Failover dell'Orchestratore.
     Usa l'orchestratore nativo del TestEngine come Leader (Master-1) e 
     istanzia un secondo orchestratore di Standby (Master-2) per il subentro.
     """
-    
+ 
+
     def run(self) -> dict:
+     
         ft_cfg = self.config.get("fault_tolerance", {})
         target_alberi = 60
         expected_min = ft_cfg.get("expected_min_trees", 60)

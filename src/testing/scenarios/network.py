@@ -5,6 +5,7 @@ import time
 from src.testing.scenarios.base import BaseTestScenario
 
 
+
 class NetworkSimulationScenario(BaseTestScenario):
     """
     Scenario 3: Simulazione di ritardi di rete tramite tc netem.
@@ -18,8 +19,8 @@ class NetworkSimulationScenario(BaseTestScenario):
     
     def __init__(self, config, orchestrator):
         super().__init__(config, orchestrator)
-        self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
-        self.tc_interface = os.environ.get("TC_INTERFACE", "lo")  # Interfaccia di rete da manipolare con tc
+        self.tc_interface = os.environ.get("TC_INTERFACE", "lo")
+       
 
     # ------------------------------------------------------------------ #
     # tc helpers                                                           #
@@ -28,7 +29,7 @@ class NetworkSimulationScenario(BaseTestScenario):
     def _tc_available(self) -> bool:
         """Controlla che tc sia installato e sudo funzioni senza password."""
         result = subprocess.run(
-            ["sudo", "-n", "tc", "qdisc", "show", "dev", self.tc_interface],
+            [ "-n", "tc", "qdisc", "show", "dev", self.tc_interface],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -47,13 +48,13 @@ class NetworkSimulationScenario(BaseTestScenario):
 
         # Rimuove eventuali regole residue per evitare "File exists"
         subprocess.run(
-            ["sudo", "tc", "qdisc", "del", "dev", "lo", "root"],
+            [ "tc", "qdisc", "del", "dev", "lo", "root"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
         cmd = [
-            "sudo", "tc", "qdisc", "add", "dev", self.tc_interface,
+            "tc", "qdisc", "add", "dev", self.tc_interface,
             "root", "netem", "delay", f"{latency_ms}ms",
         ]
         if loss_percentage > 0:
@@ -76,7 +77,7 @@ class NetworkSimulationScenario(BaseTestScenario):
         """Rimuove tutte le regole da 'lo' e ripristina il comportamento normale."""
         print("[tc CLEANUP] Rimozione ritardi di rete da 'lo'...")
         subprocess.run(
-            ["sudo", "tc", "qdisc", "del", "dev", "lo", "root"],
+            [ "tc", "qdisc", "del", "dev", "lo", "root"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -112,34 +113,7 @@ class NetworkSimulationScenario(BaseTestScenario):
     # ------------------------------------------------------------------ #
 
     def run(self) -> dict:
-        if self.running_in_docker:
-            return self._run_docker_mode()
-        return self._run_local_mode()
-
-    def _run_docker_mode(self) -> dict:
-        net_scenario_env = os.environ.get("NET_SCENARIO", "delay 50ms")
-        probe_time = self._measure_rpc_baseline()
-        payload = self._build_payload("network_test_docker")
-        net_cfg = self.config.get("network_simulation", {})
-        n_trees = net_cfg.get("n_estimators_test", 10)
-
-        t0 = time.perf_counter()
-        trees_built = self.orchestrator._execute_training_step(
-            payload, start_alberi=0, target_alberi=n_trees, seed=123
-        )
-        duration = time.perf_counter() - t0
-        return{
-            "scenario_description": "Valutazione dell'impatto dei ritardi di rete applicati staticamente "
-                                     "dal container Worker (NET_SCENARIO) sulle chiamate RPC.",
-            "status": "SUCCESS" if trees_built == n_trees else "PARTIAL",
-            "execution_mode": "docker",
-            "net_scenario_applied": net_scenario_env,
-            "probe_rpc_baseline_ms": round(probe_time * 1000, 2),
-            "duration_seconds": duration,
-            "tc_rules_successfully_injected": None,  
-        }
-    
-    def _run_local_mode(self) -> dict:
+      
         net_cfg = self.config.get("network_simulation", {})
 
 

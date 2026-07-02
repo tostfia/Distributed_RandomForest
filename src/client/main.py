@@ -5,7 +5,7 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
-from testing.enigine import TestEngine
+from testing.engine import TestEngine
 
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
@@ -319,7 +319,9 @@ def main():
         config_mode = get_input("Scelta: ", "1")
 
         if config_mode == "2":
-            engine = TestEngine(mode=cfg.mode, env=cfg.env, exec = cfg.exec)
+            mode = os.environ.get("SYS_MODE", "centralized")
+            env = os.environ.get("SYS_ENV", "local")
+            engine = TestEngine(mode=mode, env=env)
             engine.run_scenarios()
             print("\n[INFO] Test Suite completata. Ritorno al menù principale.")
             continue

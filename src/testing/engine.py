@@ -2,9 +2,7 @@ import json
 import os
 import subprocess
 import time
-import socket
-import threading
-from src.shared.config import SystemConfig
+
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -14,21 +12,22 @@ from src.testing.scenarios.performance import PerformanceAndMetricsScenario
 from src.testing.scenarios.scalability import ScalabilityScenario
 from src.testing.scenarios.orchestrator_fault import OrchestratorFailoverScenario
 
+
 CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), "test_config.json")
 
 class TestEngine:
     """Engine principale che orchestra l'esecuzione di tutte le suite di test."""
-    def __init__(self, mode: str , env: str , exec: str):
+    def __init__(self, mode: str , env: str ):
         self.config_path = CONFIG_FILE_PATH
         self.mode = mode
         self.env = env
-        self.exec = exec
         self.config = self._load_config()
         self.global_reports = {}
+        self.orchestrator = None
         self.worker_processes = []
 
-        self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
-
+        self._initialize_infrastructure()
+        
     def _load_config(self) -> dict:
 
         try:
@@ -37,29 +36,39 @@ class TestEngine:
         except FileNotFoundError:
             print(f"[ERRORE ENGINE] File {self.config_path} non trovato. Uso config di fallback.")
             return {"selected_task": "classifier", "dataset_path": "synthetic/synthetic_dataset.csv"}
-        
-    def _init_orchestrator(self):
-        if self.mode == "centralized":
-            self.orchestrator = CentralizedOrchestrator()
-        elif self.mode == "federated":
-            self.orchestrator = FederatedOrchestrator()
+
+    def _initialize_infrastructure(self):
+     
+        self.orchestrator = CentralizedOrchestrator(orchestrator_name= "orchestrator-centralizzato-testing") if self.mode == "centralized" else FederatedOrchestrator(orchestrator_name= "orchestrator-federato-testing")   
+        self._start_local_workers()
+
     def _start_local_workers(self):
-        print("\n[ENGINE SYSTEM] Avvio dei worker locali...")
-        num_workers = int(os.environ.get("NUM_WORKERS", 3))
-        for i in range(num_workers):
-            worker_id = f"worker_{i+1}"
-            command = ["python", "src/worker/main.py", "--worker_id", worker_id, "--mode", self.mode, "--env", self.env, "--exec", self.exec]
-            process = subprocess.Popen(command)
-            self.worker_processes.append(process)
-            print(f"[ENGINE SYSTEM] Worker {worker_id} avviato con PID {process.pid}.")
-        time.sleep(5)  # Attendere che i worker siano pronti
-        print("[ENGINE SYSTEM] Tutti i worker locali sono stati avviati.")
+        num_workers = int(os.environ.get("NUM_WORKERS", 2))
+        port_base = 18861
+        print("[ENGINE] Avvio dei worker locali...")
+        for i in range(1, num_workers + 1):
+            worker_name = f"Worker-Locale-{i:02d}"
+            port = port_base + i-1
+            print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
+            cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.worker_processes.append(p)
+        time.sleep(1)  # Simula il tempo di avvio dei worker
+        print("[ENGINE] Worker locali avviati.")    
+
+    def _cleanup_workers(self):
+        print("[ENGINE] Pulizia dei worker locali...")
+        for p in self.worker_processes:
+            p.terminate()
+            p.wait()
+        print("[ENGINE] Worker locali terminati.")
+    
 
     def run_scenarios(self):
         print("\n==================================================")
         print("       AVVIO AUTOMATICO ENGINE DI TEST DI SISTEMA  ")
         print("==================================================")
-        self._start_local_workers()
+     
         try:
             print("Seleziona lo scenario da eseguire:")
             print("1. Performance e Metriche")
@@ -94,6 +103,7 @@ class TestEngine:
             if config_mode != "all":
                 self._print_final_summary()
         finally:
+            
             self._cleanup_workers()
     
     def _run_all_scenarios(self):
@@ -145,4 +155,8 @@ class TestEngine:
             print(f"[ENGINE ERRORE] Impossibile salvare il report su disco: {e}")
 
 
-
+if __name__ == "__main__":
+    # Inizializza il motore (ad esempio con valori di default o letti da env)
+    engine = TestEngine(mode="federated", env="local")
+    # Avvia l'interazione
+    engine.run_scenarios()
