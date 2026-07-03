@@ -374,6 +374,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 with self.connessioni_lock:
                     self.connessioni_attive.append(conn)
                 self.chunk_sent_event.set()
+                time.sleep(0.5)  # Piccola pausa per garantire che il leader abbia inviato il chunk prima di procedere
                 print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
                 raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
                     "forest": forest_bytes,
@@ -448,6 +449,16 @@ class FederatedOrchestrator(BaseOrchestrator):
             total_inference_time=total_inference_time,
             rpc_inference_time=rpc_inference_time
         )
+        if hasattr(self, 'state_manager') and self.state_manager:
+            try:
+                self.state_manager.update_request_status(
+                    job_id=job_id,
+                    status="COMPLETED",
+                    orchestrator_id=self.orchestrator_name,
+                    alberi_addestrati=total_trees,
+                )
+            except Exception as e_db:
+                print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
         return {
             "status": "SUCCESS" if not failed_workers else "PARTIAL",

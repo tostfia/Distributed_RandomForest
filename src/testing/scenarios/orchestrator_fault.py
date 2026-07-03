@@ -32,11 +32,10 @@ class OrchestratorFailoverScenario(BaseTestScenario):
         if docker_env == "true":
             print("[TEST] Ambiente DOCKER rilevato: avviato già Master-2 come container...")
             if orchestrator_type == "federated":
-                orch_standby = FederatedOrchestrator(orchestrator_name="Master-2-Standby")
-                orch_standby.queue_name = target_queue
+                orch_standby = FederatedOrchestrator(orchestrator_name="distributed_randomforest-orchestrator-2")
             else:
-                orch_standby = CentralizedOrchestrator(orchestrator_name="Master-2-Standby")
-                orch_standby.queue_name = target_queue  
+                orch_standby = CentralizedOrchestrator(orchestrator_name="distributed_randomforest-orchestrator-2")
+            orch_standby.queue_name = target_queue
         else:
              # La coda di messaggi condivisa tra i due orchestratori
             if orchestrator_type == "federated":
@@ -71,14 +70,14 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             orch_leader.sqs_queue.send_message(orch_leader.queue_name, payload)
         except TypeError:
             try:
-                orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name, message=payload)
+                orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name,message_dict=payload)
             except Exception as e_inner:
                 print(f"[TEST ERRORE CRITICO] Impossibile inviare il messaggio: {e_inner}")
                 return {"status": "FAILED", "trees_built": 0, "duration_seconds": 0}
 
         start_time = time.perf_counter()
 
-        # 5. Thread Killer: Abbate l'orchestratore di sistema Sofia a metà addestramento
+        # 5. Thread Killer
         def kill_system_leader_target():
             kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds")
             print(f"[TEST KILLER] Lascio lavorare il leader per {kill_after_seconds} secondi prima del crash...")
@@ -112,34 +111,43 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             killer_thread.daemon = True
             killer_thread.start()
         else: 
+        
+            client = docker.from_env()
+            
+            containers = client.containers.list(filters={
+                "label": "com.docker.compose.service=orchestrator"
+            })
+            found = False
+            for c in containers:
+
+                if "orchestrator-1" in c.name:
+                    print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
+                    
+                    c.update(restart_policy={"Name": "no"})
+                    print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
+                    c.kill()
+                    found = True
+                    break
+            if not found:
+                print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
+        lock_key = orch_leader._get_lock_key()
+        if orch_leader.environment == "local":
+            lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                    print(f"[TEST TRIGGER] Lock '{lock_key}' rimosso dal File System.")
+                except Exception:
+                    pass
+        else:
             try:
-                client = docker.from_env()
-                
-                containers = client.containers.list(filters={
-                    "label": "com.docker.compose.service=orchestrator"
-                })
-                found = False
-                for c in containers:
+                orch_leader.state_manager.release_global_lock(lock_key, orch_leader.orchestrator_name)
+                print(f"[TEST TRIGGER] Lock '{lock_key}' rilasciato da DynamoDB.")
+            except Exception:
+                pass
+    
+        
 
-                    if "orchestrator-1" in c.name:
-                        print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
-                        
-                        c.update(restart_policy={"Name": "no"})
-                        print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
-                        c.kill()
-                        found = True
-                        break
-                if not found:
-                    print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
-                
-                print(f"[TEST TRIGGER] Container Leader terminato da Docker API.")
-            except Exception as e:
-                print(f"[TEST TRIGGER ERROR] Impossibile terminare il container: {e}")
-
-        # 6. Monitoraggio dello stato del Job gestito dal subentrante Master-2
-        # Il timeout deve coprire: tempo di lavoro pre-crash + tempo di detection del
-        # leader morto da parte dello standby + tempo di completamento dei round residui.
-        # Aggiungiamo un margine di sicurezza esplicito invece di un numero "a caso".
         kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 120)
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
         max_timeout = ft_cfg.get("max_monitor_timeout_seconds", kill_after_seconds + failover_detection_margin + 60)
@@ -178,11 +186,17 @@ class OrchestratorFailoverScenario(BaseTestScenario):
 
         duration = time.perf_counter() - start_time
         job_id = orch_leader.current_job_id
-        path_modello_dinamico = f"./saved_models/fed_model_{job_id}.pkl"
+        if os.environ.get("SYS_MODE") == "federated":
+            path_modello_dinamico = f"./saved_models/fed_model_{job_id}.pkl"
+        else:
+            path_modello_dinamico = f"./saved_models/model_{job_id}.pkl"
 
-        if not job_id:
+        if not job_completed:
             import glob
-            list_of_files = glob.glob('./saved_models/fed_model_*.pkl')
+            if os.environ.get("SYS_MODE") == "federated":
+                list_of_files = glob.glob('./saved_models/fed_model_*.pkl')
+            else:
+                list_of_files = glob.glob('./saved_models/model_*.pkl')
             path_modello_dinamico = max(list_of_files, key=os.path.getctime) if list_of_files else None
 
         if job_completed or (trees_built == 0 and path_modello_dinamico and os.path.exists(path_modello_dinamico)):

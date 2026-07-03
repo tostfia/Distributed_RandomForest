@@ -90,6 +90,8 @@ services:
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
       - ./workers_cache:/app/workers_cache:z
+    group_add:
+      - 1001
     cap_add:
       - NET_ADMIN
     command: python -m src.testing.engine
