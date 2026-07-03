@@ -27,7 +27,7 @@ class FaultToleranceScenario(BaseTestScenario):
         
         start_time = time.perf_counter()
         payload = self._build_payload()
-        num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=60, seed=42)
+        num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=60, seed=123)
         duration = time.perf_counter() - start_time
         
         return {

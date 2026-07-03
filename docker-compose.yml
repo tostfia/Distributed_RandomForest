@@ -5,8 +5,6 @@ services:
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     stdin_open: true
     tty: true
-    cap_add:
-      - NET_ADMIN
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
@@ -23,6 +21,8 @@ services:
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
       - ./workers_cache:/app/workers_cache:z
+    cap_add:
+      - NET_ADMIN
     command: >
       sh -c "ORCHESTRATOR_ID=Orchestrator-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname)
       python -m src.master.orchestrator.main"
@@ -59,10 +59,12 @@ services:
       - ./workers_cache:/app/workers_cache:z
     command: >
       sh -c "
-      if command -v tc >/dev/null; then
-        tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms};
+      if command -v tc >/dev/null 2>&1; then
+        if ! tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms}; then
+          echo '[WARN] impossibile applicare tc netem sul worker (permessi/capability mancanti)' >&2;
+        fi;
       fi;
-      python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname) 18861 federated local
+      exec python -m src.worker.main Worker-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname) 18861 federated local
       "
     depends_on:
       - orchestrator
@@ -74,6 +76,7 @@ services:
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     environment:
+      - TC_INTERFACE=eth0
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - ENV_MODE=${ENV_MODE:-local}
@@ -87,6 +90,8 @@ services:
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
       - ./workers_cache:/app/workers_cache:z
+    cap_add:
+      - NET_ADMIN
     command: python -m src.testing.engine
     
 
