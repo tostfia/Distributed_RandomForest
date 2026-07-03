@@ -493,6 +493,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     
                     try:
                         self.chunk_sent_event.set()
+                        time.sleep(0.5)
                         # Invocazione remota sul metodo esposto dal BaseWorker
                         raw_response = worker_conn.root.predict_subset_forest(
                             chunk_trees_bytes, 
@@ -595,6 +596,16 @@ class CentralizedOrchestrator(BaseOrchestrator):
             total_inference_time=total_inference_time,
             rpc_inference_time=rpc_inference_time
         )
+        if hasattr(self, 'state_manager') and self.state_manager:
+            try:
+                self.state_manager.update_request_status(
+                    job_id=job_id,
+                    status="COMPLETED",
+                    orchestrator_id=self.orchestrator_name,
+                    alberi_addestrati=total_trees,
+                )
+            except Exception as e_db:
+                print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
     def _print_and_validate_metrics(
         self, 
