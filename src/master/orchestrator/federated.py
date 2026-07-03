@@ -117,14 +117,22 @@ class FederatedOrchestrator(BaseOrchestrator):
             checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
             os.makedirs("./.local_storage", exist_ok=True)
 
+        
+        if start_alberi == 0 and os.path.exists(checkpoint_trees_path):
+                os.remove(checkpoint_trees_path)
         all_trained_trees = []
-
         if start_alberi > 0:
             print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Rilevato start_alberi = {start_alberi}. Ripristino checkpoint fisico...")
             if os.path.exists(checkpoint_trees_path):
                 try:
+                    all_trained_trees = []
                     with open(checkpoint_trees_path, "rb") as f:
-                        all_trained_trees = pickle.load(f)
+                        while True:
+                            try: 
+                                chunk = pickle.load(f)
+                                all_trained_trees.extend(chunk)
+                            except EOFError:
+                                break
                     print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
                     start_alberi = len(all_trained_trees)
                 except Exception as e_load:
@@ -174,7 +182,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             feature_selezionate = self.select_from_config()
             results_lock = threading.Lock()
             active_worker_names = list(worker_names)
-
+            checkpoint_time_accum = [0.0]
             def contact_worker(w_name, idx):
                 w_info = available_workers[w_name]
                 worker_conn = None
@@ -226,8 +234,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 all_trained_trees.extend(result_trees)
                                 current_total = len(all_trained_trees)
                                 try:
-                                    with open(checkpoint_trees_path, "wb") as f_chk:
+                                    t_chk_start = time.perf_counter()
+                                    with open(checkpoint_trees_path, "ab") as f_chk:
                                         pickle.dump(all_trained_trees, f_chk)
+                                    checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
                                     print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
                                 except Exception as e_fs:
                                     print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
@@ -281,6 +291,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             for t in threads:
                 t.join()
+            print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")   
                 
             if not task_queue.empty() and len(active_worker_names) == 0:
                 print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")

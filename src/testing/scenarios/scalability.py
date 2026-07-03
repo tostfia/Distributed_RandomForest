@@ -25,12 +25,11 @@ class ScalabilityScenario(BaseTestScenario):
             sampled_workers = {k: all_active_workers[k] for k in list(all_active_workers.keys())[:worker_count]}
             original_get_workers = ServiceRegistry.get_available_workers
             ServiceRegistry.get_available_workers = lambda environment: sampled_workers
-           
-            payload = self._build_payload(worker_count, scal_cfg)
+            total_target = scal_cfg.get("n_estimators_total", 60)
+            payload = self._build_payload(worker_count, total_target)
             try:
-                start_time = time.perf_counter()
-                total_target = scal_cfg.get("n_estimators_per_worker", 20) * worker_count
-                num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=total_target, seed=42)
+                start_time = time.perf_counter() 
+                num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=total_target, seed=123)
                 duration = time.perf_counter() - start_time
                 throughput = num_trees / duration if duration > 0 else 0
                 results[f"workers_{worker_count}"] = {"throughput": round(throughput, 2)}
@@ -39,18 +38,23 @@ class ScalabilityScenario(BaseTestScenario):
                 ServiceRegistry.get_available_workers = original_get_workers
 
         return {
-            "scenario_description": "Analisi del throughput e della scalabilità locale.",
+            "scenario_description": (
+                "Strong scaling test: carico totale fisso "
+                f"({scal_cfg.get('n_estimators_total', 60)} alberi); "
+                "misura la riduzione del tempo di completamento all'aumentare dei worker."
+            ),
             "execution_mode": "local",
+            "scaling_type": "strong",
             "metrics_per_scale": results
         }
 
-    def _build_payload(self, worker_count, scal_cfg):
+    def _build_payload(self, worker_count,total_estimators):
         return {
             "job_id": f"test_scal_{worker_count}_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": {
-                "n_estimators": scal_cfg.get("n_estimators_per_worker", 20) * worker_count,
+                "n_estimators": total_estimators,
                 "max_depth": 5,
                 "tree_type": self.config.get("selected_task", "classifier")
             }
