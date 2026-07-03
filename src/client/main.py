@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import time
+from datetime import datetime
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
@@ -13,6 +15,10 @@ cfg = SystemConfig()
 
 # CENTRALIZZAZIONE: Definiamo il percorso unico per config.json nella cartella mock condivisa
 CONFIG_PATH = os.path.join("./.local_storage", "config.json")
+
+# Storico locale di TUTTE le richieste inviate (training + inferenza), a differenza
+# di CONFIG_PATH che tiene traccia solo dell'ultima richiesta di training.
+HISTORY_PATH = os.path.join("./.local_storage", "requests_history.json")
 
 BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config.json")
 
@@ -51,6 +57,89 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
         hp_data["max_samples"] = 1.0
     hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
     return Hyperparameters(**hp_data)
+
+def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> Hyperparameters:
+    """Chiede all'utente di inserire manualmente gli iperparametri per l'addestramento."""
+    print("\n[INFO] Inserimento manuale degli iperparametri (premi INVIO per tenere il default mostrato).")
+
+    n_estimators_raw = get_input("  n_estimators [Default: 100]: ", "100")
+    try:
+        n_estimators = int(n_estimators_raw)
+    except ValueError:
+        print(f"  [ATTENZIONE] Valore non valido ('{n_estimators_raw}'), uso il default 100.")
+        n_estimators = 100
+
+    max_depth_raw = get_input("  max_depth (vuoto per 'nessun limite') [Default: nessun limite]: ", "")
+    max_depth = None
+    if max_depth_raw:
+        try:
+            max_depth = int(max_depth_raw)
+        except ValueError:
+            print(f"  [ATTENZIONE] Valore non valido ('{max_depth_raw}'), uso 'nessun limite'.")
+
+    class_weight = None
+    if tree_type == "classifier":
+        class_weight_raw = get_input(
+            "  class_weight ('balanced', 'balanced_subsample' o vuoto) [Default: vuoto]: ", ""
+        )
+        class_weight = class_weight_raw if class_weight_raw else None
+
+    max_samples_raw = get_input("  max_samples (0 < x <= 1) [Default: 1.0]: ", "1.0")
+    try:
+        max_samples = float(max_samples_raw)
+    except ValueError:
+        print(f"  [ATTENZIONE] Valore non valido ('{max_samples_raw}'), uso il default 1.0.")
+        max_samples = 1.0
+
+    # bootstrap non è una scelta libera: è una caratteristica strutturale del
+    # Random Forest (bagging). In federated è forzato a False per il protocollo
+    # (ogni worker addestra sull'intera partizione locale), in centralized resta
+    # True, il comportamento standard di Random Forest.
+    if mode == "federated":
+        print("  [INFO] Modalità FEDERATED: forzo bootstrap=False e max_samples=1.0 per coerenza col protocollo.")
+        bootstrap = False
+        max_samples = 1.0
+    else:
+        bootstrap = True
+
+    default_target = "Target" if dataset_type == "synthetic" else "Label"
+    target_column = get_input(f"  target_column [Default: {default_target}]: ", default_target)
+
+    return Hyperparameters(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        class_weight=class_weight,
+        max_samples=max_samples,
+        bootstrap=bootstrap,
+        tree_type=tree_type,
+        target_column=target_column,
+    )
+
+
+def load_history() -> list:
+    """Carica lo storico locale delle richieste inviate (training + inferenza)."""
+    if not os.path.exists(HISTORY_PATH):
+        return []
+    try:
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[ATTENZIONE] Impossibile leggere lo storico locale '{HISTORY_PATH}': {e}")
+        return []
+
+
+def append_history_entry(entry: dict) -> None:
+    """Aggiunge una nuova voce allo storico locale delle richieste, senza sovrascrivere le precedenti."""
+    history = load_history()
+    history.append(entry)
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except IOError as e:
+        print(f"[ATTENZIONE] Impossibile salvare la richiesta nello storico locale: {e}")
+
 
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
@@ -118,6 +207,24 @@ def handle_inference():
         sqs_queue.send_message(queue_name=target_queue, message_dict=inference_request.model_dump())
         print(f"\n[OK] Richiesta di inferenza {inference_request.inference_id[:8]} inviata con successo alla coda '{target_queue}'!")
         print(f"[INFO] L'orchestratore riceverà il messaggio e coordinerà i worker via RPC.")
+
+        # Salviamo nello storico. Il dataset_type non è un campo di InferenceRequest:
+        # proviamo a recuperarlo dal training corrispondente già presente nello storico.
+        matched_training = next(
+            (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
+            None,
+        )
+        dataset_type = matched_training.get("dataset_type") if matched_training else None
+
+        append_history_entry({
+            "type": "inference",
+            "id": inference_request.inference_id,
+            "job_id": job_id,
+            "timestamp": time.time(),
+            "environment": inference_request.environment,
+            "dataset_type": dataset_type,
+            "tree_type": hp_obj.tree_type,
+        })
     except Exception as e:
         print(f"[ERRORE] Impossibile inviare la richiesta di inferenza su SQS: {e}")
         
@@ -132,7 +239,7 @@ def handle_model_request():
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
 
-    print(f"[INFO] Interrogazione dello Stato per il Job {job_id[:8]} in corso...")
+    print(f"[INFO] Interrogazione dello Stato per il Job {job_id} in corso...")
 
     try:
         # 1. Interroghiamo lo StateManager per capire lo stato nel cluster locale
@@ -147,22 +254,22 @@ def handle_model_request():
 
         # 2. Gestione basata sullo stato del ciclo di vita del job
         if job_status.upper() == "QUEUED":
-            print(f"\n[IN CODA] Il Job {job_id[:8]} è attualmente in coda su SQS.")
+            print(f"\n[IN CODA] Il Job {job_id} è attualmente in coda su SQS.")
             print("[INFO] Il messaggio è in attesa che l'Orchestratore lo prenda in carico.")
             return
 
         elif job_status.upper() == "PROCESSING":
-            print(f"\n[IN CORSO] Il modello {job_id[:8]} è in fase di addestramento distribuito. ")
+            print(f"\n[IN CORSO] Il modello {job_id} è in fase di addestramento distribuito. ")
             print("[INFO] L'Orchestratore sta coordinando i calcoli paralleli sui nodi Worker via RPC.")
             return
 
         elif job_status.upper() == "FAILED":
-            print(f"\n[FALLITO] L'addestramento per il Job {job_id[:8]} è fallito.")
+            print(f"\n[FALLITO] L'addestramento per il Job {job_id} è fallito.")
             print("[INFO] Il sistema di failover ha intercettato un errore infrastrutturale o applicativo.")
             return
 
         elif job_status.upper() == "COMPLETED":
-            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id[:8]} è terminato con successo! ")
+            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id} è terminato con successo! ")
             
             # UNIFORMATO: Il file ha lo stesso identico nome sia per Centralizzato che per Federato
             model_filename = f"model_{job_id}.pkl"
@@ -230,22 +337,30 @@ def handle_training():
     else:
         print("  [INFO] Dataset REALE rilevato (uso default dalla baseline).")
 
+    print("  Vuoi usare la configurazione di DEFAULT della baseline oppure inserire i tuoi iperparametri?")
+    print("    [1] Default (baseline)")
+    print("    [2] Personalizzati")
+    hp_source_choice = get_input("  Scelta [Default: 1]: ", "1")
+
     try:
-        hp_obj = load_hyperparameters_from_config(mode, dataset_type)
-        
-        # Sovrascriviamo il tipo di task nell'oggetto HP
-        hp_obj.tree_type = selected_tree_type
-        
-        # Pulizia opzionale: se è regressione, togliamo i pesi di classe
-        if selected_tree_type == "regressor":
-            hp_obj.class_weight = None
+        if hp_source_choice == "2":
+            hp_obj = ask_custom_hyperparameters(mode, dataset_type, selected_tree_type)
+        else:
+            hp_obj = load_hyperparameters_from_config(mode, dataset_type)
+
+            # Sovrascriviamo il tipo di task nell'oggetto HP
+            hp_obj.tree_type = selected_tree_type
+
+            # Pulizia opzionale: se è regressione, togliamo i pesi di classe
+            if selected_tree_type == "regressor":
+                hp_obj.class_weight = None
 
         print(f"  [OK] Task configurato come: {hp_obj.tree_type.upper()}")
         print(f"  [OK] Parametri: n_estimators={hp_obj.n_estimators}, max_depth={hp_obj.max_depth}")
-        
+
     except Exception as e:
-        print(f"\n[ERRORE] Impossibile caricare gli iperparametri: {e}")
-        return   
+        print(f"\n[ERRORE] Impossibile configurare gli iperparametri: {e}")
+        return
             
     # 5. Validazione Pydantic
     try:
@@ -276,7 +391,17 @@ def handle_training():
     try:
         state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
-        print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
+        print(f"[CLIENT] Richiesta {request.job_id}... inoltrata con successo alla coda '{target_queue}'!")
+
+        append_history_entry({
+            "type": "training",
+            "id": request.job_id,
+            "timestamp": time.time(),
+            "mode": request.mode,
+            "environment": request.environment,
+            "dataset_type": request.dataset_type,
+            "tree_type": request.hyperparameters.tree_type,
+        })
         
     except Exception as e:
         print(f"\n [ERRORE INVIO/CODA]: {e}")
@@ -317,6 +442,41 @@ def handle_baseline_selection():
     # Avviamo il processo analitico isolato
     run_baseline()
 
+def handle_history_view():
+    """Elenca tutte le richieste (training + inferenza) inviate finora, con dataset e stato."""
+    print("\n=== STORICO DELLE RICHIESTE INVIATE ===")
+    history = load_history()
+ 
+    if not history:
+        print("[INFO] Nessuna richiesta trovata nello storico locale.")
+        return
+ 
+    dataset_labels = {"real": "REALE", "synthetic": "SINTETICO"}
+ 
+    for i, entry in enumerate(history, start=1):
+        entry_type = entry.get("type", "sconosciuto")
+        entry_id = entry.get("id", "N/D")
+        ts = entry.get("timestamp")
+        ts_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "N/D"
+        dataset_label = dataset_labels.get(entry.get("dataset_type"), "N/D")
+ 
+        print(f"\n[{i}] {entry_type.upper()} | ID: {entry_id}")
+        print(f"    Data: {ts_str}")
+        print(f"    Dataset: {dataset_label}")
+ 
+        if entry_type == "training":
+            try:
+                status = state_manager.get_job_status(entry_id) or "SCONOSCIUTO"
+            except Exception as e:
+                status = f"ERRORE nel recupero stato ({e})"
+            print(f"    Modalità: {entry.get('mode', 'N/D').upper()} | Task: {entry.get('tree_type', 'N/D').upper()}")
+            print(f"    Stato: {status}")
+        elif entry_type == "inference":
+            job_id = entry.get("job_id")
+            if job_id:
+                print(f"    Job addestrato usato: {job_id}")
+            print(f"    Stato: INVIATA (nessun tracciamento di stato disponibile per l'inferenza)")
+
 def main():
     while True:
         print("\n=====================================================")
@@ -349,7 +509,8 @@ def main():
         print("[2] Avvia processo di inferenza distribuito")
         print("[3] Verifica stato modello")
         print("[4] Esegui Baseline Locale")
-        print("[5] Torna al menù precedente")
+        print("[5] Visualizza storico delle richieste")
+        print("[6] Torna al menù precedente")
         operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
         
         if operation_choice == "1":
@@ -361,6 +522,8 @@ def main():
         elif operation_choice == "4":
             handle_baseline_selection()
         elif operation_choice == "5":
+            handle_history_view()
+        elif operation_choice == "6":
             continue
         else:
             print("\n[ERRORE] Scelta non valida.")
