@@ -52,13 +52,10 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
     return Hyperparameters(**hp_data)
 
-
-
-   
-
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     
+    # 1. Acquisizione del Job ID
     job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
@@ -67,31 +64,45 @@ def handle_inference():
     # L'orchestratore risolverà il path autonomamente in base all'ambiente.
     data_url = "" 
 
-    # 2. Tentativo di recupero degli iperparametri del modello dal path centralizzato
+    # 2. Tentativo di recupero degli iperparametri dal file locale centralizzato
     hp_obj = None
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved_config = json.load(f)
-                if saved_config.get("job_id") == job_id or get_input(...) == "S":
+                
+            # Logica corretta senza chiamate rotte a get_input(...)
+            if saved_config.get("job_id") == job_id:
+                hp_data = saved_config.get("hyperparameters", {})
+                hp_obj = Hyperparameters(**hp_data)
+                print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
+            else:
+                # Se l'ID non corrisponde, chiediamo esplicitamente se forzare il caricamento
+                forza_caricamento = get_input(
+                    "Il Job ID locale non corrisponde a quello inserito. Forzare comunque l'uso degli iperparametri locali? (S/N): ", 
+                    "N"
+                )
+                if forza_caricamento.upper() == "S":
                     hp_data = saved_config.get("hyperparameters", {})
                     hp_obj = Hyperparameters(**hp_data)
-                    print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
-        except Exception:
-            pass
+                    print(f"[INFO] Iperparametri forzati dal file locale (Task rilevato: {hp_obj.tree_type.upper()}).")
+                    
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            # Fallback silenzioso o avviso leggero, passiamo poi alla configurazione manuale
+            print(f"[INFO] Errore di lettura o file corrotto in '{CONFIG_PATH}': {e}")
 
-    # Se non riusciamo a leggerlo, lo chiediamo rapidamente all'utente
+    # 3. Configurazione manuale di ripiego (se il file non esiste o l'utente ha rifiutato/riscontrato errori)
     if not hp_obj:
         print("\n[INFO] Impossibile recuperare gli iperparametri in automatico per questo Job ID.")
-        tree_type_raw = get_input("Inserisci il tipo di task originale (1 per Classificazione, 2 per Regressione): ", "1")
+        tree_type_raw = get_input("Inserisci il tipo di task originale (1 per Classificazione, 2 per Regressione) [Default: 1]: ", "1")
         tree_type = "classifier" if tree_type_raw == "1" else "regressor"
         hp_obj = Hyperparameters(n_estimators=100, tree_type=tree_type)
 
-    # 3. Validazione tramite il modello Pydantic InferenceRequest
+    # 4. Validazione tramite il modello Pydantic InferenceRequest
     try:
         inference_request = InferenceRequest(
             job_id=job_id,
-            data_url=data_url, # Passa la stringa vuota validata
+            data_url=data_url, 
             environment=cfg.env,
             hyperparameters=hp_obj
         )
@@ -99,7 +110,7 @@ def handle_inference():
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA INFERENZA]: {e}")
         return
 
-    # 4. Instradamento sulla coda corretta
+    # 5. Instradamento sulla coda corretta
     target_queue = "federated_queue" if cfg.mode == "federated" else "centralized_queue"
 
     try:
@@ -153,7 +164,8 @@ def handle_model_request():
         elif job_status.upper() == "COMPLETED":
             print(f"\n[COMPLETATO] L'addestramento per il Job {job_id[:8]} è terminato con successo! ")
             
-            model_filename = f"model_federated_{job_id}.pkl" if cfg.mode == "federated" else f"model_{job_id}.pkl"
+            # UNIFORMATO: Il file ha lo stesso identico nome sia per Centralizzato che per Federato
+            model_filename = f"model_{job_id}.pkl"
             model_path = os.path.join("./saved_models", model_filename)
             
             # 3. Controllo di persistenza fisica (Solo per ambiente LOCAL)
@@ -164,7 +176,7 @@ def handle_model_request():
                 elif os.path.exists(model_filename):
                     print(f"[OK] File binario del modello rilevato nella root: '{model_filename}'")
                 else:
-                    print(f"[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato.")
+                    print(f"\n[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato in '{model_path}'.")
             
             elif cfg.env == "aws":
                 print(f"[INFO] In ambiente AWS, il file si assume caricato e pronto sul bucket S3.")

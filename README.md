@@ -98,3 +98,5 @@ export MY_GID=$(id -g)
 docker compose up
 
 docker compose exec orchestrator python -m src.client.main
+
+Per distruggere i processi attualmente attivi:  pkill -f "Distributed_RandomForest"

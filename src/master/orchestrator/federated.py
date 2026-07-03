@@ -323,7 +323,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             model_path = f"s3://my-cluster-datasets-bucket/saved_models/fed_model_{job_id}.pkl"
         else:
-            model_path = os.path.join("./saved_models", f"fed_model_{job_id}.pkl")
+            model_path = os.path.join("./saved_models", f"model_{self.current_job_id}.pkl")
 
         if self.environment == "local":
             if not os.path.exists(model_path):
@@ -333,7 +333,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 global_model = pickle.load(f)
         else:
             print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
-            local_fallback_path = os.path.join("./saved_models", f"fed_model_{job_id}.pkl")
+            local_fallback_path = os.path.join("./saved_models", f"model_{self.current_job_id}.pkl")
             with open(local_fallback_path, "rb") as f:
                 global_model = pickle.load(f)
 
@@ -480,7 +480,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             
             TARGET_DIR = "./saved_models"
             os.makedirs(TARGET_DIR, exist_ok=True)
-            model_path = os.path.join(TARGET_DIR, f"fed_model_{self.current_job_id}.pkl")
+            model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
             
             with open(model_path, "wb") as f:
                 pickle.dump(global_model, f)

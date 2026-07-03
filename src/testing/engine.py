@@ -5,7 +5,6 @@ import time
 
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
-from src.shared.binding.serviceregistry import ServiceRegistry
 from src.testing.scenarios.fault import FaultToleranceScenario
 from src.testing.scenarios.network import NetworkSimulationScenario
 from src.testing.scenarios.performance import PerformanceAndMetricsScenario

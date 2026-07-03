@@ -39,8 +39,12 @@ if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
 fi
 
 if [ -f .env ]; then
-    # 2. Esporta le variabili del file .env nella sessione Bash corrente
-    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+    while read -r line || [ -n "$line" ]; do
+        # Ignora commenti e righe vuote
+        [[ "$line" =~ ^#.*$ ]] && continue
+        [[ -z "$line" ]] && continue
+        export "$(echo "$line" | tr -d ' ')"
+    done < .env
 else
     echo "[ERRORE] File .env non trovato!"
     exit 1
@@ -63,12 +67,16 @@ fi
 
 echo "[SYSTEM] Avvio del cluster distribuito su terminali differenti..."
 
+# Definiamo la root directory in modo sicuro gestendo gli spazi nel path
+ROOT_DIR="$(pwd)"
+
 # 1. Avvio dell'Orchestratore in un nuovo terminale
 echo "[START] Avvio di $NUM_ORCHESTRATORS Orchestratore/i Master..."
 for ((i=1; i<=NUM_ORCHESTRATORS; i++)); do
     echo "[START] Avvio Istanza Orchestratore #$i..."
-    $TERM_CMD bash -c "python -m src.master.orchestrator.main; exec bash"
-    sleep 1 # Piccolo delay per non far accavallare la creazione della cartella .local_storage
+    # Modificato: include anche la cartella /src nel PYTHONPATH
+    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; python -m src.master.orchestrator.main; exec bash"
+    sleep 1 
 done
 
 sleep 2
@@ -79,14 +87,17 @@ for ((i=1; i<=NUM_WORKERS; i++)); do
     PORT=$((PORT_BASE + i - 1))
     echo "[START] Avvio $WORKER_NAME sulla porta $PORT..."
     
-    $TERM_CMD bash -c "python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
+    # Modificato: include anche la cartella /src nel PYTHONPATH
+    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
 done
 
 sleep 2
 
 # 3. Avvio del Client direttamente nel terminale corrente
 echo "[START] Avvio Client Interattivo..."
-python -m src.client.main 
+# Modificato: include anche la cartella /src nel PYTHONPATH
+export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/src"
+python -m src.client.main
 
 # Esegue la pulizia finale della rete
 cleanup
