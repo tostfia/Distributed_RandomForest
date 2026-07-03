@@ -11,6 +11,8 @@ from src.testing.scenarios.network import NetworkSimulationScenario
 from src.testing.scenarios.performance import PerformanceAndMetricsScenario
 from src.testing.scenarios.scalability import ScalabilityScenario
 from src.testing.scenarios.orchestrator_fault import OrchestratorFailoverScenario
+from src.testing.scenarios.fault_inf import InferenceWorkerFaultScenario
+from src.testing.scenarios.orchestrator_fault_inf import InferenceOrchestratorFaultScenario
 
 
 CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), "test_config.json")
@@ -79,11 +81,13 @@ class TestEngine:
             print("1. Performance e Metriche")
             print("2. Scalabilità")
             print("3. Simulazione di Rete")
-            print("4. Tolleranza ai Guasti")
-            print("5. Failover dell'Orchestratore")
-            valid_options = ["1", "2", "3", "4","5", "all"]
+            print("4. Guasto improvviso del Worker (addestramento)")
+            print("5. Guasto improvviso del Worker (inferenza)")
+            print("6. Failover dell'Orchestratore (addestramento)")
+            print("7. Failover dell'Orchestratore (inferenza)")
+            valid_options = ["1", "2", "3", "4","5", "6", "7", "all"]
             while True:
-                user_choice = input("Scelta (1-5, o 'all' per eseguire tutti): ").strip().lower()
+                user_choice = input("Scelta (1-7, o 'all' per eseguire tutti): ").strip().lower()
                 if user_choice in valid_options:
                     config_mode = user_choice
                     break
@@ -103,8 +107,14 @@ class TestEngine:
                 fault_scenario = FaultToleranceScenario(self.config, self.orchestrator)
                 self.global_reports["fault_tolerance"] = fault_scenario.run()
             elif config_mode == "5":
+                fault_inf = InferenceWorkerFaultScenario(self.config, self.orchestrator)
+                self.global_reports["inference_worker_fault"] = fault_inf.run()
+            elif config_mode == "6":
                 orchestrator_fault_scenario = OrchestratorFailoverScenario(self.config, self.orchestrator)
                 self.global_reports["orchestrator_failover"] = orchestrator_fault_scenario.run()
+            elif config_mode == "7":
+                orchestrator_fault_inf = InferenceOrchestratorFaultScenario(self.config, self.orchestrator)
+                self.global_reports["inference_orchestrator_failover"] = orchestrator_fault_inf.run()
             if config_mode != "all":
                 self._print_final_summary()
         finally:
@@ -135,8 +145,16 @@ class TestEngine:
         self.global_reports["fault_tolerance"] = fault_scenario.run()
 
         #Scenario 5
+        fault_inf = InferenceWorkerFaultScenario(self.config, self.orchestrator)
+        self.global_reports["inference_worker_fault"] = fault_inf.run()
+
+        #Scenario 6
         orchestrator_fault_scenario = OrchestratorFailoverScenario(self.config, self.orchestrator)
         self.global_reports["orchestrator_failover"] = orchestrator_fault_scenario.run()
+
+        #Scenario 7
+        orchestrator_fault_inf = InferenceOrchestratorFaultScenario(self.config, self.orchestrator)
+        self.global_reports["inference_orchestrator_failover"] = orchestrator_fault_inf.run()
 
         
         self._print_final_summary()

@@ -33,7 +33,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.current_job_id = None
         self.train_data_path = None
         self.test_data_path = None
-
+        self.chunk_sent_event = threading.Event()
         super().__init__(
             orchestrator_name=name,
             queue_name="centralized_queue"
@@ -447,7 +447,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         results_lock = threading.Lock()
        
         active_worker_names = list(worker_names)
-        
+        self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
         while tree_start < total_trees:
             tree_end = min(tree_start + CHUNK_SIZE, total_trees)
             if tree_start not in already_done_ranges:
@@ -492,6 +492,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}-InfThread] Assegnazione Task {task_id} ({quota_alberi} alberi: {start_idx}-{end_idx}) a {w_name}")
                     
                     try:
+                        self.chunk_sent_event.set()
                         # Invocazione remota sul metodo esposto dal BaseWorker
                         raw_response = worker_conn.root.predict_subset_forest(
                             chunk_trees_bytes, 

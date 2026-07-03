@@ -31,6 +31,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             orchestrator_name=name,
             queue_name="federated_queue"
         )
+        self.chunk_sent_event = threading.Event()
         self.current_job_id = None
 
     def _ensure_local_bootstrap(self, payload: dict):
@@ -354,7 +355,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         y_true_global = []
         total_samples_ref = [0]
         failed_workers = set()
-
+        self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
         results_lock = threading.Lock()
         active_worker_names = list(worker_names)
 
@@ -372,7 +373,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 )
                 with self.connessioni_lock:
                     self.connessioni_attive.append(conn)
-
+                self.chunk_sent_event.set()
                 print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
                 raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
                     "forest": forest_bytes,
