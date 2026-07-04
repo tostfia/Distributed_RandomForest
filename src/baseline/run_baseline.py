@@ -18,6 +18,31 @@ from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
+# ---------------------------------------------------------------------------
+# Configurazione di riferimento FISSA per il task sintetico di REGRESSIONE.
+#
+# NOTA METODOLOGICA: a differenza del task sintetico di classificazione (dove
+# ereditare gli iperparametri dal tuning sul dataset reale ha senso, perché è
+# lo stesso algoritmo/task), per la regressione non esiste alcuna garanzia che
+# gli iperparametri ottimizzati per un RandomForestClassifier su un problema
+# di classificazione binaria sbilanciata siano sensati per un
+# RandomForestRegressor su dati sintetici continui e bilanciati.
+#
+# Si usa quindi una configurazione dichiarata a priori (non derivata da
+# tuning) e tenuta IDENTICA in ogni esperimento di scalabilità — baseline
+# locale e ogni run del cluster distribuito, a qualunque numero di worker —
+# in modo da isolare l'effetto della scalabilità (numero di nodi, dimensione
+# del dataset) dalla complessità del modello.
+# ---------------------------------------------------------------------------
+SYNTHETIC_REGRESSOR_REFERENCE_HP = {
+    "n_estimators": 100,
+    "max_depth": None,
+    "min_samples_split": 2,
+    "bootstrap": True,
+    "max_samples": 1.0,
+}
+
+
 def run_baseline():
     # --- CONFIGURAZIONE STILISTICA REPORT ---
     LUNGHEZZA_LINEA = 80
@@ -267,7 +292,25 @@ def run_baseline():
         tempo_medio_fold_tuning = 0.0
         cv_results_extracted = None  
 
-        best_bootstrap = bool(best_hp_reale.get("bootstrap", True))
+        if user_tree_type == "classifier":
+            # Stesso algoritmo/task del tuning reale (classificazione binaria):
+            # ereditare gli iperparametri è metodologicamente corretto.
+            best_bootstrap = bool(best_hp_reale.get("bootstrap", True))
+            hp_sintetici = {
+                "n_estimators": int(best_hp_reale.get("n_estimators", 10)),
+                "max_depth": best_hp_reale.get("max_depth"),
+                "min_samples_split": int(best_hp_reale.get("min_samples_split", 2)),
+                "bootstrap": best_bootstrap,
+                "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
+            }
+        else:
+            # Task REGRESSOR: non ereditiamo gli iperparametri del classificatore
+            # reale (algoritmo e distribuzione dei dati diversi). Si usa la
+            # configurazione di riferimento fissa definita a inizio file.
+            print(" [INFO] Task REGRESSOR: uso configurazione di riferimento fissa "
+                  "(non ereditata dal tuning sul dataset reale).")
+            hp_sintetici = dict(SYNTHETIC_REGRESSOR_REFERENCE_HP)
+
         config_data = {
             "mode": "distributed",
             "dataset_type": "synthetic",
@@ -275,12 +318,8 @@ def run_baseline():
             "feature_eliminata": dizionario_feature["eliminate"],
             "feature_selezionate": dizionario_feature["salvate"],
             "hyperparameters": {
-                "n_estimators": int(best_hp_reale.get("n_estimators", 10)),
-                "max_depth": best_hp_reale.get("max_depth"),
-                "min_samples_split": int(best_hp_reale.get("min_samples_split", 2)),
-                "bootstrap": best_bootstrap,
-                "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
-                "tree_type": user_tree_type, # Modificato da "regressor" a dinamico user_tree_type
+                **hp_sintetici,
+                "tree_type": user_tree_type,
                 "target_column": target_col,
                 "random_state": int(RANDOM_SEED)
             }

@@ -10,6 +10,7 @@ DatasetType = Literal["real", "synthetic"]
 class Hyperparameters(BaseModel):
     n_estimators: int
     max_depth: Optional[int] = None
+    min_samples_split: int = 2
     class_weight: Optional[str] = None
     max_samples: float = 1.0
     bootstrap: bool = True
@@ -28,6 +29,13 @@ class Hyperparameters(BaseModel):
     def check_max_depth(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v <= 0:
             raise ValueError("max_depth, se specificato, deve essere un intero positivo.")
+        return v
+
+    @field_validator("min_samples_split")
+    @classmethod
+    def check_min_samples_split(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError("min_samples_split deve essere un intero >= 2.")
         return v
 
     @field_validator("max_samples")

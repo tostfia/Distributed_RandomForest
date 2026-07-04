@@ -3,12 +3,11 @@ import os
 import sys
 import time
 from datetime import datetime
+from src.testing.engine import TestEngine
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
-from testing.engine import TestEngine
-
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -50,7 +49,7 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     if not raw_hp:
         raise ValueError("La sezione 'hyperparameters' è mancante o vuota nel file di configurazione della baseline.")
 
-    known_fields = {"n_estimators", "max_depth", "class_weight", "max_samples", "bootstrap", "tree_type", "target_column"}
+    known_fields = {"n_estimators", "max_depth", "min_samples_split", "class_weight", "max_samples", "bootstrap", "tree_type", "target_column"}
     hp_data = {k: v for k, v in raw_hp.items() if k in known_fields}
     if mode == "federated":
         hp_data["bootstrap"] = False
@@ -76,6 +75,16 @@ def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> 
             max_depth = int(max_depth_raw)
         except ValueError:
             print(f"  [ATTENZIONE] Valore non valido ('{max_depth_raw}'), uso 'nessun limite'.")
+
+    min_samples_split_raw = get_input("  min_samples_split (>= 2) [Default: 2]: ", "2")
+    try:
+        min_samples_split = int(min_samples_split_raw)
+        if min_samples_split < 2:
+            print(f"  [ATTENZIONE] Valore non valido ('{min_samples_split_raw}'), uso il default 2.")
+            min_samples_split = 2
+    except ValueError:
+        print(f"  [ATTENZIONE] Valore non valido ('{min_samples_split_raw}'), uso il default 2.")
+        min_samples_split = 2
 
     class_weight = None
     if tree_type == "classifier":
@@ -108,6 +117,7 @@ def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> 
     return Hyperparameters(
         n_estimators=n_estimators,
         max_depth=max_depth,
+        min_samples_split=min_samples_split,
         class_weight=class_weight,
         max_samples=max_samples,
         bootstrap=bootstrap,
@@ -419,7 +429,6 @@ def handle_baseline_selection():
     
     dtype = "synthetic" if choice == "2" else "real"
     
-    # AGGIORNAMENTO: Chiedi la natura del task se viene selezionato il dataset sintetico
     selected_tree_type = "classifier"
     if dtype == "synthetic":
         print("\n  Scegli il tipo di esperimento per la baseline sintetica:")

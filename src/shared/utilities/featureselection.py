@@ -49,10 +49,7 @@ class CICIDSFeatureSelector:
             .abs()
         )
 
-        # Trattiamo i NaN generati da divisioni per zero residue come bassa correlazione
-        low_corr_features = corr_with_label[
-            (corr_with_label < self.correlation_threshold) | (corr_with_label.isna())
-        ].index.tolist()
+        low_corr_features = corr_with_label[corr_with_label < self.correlation_threshold].index.tolist()
 
         columns_to_drop.extend(low_corr_features)
 
