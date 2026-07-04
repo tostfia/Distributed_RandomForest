@@ -64,9 +64,17 @@ class CentralizedWorker(BaseWorker):
 
         df: pd.DataFrame = self.dao.load_dataset(source_info)
 
+        if self.is_regression():
+            self.target_column = "Target"
+        else:
+            self.target_column = "Label"
+
         actual_target = self.target_column
         if actual_target not in df.columns:
-            raise ValueError(f"Colonna target '{actual_target}' non trovata nel dataset.")
+            raise ValueError(
+                f"Colonna target '{actual_target}' non trovata nel dataset. "
+                f"Colonne disponibili: {df.columns.tolist()}"
+            )
         
         feature_cols = [c for c in df.columns if c != actual_target]
         

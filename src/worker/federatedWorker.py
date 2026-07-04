@@ -201,6 +201,9 @@ class FederatedWorker(BaseWorker):
         hyperparameters = obtain(hyperparameters)
         max_depth = hyperparameters.get("max_depth")
         base_seed = int(hyperparameters.get("random_state", 123))
+
+        self.tree_type = hyperparameters.get("tree_type", "classifier")
+        self.target_column = "Target" if self.is_regression() else "Label"
         
         print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
 
