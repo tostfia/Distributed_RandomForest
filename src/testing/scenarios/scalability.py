@@ -34,7 +34,7 @@ class ScalabilityScenario(BaseTestScenario):
                 duration = time.perf_counter() - start_time
                 throughput = num_trees / duration if duration > 0 else 0
                 accuracy_metrics = self._mock_metrics_and_infer(payload, task_type)
-                results[f"workers_{worker_count}"] = {"throughput": round(throughput, 2), "accuracy": accuracy_metrics}
+                results[f"workers_{worker_count}"] = {"throughput": round(throughput, 2), "accuracy": accuracy_metrics, "duration_seconds": round(duration, 2), "trees_built": num_trees}
                 print(f"-> Worker: {worker_count} | Tempo: {duration:.2f}s | Throughput: {throughput:.2f} alberi/s")
             finally:
                 ServiceRegistry.get_available_workers = original_get_workers
@@ -81,12 +81,13 @@ class ScalabilityScenario(BaseTestScenario):
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
                 final_predictions = final_predictions.ravel().astype(int)
                 y_test = y_test.astype(int)
-                
+                n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_test)),
-                    "f1_score": float(f1_score(y_test, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_test, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_test, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 import numpy as np
@@ -106,11 +107,14 @@ class ScalabilityScenario(BaseTestScenario):
                     final_predictions = y_pred.astype(int)
                     
                 y_true = y_true.astype(int)
+
+                n_classes = len(np.unique(np.concatenate([y_true, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_true)),
-                    "f1_score": float(f1_score(y_true, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_true, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_true, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2))}

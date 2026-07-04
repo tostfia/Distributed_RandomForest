@@ -56,7 +56,7 @@ class TestEngine:
                 worker_name = f"Worker-Locale-{i:02d}"
                 port = port_base + i-1
                 print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
-                cmd = ["python", "-m", "src.worker.main", worker_name, str(port)]
+                cmd = ["python", "-m", "src.worker.main", worker_name, str(port), self.mode, self.env]
                 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.worker_processes.append(p)
             time.sleep(1)  # Simula il tempo di avvio dei worker
@@ -165,7 +165,12 @@ class TestEngine:
         print(json.dumps(self.global_reports, indent=2))
         print("==================================================")
 
-        output_dir = "./test_reports"
+        
+        exec_mode = os.environ.get("RUNNING_IN_DOCKER", "false")
+        if exec_mode == "true":
+            output_dir = "./test_reports/docker"
+        else:
+            output_dir = "./test_reports/local"
         test_name = "all_tests" if len(self.global_reports) != 1 else next(iter(self.global_reports.keys()))
         output_path = os.path.join(output_dir, f"test_report_{test_name}.json")
         
@@ -182,7 +187,9 @@ class TestEngine:
 
 
 if __name__ == "__main__":
-    # Inizializza il motore (ad esempio con valori di default o letti da env)
-    engine = TestEngine(mode="federated", env="local")
+    mode = os.environ.get("TRAINING_MODE", "centralized")
+    env = os.environ.get("ENV_MODE", "local")
+    print(f"[ENGINE] Modalità di addestramento: {mode}, Ambiente: {env}")
+    engine = TestEngine(mode=mode, env=env)
     # Avvia l'interazione
     engine.run_scenarios()
