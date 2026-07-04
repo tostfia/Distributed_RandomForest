@@ -63,12 +63,14 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
                 final_predictions = final_predictions.ravel().astype(int)
                 y_test = y_test.astype(int)
+                n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_test)),
-                    "f1_score": float(f1_score(y_test, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_test, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_test, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 import numpy as np
@@ -88,11 +90,14 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
                     final_predictions = y_pred.astype(int)
                     
                 y_true = y_true.astype(int)
+
+                n_classes = len(np.unique(np.concatenate([y_true, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_true)),
-                    "f1_score": float(f1_score(y_true, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_true, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_true, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2))}
@@ -122,10 +127,14 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
                 print(f"[WARN PERF TEST] Impossibile creare link temporaneo per il modello: {link_err}")
                 
         try:
+            
             # Eseguiamo l'inferenza nativa dell'orchestratore
             self.orchestrator._execute_inference_step(payload)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"[ERROR PERF TEST] Errore durante l'esecuzione dell'inferenza distribuita: {e}")
+     
         finally:
             # Ripristino immediato dei metodi originali
             if orig_centralized: self.orchestrator._print_and_validate_metrics = orig_centralized

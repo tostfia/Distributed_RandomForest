@@ -115,9 +115,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Esegue lo step di addestramento distribuito centralizzato.
         Restituisce il numero REALE di alberi totali validati e salvati con successo.
         """
+        expected_job_id = payload.get("job_id", "unknown_job")
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
-        if self.train_data_path is None:
-            expected_job_id = payload.get("job_id", "unknown_job")
+        if self.train_data_path is None or self.current_job_id != expected_job_id:
             if self.environment == "aws":
                 expected_train = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{expected_job_id}.csv"
                 expected_test = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{expected_job_id}.csv"
@@ -634,12 +634,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
             final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
             final_predictions = final_predictions.ravel().astype(int)
             y_test = y_test.astype(int)
+
+            n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+            avg_method = "binary" if n_classes <= 2 else "weighted"
             
             # Calcolo delle metriche di classificazione standard
             accuracy = np.mean(final_predictions == y_test)
-            precision = precision_score(y_test, final_predictions, zero_division=0)
-            recall = recall_score(y_test, final_predictions, zero_division=0)
-            f1 = f1_score(y_test, final_predictions, zero_division=0)
+            precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
+            recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
+            f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
             cm = confusion_matrix(y_test, final_predictions)
             
             print(f"  Tipo di Modello:                        CLASSIFICATORE")

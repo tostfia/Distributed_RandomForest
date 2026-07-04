@@ -20,7 +20,7 @@ class ScalabilityScenario(BaseTestScenario):
         all_active_workers = ServiceRegistry.get_available_workers(env)
         total_available = len(all_active_workers)
         workers_to_test = [w for w in scal_cfg.get("worker_counts_to_test", []) if w <= total_available]
-        
+        raw_metrics = {}
         for worker_count in workers_to_test:
             print(f"[SCALABILITY LOCAL] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
             sampled_workers = {k: all_active_workers[k] for k in list(all_active_workers.keys())[:worker_count]}
@@ -29,24 +29,85 @@ class ScalabilityScenario(BaseTestScenario):
             total_target = scal_cfg.get("n_estimators_total", 60)
             payload = self._build_payload(worker_count, total_target)
             try:
-                start_time = time.perf_counter() 
+                # TIMING ADDESTRAMENTO
+                start_train = time.perf_counter() 
                 num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=total_target, seed=123)
-                duration = time.perf_counter() - start_time
-                throughput = num_trees / duration if duration > 0 else 0
+                train_duration = time.perf_counter() - start_train
+                
+                # TIMING INFERENZA
+                start_infer = time.perf_counter()
                 accuracy_metrics = self._mock_metrics_and_infer(payload, task_type)
-                results[f"workers_{worker_count}"] = {"throughput": round(throughput, 2), "accuracy": accuracy_metrics}
-                print(f"-> Worker: {worker_count} | Tempo: {duration:.2f}s | Throughput: {throughput:.2f} alberi/s")
+                infer_duration = time.perf_counter() - start_infer
+                
+                # Calcolo throughput immediati
+                train_throughput = num_trees / train_duration if train_duration > 0 else 0
+                num_samples = accuracy_metrics.get("testing_set_size", 0)
+                infer_throughput = num_samples / infer_duration if infer_duration > 0 else 0
+
+                raw_metrics[worker_count] = {
+                    "train_duration": train_duration,
+                    "train_throughput": train_throughput,
+                    "infer_duration": infer_duration,
+                    "infer_throughput": infer_throughput,
+                    "num_trees": num_trees,
+                    "num_samples": num_samples,
+                    "accuracy": accuracy_metrics
+                }
             finally:
                 ServiceRegistry.get_available_workers = original_get_workers
+        # ─── FASE 2: CALCOLO SPEEDUP E STAMPA IN MODO ELEGANTE ───
+        baseline_w = workers_to_test[0]
+        base_train_time = raw_metrics[baseline_w]["train_duration"]
+        base_infer_time = raw_metrics[baseline_w]["infer_duration"]
+        
+        print("\n" + "="*80)
+        print(f"   REPORT DI SCALABILITÀ COMPLETO (Baseline di riferimento: {baseline_w} Worker)")
+        print("="*80)
+
+        for worker_count in workers_to_test:
+            m = raw_metrics[worker_count]
+            
+            # Formula dello Speedup: Tempo con 1 Worker (o baseline) / Tempo con N Worker
+            train_speedup = base_train_time / m["train_duration"] if m["train_duration"] > 0 else 1.0
+            infer_speedup = base_infer_time / m["infer_duration"] if m["infer_duration"] > 0 else 1.0
+            
+            # Stampa a schermo strutturata
+            print(f"\n[Configurazione: {worker_count} Worker]")
+            print(f"    ADDESTRAMENTO ({m['num_trees']} alberi complessivi):")
+            print(f"     • Durata:     {m['train_duration']:.2f} secondi")
+            print(f"     • Throughput: {m['train_throughput']:.2f} alberi/s")
+            print(f"     • Speedup:    {train_speedup:.2f}x")
+            
+            print(f"   INFERENZA :")
+            print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
+            print(f"     • Speedup:    {infer_speedup:.2f}x")
+            print(f"     • Metric:     Accuracy = {m['accuracy'].get('accuracy', 0.0)*100:.2f}%")
+            
+            # Salvataggio nel dizionario di output finale richiesto dall'orchestratore
+            results[f"workers_{worker_count}"] = {
+                "training": {
+                    "duration_seconds": round(m["train_duration"], 2),
+                    "throughput_trees_per_s": round(m['train_throughput'], 2),
+                    "speedup": round(train_speedup, 2)
+                },
+                "inference": {
+                    "duration_seconds": round(m["infer_duration"], 2),
+                    "throughput_samples_per_s": round(m['infer_throughput'], 2),
+                    "speedup": round(infer_speedup, 2)
+                },
+                "accuracy_metrics": m["accuracy"]
+            }
+
+        print("\n" + "="*80)
 
         return {
             "scenario_description": (
-                "Strong scaling test: carico totale fisso "
-                f"({scal_cfg.get('n_estimators_total', 60)} alberi); "
-                "misura la riduzione del tempo di completamento all'aumentare dei worker."
+                "Strong scaling test completato per Addestramento ed Inferenza. "
+                f"Carico totale fisso a ({scal_cfg.get('n_estimators_total', 60)} alberi)."
             ),
             "execution_mode": "local",
             "scaling_type": "strong",
+            "baseline_worker_count": baseline_w,
             "metrics_per_scale": results
         }
 
@@ -81,12 +142,13 @@ class ScalabilityScenario(BaseTestScenario):
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
                 final_predictions = final_predictions.ravel().astype(int)
                 y_test = y_test.astype(int)
-                
+                n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_test)),
-                    "f1_score": float(f1_score(y_test, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_test, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_test, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 import numpy as np
@@ -106,11 +168,14 @@ class ScalabilityScenario(BaseTestScenario):
                     final_predictions = y_pred.astype(int)
                     
                 y_true = y_true.astype(int)
+
+                n_classes = len(np.unique(np.concatenate([y_true, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_true)),
-                    "f1_score": float(f1_score(y_true, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_true, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_true, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2))}

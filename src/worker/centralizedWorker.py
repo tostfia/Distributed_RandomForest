@@ -63,18 +63,15 @@ class CentralizedWorker(BaseWorker):
         print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da: {source_info}")
 
         df: pd.DataFrame = self.dao.load_dataset(source_info)
+
+        actual_target = self.target_column
+        if actual_target not in df.columns:
+            raise ValueError(f"Colonna target '{actual_target}' non trovata nel dataset.")
         
-        feature_cols = [c for c in df.columns if c.startswith("Feature_")]
-        target_cols = [c for c in df.columns if c not in feature_cols]
-        
-        if not target_cols:
-            raise ValueError("Nessuna colonna target trovata nel dataset.")
-            
-        actual_target = target_cols[0] 
-        print(f"[CentralizedWorker] Rilevata colonna target dinamica: '{actual_target}'")
+        feature_cols = [c for c in df.columns if c != actual_target]
         
         y_df = df[actual_target]
-        X_df = df.drop(columns=[actual_target])
+        X_df = df[feature_cols]
 
         X = X_df.to_numpy(dtype=np.float64)
         if y_df.dtype == 'object' or y_df.nunique() > 20:

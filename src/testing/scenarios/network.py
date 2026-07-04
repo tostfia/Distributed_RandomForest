@@ -9,26 +9,51 @@ class NetworkSimulationScenario(BaseTestScenario):
     """
     Scenario 3: Simulazione di ritardi di rete tramite tc netem.
 
-    Lo scenario applica lui stesso il delay su 'lo' via tc, esegue il
+    Lo scenario applica lui stesso il delay su un'interfaccia via tc, esegue il
     training RPC, poi ripristina le regole originali dell'interfaccia.
 
     NOTA IMPORTANTE SUI PERMESSI:
-    tc richiede la capability Linux CAP_NET_ADMIN. Se lo scenario gira
-    dentro un container Docker, questa capability va aggiunta esplicitamente
-    al servizio nel docker-compose.yml:
+    tc richiede la capability Linux CAP_NET_ADMIN.
 
-        services:
-          test-engine:
-            cap_add:
-              - NET_ADMIN
+    - In Docker (RUNNING_IN_DOCKER=true): la capability va data al container
+      via 'cap_add: NET_ADMIN' nel docker-compose.yml, e/o al binario tc via
+      'setcap cap_net_admin+ep' nel Dockerfile. In questo caso i comandi tc
+      vengono eseguiti senza sudo.
 
-    Senza questa capability, nessuna combinazione di permessi utente/sudo
-    dentro il container risolverà l'errore "Operation not permitted".
+    - In locale/bare metal (RUNNING_IN_DOCKER=false): il binario di sistema
+      di solito non ha la file capability, quindi i comandi tc vengono
+      eseguiti con 'sudo -n' (non interattivo). Serve una regola NOPASSWD
+      in /etc/sudoers per tc, oppure lanciare l'intero engine con sudo.
+      Senza questo, lo scenario prosegue comunque ma senza applicare un
+      delay di rete reale (status: SKIPPED_NO_TC_PERMISSIONS).
     """
 
     def __init__(self, config, orchestrator):
         super().__init__(config, orchestrator)
-        self.tc_interface = os.environ.get("TC_INTERFACE", "eth0")
+        
+        
+        # In Docker la capability CAP_NET_ADMIN viene data al container/binario
+        # (docker-compose 'cap_add' + 'setcap' sul binario tc), quindi tc funziona
+        # senza sudo. In esecuzione locale (bare metal) questa capability di solito
+        # non è presente sul binario, quindi serve sudo per modificare le regole
+        # di rete del kernel.
+        self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
+
+        if self.running_in_docker:
+            print("[INFO] Esecuzione in Docker: tc senza sudo (capability CAP_NET_ADMIN).")
+            default_interface = "eth0"
+        else:
+            print("[INFO] Esecuzione locale: tc con sudo (richiesta capability CAP_NET_ADMIN).")
+            # Il traffico RPC passa su localhost, non sull'interfaccia fisica/virtuale:
+            # 'lo' è il default corretto per riflettere davvero il delay sulle chiamate RPC.
+            default_interface = "lo"
+
+        self.tc_interface = os.environ.get("TC_INTERFACE", default_interface)
+
+    def _tc_cmd(self, *args) -> list:
+        """Costruisce il comando tc, anteponendo sudo se non siamo in Docker."""
+        base = ["tc", *args]
+        return base if self.running_in_docker else ["sudo", "-n", *base]
 
     # ------------------------------------------------------------------ #
     # tc helpers                                                          #
@@ -37,14 +62,18 @@ class NetworkSimulationScenario(BaseTestScenario):
     def _tc_available(self) -> bool:
         """
         Controlla che tc sia installato e i permessi siano sufficienti.
-        Non usa sudo: tc deve avere la capability CAP_NET_ADMIN attaccata
-        al binario stesso via 'setcap cap_net_admin+ep' (fatto in fase di
-        build nel Dockerfile), e il container deve avere 'cap_add: NET_ADMIN'
-        nel bounding set (docker-compose.yml). Con queste due condizioni,
-        tc funziona indipendentemente dall'utente che lo esegue, senza sudo.
+
+        In Docker: tc deve avere la capability CAP_NET_ADMIN attaccata al
+        binario stesso via 'setcap cap_net_admin+ep' (fatto in fase di build
+        nel Dockerfile), e il container deve avere 'cap_add: NET_ADMIN' nel
+        bounding set (docker-compose.yml).
+
+        In locale (bare metal): usiamo 'sudo -n' (non-interattivo). Se non è
+        configurato un NOPASSWD per tc in /etc/sudoers, il comando fallisce
+        silenziosamente e lo scenario procede senza applicare il delay reale.
         """
         result = subprocess.run(
-            ["tc", "qdisc", "show", "dev", self.tc_interface],
+            self._tc_cmd("qdisc", "show", "dev", self.tc_interface),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -64,15 +93,15 @@ class NetworkSimulationScenario(BaseTestScenario):
 
         # Rimuove eventuali regole residue per evitare "File exists"
         subprocess.run(
-            ["tc", "qdisc", "del", "dev", self.tc_interface, "root"],
+            self._tc_cmd("qdisc", "del", "dev", self.tc_interface, "root"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        cmd = [
-            "tc", "qdisc", "add", "dev", self.tc_interface,
+        cmd = self._tc_cmd(
+            "qdisc", "add", "dev", self.tc_interface,
             "root", "netem", "delay", f"{latency_ms}ms",
-        ]
+        )
         if loss_percentage > 0:
             cmd += ["loss", f"{loss_percentage:.2f}%"]
 
@@ -80,11 +109,21 @@ class NetworkSimulationScenario(BaseTestScenario):
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
         )
         if result.returncode != 0:
+            if self.running_in_docker:
+                causa = (
+                    "manca 'cap_add: NET_ADMIN' nel docker-compose.yml per questo servizio, "
+                    "oppure il binario tc non ha la file capability "
+                    "(verifica nel Dockerfile: 'setcap cap_net_admin+ep /usr/sbin/tc')."
+                )
+            else:
+                causa = (
+                    "esecuzione locale senza NOPASSWD sudo per tc. Aggiungi una regola in "
+                    "/etc/sudoers (es. 'tuo_utente ALL=(ALL) NOPASSWD: /usr/sbin/tc'), "
+                    "oppure esegui l'intero engine con 'sudo python -m ...'."
+                )
             print(
                 f"[tc WARNING] Impossibile applicare le regole tc: {result.stderr.strip()}\n"
-                f"[tc WARNING] Causa probabile: manca 'cap_add: NET_ADMIN' nel docker-compose.yml "
-                f"per questo servizio, oppure il binario tc non ha la file capability "
-                f"(verifica nel Dockerfile: 'setcap cap_net_admin+ep /usr/sbin/tc')."
+                f"[tc WARNING] Causa probabile: {causa}"
             )
             return False
 
@@ -95,7 +134,7 @@ class NetworkSimulationScenario(BaseTestScenario):
         """Rimuove tutte le regole dall'interfaccia e ripristina il comportamento normale."""
         print(f"[tc CLEANUP] Rimozione ritardi di rete da '{self.tc_interface}'...")
         subprocess.run(
-            ["tc", "qdisc", "del", "dev", self.tc_interface, "root"],
+            self._tc_cmd("qdisc", "del", "dev", self.tc_interface, "root"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -161,7 +200,7 @@ class NetworkSimulationScenario(BaseTestScenario):
 
             t0 = time.perf_counter()
             trees_built = self.orchestrator._execute_training_step(
-                payload, start_alberi=0, target_alberi=n_trees, seed=42
+                payload, start_alberi=10, target_alberi=n_trees, seed = 123
             )
             duration = time.perf_counter() - t0
 
@@ -231,12 +270,15 @@ class NetworkSimulationScenario(BaseTestScenario):
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
                 final_predictions = final_predictions.ravel().astype(int)
                 y_test = y_test.astype(int)
+
+                n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_test)),
-                    "f1_score": float(f1_score(y_test, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_test, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_test, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 import numpy as np
@@ -256,11 +298,13 @@ class NetworkSimulationScenario(BaseTestScenario):
                     final_predictions = y_pred.astype(int)
                     
                 y_true = y_true.astype(int)
+                n_classes = len(np.unique(np.concatenate([y_true, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
                 accuracy_metrics = {
                     "accuracy": float(np.mean(final_predictions == y_true)),
-                    "f1_score": float(f1_score(y_true, final_predictions, zero_division=0)),
-                    "precision": float(precision_score(y_true, final_predictions, zero_division=0)),
-                    "recall": float(recall_score(y_true, final_predictions, zero_division=0))
+                    "f1_score": float(f1_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "precision": float(precision_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0))
                 }
             else:
                 accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2))}
