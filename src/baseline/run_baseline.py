@@ -115,20 +115,10 @@ def run_baseline():
             noise=noise,
         )
         df_clean = loader.load()
-<<<<<<< Updated upstream
 
         train_df, test_df = train_test_split(df_clean, test_size=TEST_SIZE, random_state=RANDOM_SEED)
         io_time = 0.0 
         etl_time = 0.0
-=======
-        splitter = StratifiedDataSplitter(target_column=target_col, test_size=0.2, random_state=RANDOM_SEED)
-        train_df, test_df = splitter.split(df_clean)
-        io_start_time = time.perf_counter()
-        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.01, dataset_seed=RANDOM_SEED)
-        df_raw = loader.load()
-        io_time = time.perf_counter() - io_start_time
-        print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
->>>>>>> Stashed changes
     else:
         data_folder = getattr(sys_cfg, "dataset_path", None)
         
@@ -168,14 +158,8 @@ def run_baseline():
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
         dizionario_feature = fs.feature_summary_
-<<<<<<< Updated upstream
         etl_time = time.perf_counter() - preprocess_start_time
 
-=======
-
-    etl_time = time.perf_counter() - preprocess_start_time    
-    # Separazione delle Feature dalle Label
->>>>>>> Stashed changes
     X_train = train_df.drop(columns=[target_col])
     y_train = train_df[target_col]
     X_test = test_df.drop(columns=[target_col])
