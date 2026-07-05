@@ -9,14 +9,18 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
     def run(self) -> dict:
         ft_cfg = self.config.get("inference_worker_fault", {})
         kill_delay = ft_cfg.get("kill_worker_after_seconds", 2)
-
+        task_type = self.config.get("selected_task", "classifier")
+        if task_type == "classifier":
+            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+        else:
+            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
         payload = self._build_payload()
 
         print(f"\n[TEST] Caricamento/Generazione modello preliminare per Job: {payload['job_id']}...")
         try:
             # Generiamo pochi alberi (es. 10 o 20) solo per creare legalmente il file .pkl su disco
             # Eseguiamo questa fase senza killare nessuno, in totale stabilità
-            self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=60, seed=123)
+            self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
             print("[TEST] Modello globale generato con successo su disco. Pronto per il test di inferenza.")
         except Exception as e:
             print(f"[TEST ERRORE] Impossibile completare l'addestramento preliminare: {e}")
@@ -75,9 +79,14 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         }
     
     def _build_payload(self):
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
+        
         return {
             "job_id": f"test_inference_fault_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", ""),
-            "hyperparameters": {"n_estimators": 60, "max_depth": 5, "tree_type": self.config.get("selected_task", "classifier")}
+            "hyperparameters": hp,
         }

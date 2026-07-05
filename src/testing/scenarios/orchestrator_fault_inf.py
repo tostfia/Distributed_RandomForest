@@ -17,8 +17,11 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
     def run(self) -> dict:
 
         ft_cfg = self.config.get("inference_orchestrator_fault", {})
-        target_alberi = 60
-        expected_min = ft_cfg.get("expected_min_trees", 60)
+        task_type = self.config.get("selected_task", "classifier")
+        if task_type == "classifier":
+            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+        else:
+            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
 
         orch_leader = self.orchestrator
         print(f"\n--- [TEST] Failover dell'Orchestratore durante l'inferenza ' ---")
@@ -48,15 +51,19 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             time.sleep(2)  # Diamo tempo allo standby di assestarsi
 
         job_id = f"test_inference_orch_failover_{int(time.time())}"
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
         payload = {
             "job_id": job_id,
             "dataset_type": self.config["dataset_type"],
             "dataset_path": self.config["dataset_path"],  
-            "hyperparameters": {"n_estimators": target_alberi, "max_depth": 5, "tree_type": self.config["selected_task"]}
+            "hyperparameters": hp,
         }
 
         try:
-            orch_leader._execute_training_step(payload, 0, 20, 123)
+            orch_leader._execute_training_step(payload, 0, target_trees, 123)
             
         except Exception as e:
             print(f"[TEST ERRORE] Setup fallito: {e}")
@@ -67,7 +74,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "job_id": job_id,
             "data_path": self.config["dataset_path"],
             "dataset_type": self.config["dataset_type"],
-            "hyperparameters": {"n_estimators": target_alberi, "max_depth": 5, "tree_type": self.config["selected_task"]}
+            "hyperparameters": hp,
         }
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}'...")
         

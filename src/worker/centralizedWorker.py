@@ -69,7 +69,9 @@ class CentralizedWorker(BaseWorker):
         else:
             self.target_column = "Label"
 
-        actual_target = self.target_column
+        actual_target = self.target_column if self.target_column in df.columns else (
+            "Target" if "Target" in df.columns else "Label"
+        )
         if actual_target not in df.columns:
             raise ValueError(
                 f"Colonna target '{actual_target}' non trovata nel dataset. "

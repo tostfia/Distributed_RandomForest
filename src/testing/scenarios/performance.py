@@ -11,8 +11,11 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
     def run(self) -> dict:
         print("[PERFORMANCE] Esecuzione in modalità LOCALE...")
         task_type = self.config.get("selected_task", "classifier")
-        target_trees = self.config.get("target_trees", 60)
         payload = self._build_payload()
+        if task_type == "classifier":
+            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+        else:
+            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
         
         start_time = time.perf_counter()
         num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
@@ -31,15 +34,15 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "model_accuracy_metrics": accuracy_metrics
         }
     def _build_payload(self):
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
         return {
             "job_id": f"test_perf_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", "synthetic/synthetic_dataset.csv"),
-            "hyperparameters": {
-                "n_estimators": self.config.get("target_trees", 60),
-                "max_depth": 5,
-                "tree_type": self.config.get("selected_task", "classifier")
-            }
+            "hyperparameters": hp
         }
     
 

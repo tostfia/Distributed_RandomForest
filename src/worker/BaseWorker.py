@@ -187,11 +187,12 @@ class BaseWorker(Service, ABC):
     def _get_tree_class(self):
         pass
 
-    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None):
+    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type = None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
-
+        if tree_type is not None:
+            self.tree_type = tree_type
         cached_task_bytes = self._load_task_from_shared_storage(source_info, base_seed, num_trees)
         if cached_task_bytes is not None:
             print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Restituisco i byte.")

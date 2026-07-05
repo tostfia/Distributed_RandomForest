@@ -52,7 +52,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload)
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
-        target_col = "Target" if (dataset_type == "synthetic" and tree_type == "regressor") else "Label"
+        target_col = "Target" if  tree_type == "regressor" else "Label"
 
         splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(target_column=target_col, test_size=TEST_SIZE, random_state=base_seed)
 
@@ -252,7 +252,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 source_info=source_info,
                                 num_trees=quota_chunk,       
                                 base_seed=chunk_seed,    
-                                max_depth=max_depth
+                                max_depth=max_depth,
+                                tree_type=hp.get("tree_type")
                             )
                             
                             # Deserializzazione sicura dei byte trasmessi via rete

@@ -25,13 +25,16 @@ class ScalabilityScenario(BaseTestScenario):
             print(f"[SCALABILITY LOCAL] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
             sampled_workers = {k: all_active_workers[k] for k in list(all_active_workers.keys())[:worker_count]}
             original_get_workers = ServiceRegistry.get_available_workers
+            if task_type == "classifier":
+                target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+            else:
+                target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
             ServiceRegistry.get_available_workers = lambda environment: sampled_workers
-            total_target = scal_cfg.get("n_estimators_total", 60)
-            payload = self._build_payload(worker_count, total_target)
+            payload = self._build_payload(worker_count)
             try:
                 # TIMING ADDESTRAMENTO
                 start_train = time.perf_counter() 
-                num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=total_target, seed=123)
+                num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
                 train_duration = time.perf_counter() - start_train
                 
                 # TIMING INFERENZA
@@ -111,16 +114,16 @@ class ScalabilityScenario(BaseTestScenario):
             "metrics_per_scale": results
         }
 
-    def _build_payload(self, worker_count,total_estimators):
+    def _build_payload(self, worker_count):
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
         return {
             "job_id": f"test_scal_{worker_count}_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", ""),
-            "hyperparameters": {
-                "n_estimators": total_estimators,
-                "max_depth": 5,
-                "tree_type": self.config.get("selected_task", "classifier")
-            }
+            "hyperparameters": hp,
         }
     
     def _mock_metrics_and_infer(self, payload, task_type):
@@ -148,12 +151,13 @@ class ScalabilityScenario(BaseTestScenario):
                     "accuracy": float(np.mean(final_predictions == y_test)),
                     "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
                     "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
-                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0))
+                    "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0)),
+                    "testing_set_size": int(len(y_test))
                 }
             else:
                 import numpy as np
                 final_predictions = np.mean(predictions_matrix, axis=0)
-                accuracy_metrics = {"mean_squared_error": float(np.mean((final_predictions - y_test) ** 2))}
+                accuracy_metrics = {"mean_squared_error": float(np.mean((final_predictions - y_test) ** 2)), "testing_set_size": int(len(y_test))}
 
         # 3. Rimosso "self" dai parametri, causa errore nel monkey patching su istanza
         def intercept_metrics_federated(y_pred, y_true, tree_type, **kwargs):
@@ -175,10 +179,11 @@ class ScalabilityScenario(BaseTestScenario):
                     "accuracy": float(np.mean(final_predictions == y_true)),
                     "f1_score": float(f1_score(y_true, final_predictions, average=avg_method, zero_division=0)),
                     "precision": float(precision_score(y_true, final_predictions, average=avg_method, zero_division=0)),
-                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0))
+                    "recall": float(recall_score(y_true, final_predictions, average=avg_method, zero_division=0)),
+                    "testing_set_size": int(len(y_true))
                 }
             else:
-                accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2))}
+                accuracy_metrics = {"mean_squared_error": float(np.mean((y_pred.astype(float) - y_true.astype(float)) ** 2)), "testing_set_size": int(len(y_true))}
 
         # Sostituzione temporanea (Monkey Patching sicuro per la durata del test)
         orig_centralized = getattr(self.orchestrator, "_print_and_validate_metrics", None)

@@ -196,11 +196,14 @@ class NetworkSimulationScenario(BaseTestScenario):
             # Training reale
             task_type = self.config.get("selected_task", "classifier")
             payload = self._build_payload("network_test")
-            n_trees = net_cfg.get("n_estimators_test", 10)
+            if task_type == "classifier":
+                target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+            else:
+                target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
 
             t0 = time.perf_counter()
             trees_built = self.orchestrator._execute_training_step(
-                payload, start_alberi=10, target_alberi=n_trees, seed = 123
+                payload, start_alberi=0, target_alberi=target_trees, seed = 123
             )
             duration = time.perf_counter() - t0
 
@@ -212,7 +215,7 @@ class NetworkSimulationScenario(BaseTestScenario):
             # "SUCCESS" può nascondere un test che di fatto non ha simulato nulla.
             if delay_requested and not tc_applied:
                 status = "SKIPPED_NO_TC_PERMISSIONS"
-            elif trees_built == n_trees:
+            elif trees_built == target_trees:
                 status = "SUCCESS"
             else:
                 status = "PARTIAL"
@@ -240,15 +243,15 @@ class NetworkSimulationScenario(BaseTestScenario):
 
     def _build_payload(self, tag: str) -> dict:
         net_cfg = self.config.get("network_simulation", {})
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
         return {
             "job_id": f"test_network_{tag}_{int(time.time() * 1000)}",
             "dataset_type": self.config.get("dataset_type", "synthetic"),
             "dataset_path": self.config["dataset_path"],
-            "hyperparameters": {
-                "n_estimators": net_cfg.get("n_estimators_test", 10),
-                "max_depth": 5,
-                "tree_type": self.config["selected_task"],
-            },
+            "hyperparameters": hp,
         }
     
     def _mock_metrics_and_infer(self, payload, task_type):

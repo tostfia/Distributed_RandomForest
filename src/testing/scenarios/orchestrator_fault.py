@@ -15,12 +15,12 @@ class OrchestratorFailoverScenario(BaseTestScenario):
     istanzia un secondo orchestratore di Standby (Master-2) per il subentro.
     """
  
-
+    
     def run(self) -> dict:
      
         ft_cfg = self.config.get("fault_tolerance", {})
-        target_alberi = 60
-        expected_min = ft_cfg.get("expected_min_trees", 60)
+        
+        
         
         # Identifichiamo il Leader di sistema 
         orch_leader = self.orchestrator
@@ -57,12 +57,17 @@ class OrchestratorFailoverScenario(BaseTestScenario):
 
         # 3. Generazione del Payload del Job
         job_id = f"test_orch_failover_{int(time.time())}"
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
         payload = {
             "job_id": job_id,
             "dataset_type": self.config["dataset_type"],
             "dataset_path": self.config["dataset_path"],
-            "hyperparameters": {"n_estimators": target_alberi, "max_depth": 5, "tree_type": self.config["selected_task"]}
-        }
+            "hyperparameters": hp
+            }
+        
 
         # 4. Invio del Job sulla coda standard gestita da Sofia
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}'...")
@@ -79,7 +84,7 @@ class OrchestratorFailoverScenario(BaseTestScenario):
 
         # 5. Thread Killer
         def kill_system_leader_target():
-            kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds")
+            kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds",120)
             print(f"[TEST KILLER] Lascio lavorare il leader per {kill_after_seconds} secondi prima del crash...")
             time.sleep(kill_after_seconds)
             
