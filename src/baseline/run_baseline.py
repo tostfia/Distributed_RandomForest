@@ -7,8 +7,6 @@ import pickle
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix, roc_curve
-
-# Import strutturali del sistema
 from src.shared.config import SystemConfig
 
 # Import delle utility condivise e del loader con campionamento probabilistico
@@ -61,9 +59,9 @@ def run_baseline():
 
     target_col = "Label"
     BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
-    SYNTHETIC_CONFIG_PATH = os.path.join("./synthetic", "synthetic_config.json")
     OUTPUT_DIR = "./outputs_baseline"
-    REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config.json")
+    REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_real.json")
+    SYNTHETIC_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_synthetic.json")
     dataset_type = "real"
     user_tree_type = "classifier"
     
@@ -125,6 +123,20 @@ def run_baseline():
         n_features = tmp_cfg.get("n_features", 30)
         n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
         noise = tmp_cfg.get("noise", 10.0)
+
+        # Conserviamo TUTTI i parametri di generazione già presenti nel file
+        # (inclusi quelli usati solo per la classificazione, es. n_informative,
+        # n_redundant...) in modo da poterli riscrivere intatti a fine run,
+        # dato che ora config_synthetic.json è l'unica fonte di verità sia
+        # per l'input (ricetta dataset) sia per l'output (manifesto).
+        dataset_gen_params = {
+            k: v for k, v in tmp_cfg.items()
+            if k in (
+                "n_samples", "n_features", "n_informative", "n_redundant",
+                "n_clusters_per_class", "flip_y", "weight",
+                "n_informative_reg", "noise",
+            )
+        }
 
         task_str = "regression" if user_tree_type == "regressor" else "classification"
         print(f" • Tipo Dataset: Sintetico (Stress Test Task - {user_tree_type.upper()})")
@@ -197,7 +209,7 @@ def run_baseline():
     print("-" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    config_path_final = os.path.join(OUTPUT_DIR, "config.json")
+    config_path_final = os.path.join(OUTPUT_DIR, "config_real.json")
     pickle_path_final = os.path.join(
         OUTPUT_DIR,
         f"baseline_random_forest_{user_tree_type}.pkl" if dataset_type == "synthetic" else "baseline_random_forest_completa.pkl"
@@ -248,11 +260,11 @@ def run_baseline():
         OUTPUT_DIR = "./outputs_baseline"
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        config_path_final = os.path.join(OUTPUT_DIR, "config.json")
+        config_path_final = os.path.join(OUTPUT_DIR, "config_real.json")
         pickle_path_final = os.path.join(OUTPUT_DIR, "baseline_random_forest_completa.pkl")
 
         # ---------------------------------------------------------
-        # FASE 3: SCRITTURA MANIFESTO CONFIG.JSON
+        # FASE 3: SCRITTURA MANIFESTO CONFIG_REAL.JSON
         # ---------------------------------------------------------
         best_booststrap = bool(best_params.get("bootstrap", True))
         config_data = {
@@ -276,7 +288,7 @@ def run_baseline():
         
         with open(config_path_final, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
-        print(f"[OK] Manifesto 'config.json' salvato correttamente in: '{config_path_final}'")
+        print(f"[OK] Manifesto 'config_real.json' salvato correttamente in: '{config_path_final}'")
 
         cv_results_extracted = {
             'test_accuracy': [search.cv_results_[f'split{i}_test_accuracy'][best_index] for i in range(5)],
@@ -315,6 +327,7 @@ def run_baseline():
             "mode": "distributed",
             "dataset_type": "synthetic",
             "dataset_path": "synthetic",
+            **dataset_gen_params,
             "feature_eliminata": dizionario_feature["eliminate"],
             "feature_selezionate": dizionario_feature["salvate"],
             "hyperparameters": {

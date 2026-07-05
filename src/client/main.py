@@ -19,7 +19,7 @@ CONFIG_PATH = os.path.join("./.local_storage", "config.json")
 # di CONFIG_PATH che tiene traccia solo dell'ultima richiesta di training.
 HISTORY_PATH = os.path.join("./.local_storage", "requests_history.json")
 
-BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config.json")
+BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
 
 # 2. Inizializziamo i servizi globali UNA volta sola all'avvio dello script
 try:
@@ -38,7 +38,7 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     config_path = (
         os.path.join("outputs_baseline", "config_synthetic.json")
         if dataset_type == "synthetic"
-        else os.path.join("outputs_baseline", "config.json")
+        else os.path.join("outputs_baseline", "config_real.json")
     )
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Il file di configurazione '{config_path}' non è stato trovato.")
@@ -281,7 +281,6 @@ def handle_model_request():
         elif job_status.upper() == "COMPLETED":
             print(f"\n[COMPLETATO] L'addestramento per il Job {job_id} è terminato con successo! ")
             
-            # UNIFORMATO: Il file ha lo stesso identico nome sia per Centralizzato che per Federato
             model_filename = f"model_{job_id}.pkl"
             model_path = os.path.join("./saved_models", model_filename)
             

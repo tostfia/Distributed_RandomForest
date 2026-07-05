@@ -42,7 +42,7 @@ class SyntheticDataLoader(DatasetLoader):
             raise ValueError(f"Task non supportato: '{task}'. Usare 'classification' o 'regression'.")
         self.task = task
 
-        config_path = "synthetic/synthetic_config.json"
+        config_path = "outputs_baseline/config_synthetic.json"
         config = {}
         if os.path.exists(config_path):
             try:
