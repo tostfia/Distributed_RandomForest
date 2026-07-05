@@ -47,6 +47,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         return "real"
     
     def _prepare_data(self, payload: dict, base_seed: int):
+        t0 = time.perf_counter()
         self.current_job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
         dataset_type = self._resolve_dataset_type(payload)
@@ -106,6 +107,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             dao = DatasetDAOFactory.get_dao(self.environment)
             dao.save_dataset(path=self.train_data_path, df=train_df)
             dao.save_dataset(path=self.test_data_path, df=test_df)
+            print(f"[DEBUG TIMING] _prepare_data completato in {time.perf_counter() - t0:.2f}s")
             print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
