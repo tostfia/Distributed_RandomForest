@@ -119,7 +119,6 @@ class TestEngine:
         finally:
             docker = os.environ.get("RUNNING_IN_DOCKER")
             if docker != "true":
-                print("[ENGINE] Pulizia dei worker locali...")
                 self._cleanup_workers()
             
             
@@ -191,5 +190,4 @@ if __name__ == "__main__":
     env = os.environ.get("ENV_MODE", "local")
     print(f"[ENGINE] Modalità di addestramento: {mode}, Ambiente: {env}")
     engine = TestEngine(mode=mode, env=env)
-    # Avvia l'interazione
     engine.run_scenarios()

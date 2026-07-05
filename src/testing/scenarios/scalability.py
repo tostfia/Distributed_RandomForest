@@ -8,8 +8,6 @@ import os
 class ScalabilityScenario(BaseTestScenario):
     """Copre lo Scenario 2: Analisi della Scalabilità e del Throughput al variare dei Worker."""
 
-   
-
     def run(self) -> dict:
         print("\n--- [SCENARIO 2] Test di Scalabilità e Throughput ---")
       
@@ -21,14 +19,19 @@ class ScalabilityScenario(BaseTestScenario):
         total_available = len(all_active_workers)
         workers_to_test = [w for w in scal_cfg.get("worker_counts_to_test", []) if w <= total_available]
         raw_metrics = {}
+
+        # target_trees dipende solo dal task selezionato, non dal worker_count:
+        # va calcolato una volta sola prima del ciclo, non ricalcolato identico
+        # ad ogni iterazione.
+        if task_type == "classifier":
+            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+        else:
+            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+
         for worker_count in workers_to_test:
             print(f"[SCALABILITY LOCAL] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
             sampled_workers = {k: all_active_workers[k] for k in list(all_active_workers.keys())[:worker_count]}
             original_get_workers = ServiceRegistry.get_available_workers
-            if task_type == "classifier":
-                target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-            else:
-                target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
             ServiceRegistry.get_available_workers = lambda environment: sampled_workers
             payload = self._build_payload(worker_count)
             try:
@@ -106,7 +109,7 @@ class ScalabilityScenario(BaseTestScenario):
         return {
             "scenario_description": (
                 "Strong scaling test completato per Addestramento ed Inferenza. "
-                f"Carico totale fisso a ({scal_cfg.get('n_estimators_total', 60)} alberi)."
+                f"Carico fisso di {target_trees} alberi per ciascuna configurazione di worker testata."
             ),
             "execution_mode": "local",
             "scaling_type": "strong",
@@ -234,4 +237,3 @@ class ScalabilityScenario(BaseTestScenario):
 
         # 4. Ritorniamo SOLO il dizionario delle metriche, come si aspetta _run_locally
         return accuracy_metrics
-           
