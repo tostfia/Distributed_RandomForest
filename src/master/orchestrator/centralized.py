@@ -189,7 +189,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             source_info = self.train_data_path 
 
             # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
-            CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
+            CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
             print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
 
             # 4. Configurazione della Coda di Sotto-Task locale
@@ -438,7 +438,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
         # Calcolo dinamico granulare della dimensione del chunk di alberi
-        CHUNK_SIZE = max(1, total_trees // (num_workers * 2))
+        CHUNK_SIZE = int(np.ceil(total_trees /num_workers))
         print(f"[{self.orchestrator_name}] CHUNK_SIZE di inferenza impostata a {CHUNK_SIZE} alberi per task.")
 
         # Popolamento della coda thread-safe dei sotto-task di inferenza
@@ -469,6 +469,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         failed_tasks = set()
         # 5. DEFINIZIONE DEL CONSUMATORE CONCORRENTE PER L'INFERENZA VIA RPC
         def inference_worker_consumer(w_name):
+            rounds_done = 0
             w_info = available_workers[w_name]
             worker_conn = None
             try:
@@ -488,6 +489,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 while True:
                     try:
                         task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=2)
+                        rounds_done += 1
                     except queue.Empty:
                         break
 
@@ -496,7 +498,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     
                     try:
                         self.chunk_sent_event.set()
-                        time.sleep(0.5)
+                        
                         # Invocazione remota sul metodo esposto dal BaseWorker
                         raw_response = worker_conn.root.predict_subset_forest(
                             chunk_trees_bytes, 
@@ -536,7 +538,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             if w_name in active_worker_names:
                                 active_worker_names.remove(w_name)
                         break  # Interruzione del loop per questo canale RPC corrotto
-                        
+                print(f"[{w_name}] ha completato {rounds_done} round")       
             except Exception as conn_err:
                 print(f"   [ERRORE CONNESSIOINE INFERENZA] Impossibile raggiungere il worker {w_name}: {conn_err}")
                 with results_lock:

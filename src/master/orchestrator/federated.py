@@ -166,7 +166,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             hp = payload.get("hyperparameters", {})
             tree_type = hp.get("tree_type", "classifier")
 
-            CHUNK_SIZE = max(1, total_step_trees // (num_workers * 2))
+            CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
             print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
 
             task_queue = queue.Queue()
@@ -374,7 +374,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 with self.connessioni_lock:
                     self.connessioni_attive.append(conn)
                 self.chunk_sent_event.set()
-                time.sleep(0.5)  # Piccola pausa per garantire che il leader abbia inviato il chunk prima di procedere
+                
                 print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
                 raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
                     "forest": forest_bytes,

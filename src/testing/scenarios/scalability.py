@@ -3,7 +3,7 @@ from src.shared.config import SystemConfig
 from src.testing.scenarios.base import BaseTestScenario
 import time
 import os
-
+import random
 
 class ScalabilityScenario(BaseTestScenario):
     """Copre lo Scenario 2: Analisi della Scalabilità e del Throughput al variare dei Worker."""
@@ -27,10 +27,12 @@ class ScalabilityScenario(BaseTestScenario):
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
         else:
             target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
-
+        rng = random.Random(123)
+        worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
             print(f"[SCALABILITY LOCAL] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
-            sampled_workers = {k: all_active_workers[k] for k in list(all_active_workers.keys())[:worker_count]}
+            sampled_ids = rng.sample(worker_ids, worker_count)
+            sampled_workers = {k: all_active_workers[k] for k in sampled_ids}
             original_get_workers = ServiceRegistry.get_available_workers
             ServiceRegistry.get_available_workers = lambda environment: sampled_workers
             payload = self._build_payload(worker_count)
@@ -62,7 +64,7 @@ class ScalabilityScenario(BaseTestScenario):
             finally:
                 ServiceRegistry.get_available_workers = original_get_workers
         # ─── FASE 2: CALCOLO SPEEDUP E STAMPA IN MODO ELEGANTE ───
-        baseline_w = workers_to_test[0]
+        baseline_w = min(workers_to_test)
         base_train_time = raw_metrics[baseline_w]["train_duration"]
         base_infer_time = raw_metrics[baseline_w]["infer_duration"]
         
@@ -145,7 +147,9 @@ class ScalabilityScenario(BaseTestScenario):
                 from sklearn.metrics import precision_score, recall_score, f1_score
                 
                 uniform_weights = np.ones_like(predictions_matrix)
+                start_vote = time.perf_counter()
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
+                vote_duration = time.perf_counter() - start_vote
                 final_predictions = final_predictions.ravel().astype(int)
                 y_test = y_test.astype(int)
                 n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
@@ -155,7 +159,9 @@ class ScalabilityScenario(BaseTestScenario):
                     "f1_score": float(f1_score(y_test, final_predictions, average=avg_method, zero_division=0)),
                     "precision": float(precision_score(y_test, final_predictions, average=avg_method, zero_division=0)),
                     "recall": float(recall_score(y_test, final_predictions, average=avg_method, zero_division=0)),
-                    "testing_set_size": int(len(y_test))
+                    "testing_set_size": int(len(y_test)),
+                    "vote_duration_seconds": vote_duration,   
+                    "num_voters": int(predictions_matrix.shape[0])
                 }
             else:
                 import numpy as np
