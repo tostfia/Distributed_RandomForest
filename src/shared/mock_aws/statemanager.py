@@ -100,6 +100,18 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Job {job_id[:8]} -> Worker pronti: {len(completed_tasks)}/{expected_count}")
         return len(completed_tasks) == expected_count
     
+    def get_active_jobs(self) -> list:
+        """
+        Restituisce gli ID di tutti i job attualmente in stato PROCESSING.
+        Usato da _perform_active_recovery per individuare job orfani (es. dopo
+        un failover dell'orchestratore) e riprenderne il lavoro.
+        """
+        response = dynamo_db.scan_table(TABLE_NAME)
+        all_jobs = response.get("Items", [])
+        active_ids = [j.get("job_id") for j in all_jobs if j.get("status") == "PROCESSING" and j.get("job_id")]
+        print(f"[StateManager] Scansione job attivi: trovati {len(active_ids)} job in stato PROCESSING.")
+        return active_ids
+
     def get_job_status(self, job_id: str) -> Optional[str]:
         """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
         response = dynamo_db.get_item(TABLE_NAME, job_id)

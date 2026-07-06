@@ -180,7 +180,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 task_id_counter += 1
                 sub_start = sub_end
                 
-            feature_selezionate = self.select_from_config()
+            feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
             results_lock = threading.Lock()
             active_worker_names = list(worker_names)
             checkpoint_time_accum = [0.0]
@@ -250,7 +250,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                             status="PROCESSING",
                                             orchestrator_id=self.orchestrator_name,
                                             retries=payload.get("retries", 0),
-                                            base_random_state=chunk_seed + (idx * 1000),
+                                            base_random_state=seed,
                                             alberi_addestrati=current_total,
                                         )
                                     except Exception as e_db:
@@ -323,7 +323,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             model_path = f"s3://my-cluster-datasets-bucket/saved_models/fed_model_{job_id}.pkl"
         else:
-            model_path = os.path.join("./saved_models", f"model_{self.current_job_id}.pkl")
+            model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
 
         if self.environment == "local":
             if not os.path.exists(model_path):
@@ -333,7 +333,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 global_model = pickle.load(f)
         else:
             print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
-            local_fallback_path = os.path.join("./saved_models", f"model_{self.current_job_id}.pkl")
+            local_fallback_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
             with open(local_fallback_path, "rb") as f:
                 global_model = pickle.load(f)
 
@@ -349,7 +349,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
         forest_bytes = pickle.dumps(all_trees)
-        feature_selezionate = self.select_from_config()
+        feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
 
         y_pred_global = []
         y_true_global = []
@@ -375,18 +375,22 @@ class FederatedOrchestrator(BaseOrchestrator):
                     self.connessioni_attive.append(conn)
                 self.chunk_sent_event.set()
                 
+                worker_hyperparameters = {
+                    **hyperparameters,
+                    "dataset_type": self._resolve_dataset_type(payload),
+                    "feature_selezionate": feature_selezionate,
+                    "tree_type": tree_type,
+                }
+                if tree_type == "classifier" and hasattr(global_model, "classes_"):
+                    worker_hyperparameters["global_classes"] = global_model.classes_.tolist()
+                # ----------------------------------------------------------------------------
+
                 print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
                 raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
                     "forest": forest_bytes,
                     "job_id": job_id,
                     "worker_index": idx,
-                    "hyperparameters": {
-                        **hyperparameters,
-                        "dataset_type": self._resolve_dataset_type(payload),
-                        "feature_selezionate": feature_selezionate,
-                        "tree_type": tree_type,
-                        "global_classes": global_model.classes_.tolist()
-                    }
+                    "hyperparameters": worker_hyperparameters
                 }))
                 worker_data = pickle.loads(obtain(raw_response))
 
@@ -480,8 +484,16 @@ class FederatedOrchestrator(BaseOrchestrator):
             
             if tree_type == "classifier":
                 global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                global_model.classes_ = np.array([0, 1], dtype=np.int64) 
-                global_model.n_classes_ = 2
+                # Stesso fix applicato in centralized.py: classi derivate dagli alberi reali
+                # invece di un'assunzione binaria fissa {0, 1}.
+                trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
+                if trees_with_classes:
+                    detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                else:
+                    print(f"[{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
+                    detected_classes = np.array([0, 1])
+                global_model.classes_ = detected_classes.astype(np.int64)
+                global_model.n_classes_ = len(detected_classes)
             else:
                 global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
             
@@ -611,13 +623,15 @@ class FederatedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
         return []
     
-    def select_from_config(self):
-        config_path = os.path.join(os.getcwd(), "outputs_baseline", "config.json")
+    def select_from_config(self, dataset_type: str = "real"):
+        # Il nome del file varia in base al tipo di dataset: config_real.json o config_synthetic.json
+        config_filename = f"config_{dataset_type}.json"
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
         
         if not os.path.exists(config_path):
             current_file_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
-            config_path = os.path.join(project_root, "outputs_baseline", "config.json")
+            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
 
         if os.path.exists(config_path):
             try:
@@ -632,7 +646,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [ERRORE] Lettura config fallita: {e}")
         else:
-            print(f"[{self.orchestrator_name}] [ATTENZIONE] config.json non trovato in nessuno dei percorsi:")
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato in nessuno dei percorsi:")
             print(f"  • {config_path}")
         return None
 

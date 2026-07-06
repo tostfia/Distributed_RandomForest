@@ -20,9 +20,6 @@ class ScalabilityScenario(BaseTestScenario):
         workers_to_test = [w for w in scal_cfg.get("worker_counts_to_test", []) if w <= total_available]
         raw_metrics = {}
 
-        # target_trees dipende solo dal task selezionato, non dal worker_count:
-        # va calcolato una volta sola prima del ciclo, non ricalcolato identico
-        # ad ogni iterazione.
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
         else:
@@ -89,7 +86,10 @@ class ScalabilityScenario(BaseTestScenario):
             print(f"   INFERENZA :")
             print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
             print(f"     • Speedup:    {infer_speedup:.2f}x")
-            print(f"     • Metric:     Accuracy = {m['accuracy'].get('accuracy', 0.0)*100:.2f}%")
+            if task_type == "classifier":
+                print(f"     • Metric:     Accuracy = {m['accuracy'].get('accuracy', 0.0)*100:.2f}%")
+            else:
+                print(f"     • Metric:     MSE = {m['accuracy'].get('mean_squared_error', 0.0):.4f}")
             
             # Salvataggio nel dizionario di output finale richiesto dall'orchestratore
             results[f"workers_{worker_count}"] = {

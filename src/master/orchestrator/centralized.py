@@ -346,8 +346,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 if tree_type == "classifier":
                     global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                    global_model.classes_ = np.array([0, 1], dtype=np.int64)
-                    global_model.n_classes_ = 2
+                    # Deriviamo le classi reali dagli alberi già addestrati (ogni DecisionTree
+                    # fittato conserva il proprio attributo classes_), invece di assumere
+                    # staticamente un problema binario con etichette {0, 1}. Con classi diverse
+                    # (es. {1, 2} o multi-classe) l'assunzione fissa avrebbe silenziosamente
+                    # etichettato male le predizioni finali.
+                    trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
+                    if trees_with_classes:
+                        detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                    else:
+                        print(f"   [{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
+                        detected_classes = np.array([0, 1])
+                    global_model.classes_ = detected_classes.astype(np.int64)
+                    global_model.n_classes_ = len(detected_classes)
                 else:
                     global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
                 

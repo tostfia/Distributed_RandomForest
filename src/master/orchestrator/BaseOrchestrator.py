@@ -144,9 +144,8 @@ class BaseOrchestrator(ABC):
         """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
             try:
-                # 1. Aggiorna la presenza nel registro servizi comune
+                
                 ServiceRegistry.update_orchestrator_heartbeat(self.orchestrator_name)
-                # 2. Rinnova attivamente la scadenza del lock di leadership
                 self._refresh_leadership_lock()
             except Exception as e:
                 print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat/lock: {e}")
@@ -260,6 +259,13 @@ class BaseOrchestrator(ABC):
             # Estraiamo il tipo di richiesta dal payload, di default assumiamo sia "TRAINING" per retrocompatibilità
             request_type = payload.get("request_type", "TRAINING").upper()
 
+            # Salviamo subito i metadati originali del job (dataset_path, dataset_type,
+            # hyperparameters, request_type) su un sidecar locale: lo state_manager/DynamoDB
+            # NON li conserva, quindi senza questo salvataggio un eventuale recovery dopo
+            # un failover dell'orchestratore ripartirebbe con hyperparameters={} e senza
+            # dataset_path, usando silenziosamente dei default sbagliati o fallendo.
+            self._save_job_meta(job_id, payload)
+
             if request_type == "INFERENCE":
                 print(f"\n[{self.orchestrator_name}] Ricevuta richiesta di INFERENZA per il Job ID: {job_id[:8]}...")
                 try:
@@ -316,7 +322,6 @@ class BaseOrchestrator(ABC):
 
             try:
                 alberi_totali = hp.get("n_estimators", 100)
-                # Definiamo un numero di alberi non fisso 
                 num_worker_attuali  = max(1, self._get_active_worker_count())
                 step_alberi = max(20, num_worker_attuali * 10)  # Step dinamico basato sul numero di worker attivi
                 current_alberi = alberi_gia_fatti
@@ -326,7 +331,6 @@ class BaseOrchestrator(ABC):
                     
                     alberi_ottenuti = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
 
-                    # ANTILOOP: Se i worker sono morti e non abbiamo prodotto alcun progresso, ci fermiamo
                     if alberi_ottenuti <= current_alberi:
                         print(f"[{self.orchestrator_name}] Nessun progresso nell'addestramento per Job {job_id[:8]}. Risorse insufficienti. In attesa di nuovi Worker...")
                         return
@@ -369,6 +373,57 @@ class BaseOrchestrator(ABC):
     def _execute_inference_step(self, payload: dict):
         pass
 
+    def _get_job_meta_path(self, job_id: str) -> str:
+        return os.path.join("./.local_storage", "job_meta", f"job_meta_{job_id}.json")
+
+    def _save_job_meta(self, job_id: str, payload: dict):
+        """
+        Persiste su disco i metadati originali del job (dataset_path, dataset_type,
+        hyperparameters, request_type). Lo state_manager (DynamoDB reale o mock) NON
+        conserva questi campi: senza questo sidecar, _perform_active_recovery non potrebbe
+        ricostruire un payload valido dopo un failover dell'orchestratore.
+        Implementato solo per l'ambiente locale, coerente con il resto del recovery.
+        """
+        if self.environment != "local" or not job_id:
+            return
+        try:
+            meta_path = self._get_job_meta_path(job_id)
+            os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+            meta = {
+                "dataset_path": payload.get("dataset_path"),
+                "dataset_type": payload.get("dataset_type"),
+                "hyperparameters": payload.get("hyperparameters", {}),
+                "request_type": payload.get("request_type", "TRAINING"),
+            }
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [WARN] Impossibile salvare i metadati del job {job_id[:8]}: {e}")
+
+    def _load_job_meta(self, job_id: str) -> dict:
+        if self.environment != "local":
+            return {}
+        meta_path = self._get_job_meta_path(job_id)
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Metadati del job {job_id[:8]} corrotti o illeggibili: {e}")
+        else:
+            print(f"[{self.orchestrator_name}] [WARN] Nessun sidecar di metadati trovato per il job {job_id[:8]}. Il recovery userà i default.")
+        return {}
+
+    def _clean_job_meta(self, job_id: str):
+        if self.environment != "local":
+            return
+        meta_path = self._get_job_meta_path(job_id)
+        if os.path.exists(meta_path):
+            try:
+                os.remove(meta_path)
+            except Exception:
+                pass
+
     def _load_checkpoint(self, job_id: str, existing_state: dict) -> int:
         db_val = existing_state.get("alberi_addestrati", 0)
         if self.environment == "local":
@@ -396,36 +451,34 @@ class BaseOrchestrator(ABC):
         print(f"[{self.orchestrator_name}] Controllo eventuali job in stato PROCESSING per ripristino...")
         job_ids_to_check = []
 
-        if self.environment == "local":
-            cp_dir = "./.local_storage/checkpoints"
-            if os.path.exists(cp_dir):
-                for filename in os.listdir(cp_dir):
-                    if filename.startswith("checkpoint_") and filename.endswith(".json"):
-                        job_id = filename.replace("checkpoint_", "").replace(".json", "")
-                        job_ids_to_check.append(job_id)
+        # Usiamo lo state_manager (locale o AWS che sia) come unica fonte di verità
+        # per individuare i job orfani, invece di affidarci a pattern di file fisici
+        # che non riflettono il reale schema di checkpoint su disco.
+        if hasattr(self.state_manager, "get_active_jobs"):
+            job_ids_to_check = self.state_manager.get_active_jobs()
         else:
-            if hasattr(self.state_manager, "get_active_jobs"):
-                job_ids_to_check = self.state_manager.get_active_jobs()
-        
+            print(f"[{self.orchestrator_name}] [WARN] Lo state_manager non espone get_active_jobs(): recovery attiva disabilitata.")
+
         for job_id in job_ids_to_check:
             existing_state = self.state_manager.obtain_request(job_id)
             if existing_state:
                 item_data = existing_state.get("Item", existing_state)
                 current_status = item_data.get("status")
-                old_owner = item_data.get("orchestrator_id")
+                old_owner = item_data.get("last_orchestrator")
                 if current_status == "PROCESSING" and old_owner != self.orchestrator_name:
                     print(f"[{self.orchestrator_name}] [RECOVERY] Job {job_id[:8]} in stato PROCESSING. Ripristino checkpoint...")
                     print(f"[{self.orchestrator_name}] Il Job {job_id[:8]} era gestito da {old_owner} (mancato).")
                     print(f"[{self.orchestrator_name}] Sincronizzazione stato e subentro immediato in corso...\n")
                     
-                    # Ricostruiamo il payload attingendo dallo stato salvato nel DB
+                    job_meta = self._load_job_meta(job_id)
                     recovered_payload = {
                         "job_id": job_id,
-                        "request_type": item_data.get("request_type", "TRAINING"),
-                        "hyperparameters": item_data.get("hyperparameters", item_data.get("hyperparameters", {}))
+                        "request_type": job_meta.get("request_type", "TRAINING"),
+                        "dataset_path": job_meta.get("dataset_path") or item_data.get("dataset_path"),
+                        "dataset_type": job_meta.get("dataset_type"),
+                        "hyperparameters": job_meta.get("hyperparameters", {}),
                     }
                     try:
-                        # Eseguiamo il job passando receipt_handle=None perché non proviene da SQS in questo istante
                         self._process_job(recovered_payload, receipt_handle=None)
                     except Exception as e:
                         print(f"[{self.orchestrator_name}] Errore durante il recupero del Job {job_id[:8]}: {e}")
@@ -451,4 +504,4 @@ class BaseOrchestrator(ABC):
             path = os.path.join("./.local_storage", "checkpoints", f"checkpoint_{job_id}.json")
             if os.path.exists(path):
                 os.remove(path)
-                    
+        self._clean_job_meta(job_id)
