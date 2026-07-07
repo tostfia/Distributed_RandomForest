@@ -34,6 +34,14 @@ class FederatedOrchestrator(BaseOrchestrator):
         self.chunk_sent_event = threading.Event()
         self.current_job_id = None
 
+        # Timeout massimo (in secondi) di attesa per un worker caduto prima di
+        # rinunciare al suo chunk/shard specifico. 0 = attesa infinita (default).
+        # Il chunk NON viene MAI dato ad un altro worker: allo scadere del timeout
+        # viene semplicemente scartato (meno alberi/campioni raccolti per questo job),
+        # mai redistribuito.
+        self.worker_wait_timeout = float(os.environ.get("FED_WORKER_WAIT_TIMEOUT_SECONDS", 0))
+
+
     def _ensure_local_bootstrap(self, payload: dict):
         """
         Esegue il bootstrap dei file CSV LOCALI se siamo in ambiente 'local'.
@@ -169,138 +177,126 @@ class FederatedOrchestrator(BaseOrchestrator):
             CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
             print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
 
-            task_queue = queue.Queue()
+            assigned_tasks = {}
             sub_start = start_alberi
             task_id_counter = 1
-            
-            while sub_start < target_alberi:
+            # riceve UN SOLO chunk, di sua esclusiva proprietà. Se il worker muore mentre
+            # lo sta processando, il chunk NON viene ripreso da nessun altro worker:
+            # il thread dedicato smette di ritentare la RPC e resta in attesa che quello
+            # stesso worker ricompaia nel ServiceRegistry, poi riprova lo stesso task.
+            for w_name in worker_names:
+                if sub_start >= target_alberi:
+                    break
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
                 task_seed = seed + sub_start
-                task_queue.put((task_id_counter, sub_start, sub_end, task_seed))
+                assigned_tasks[w_name] = (task_id_counter, sub_start, sub_end, task_seed)
                 task_id_counter += 1
                 sub_start = sub_end
+            
                 
             feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
             results_lock = threading.Lock()
             active_worker_names = list(worker_names)
             checkpoint_time_accum = [0.0]
+            RETRY_WAIT_SECONDS = 10
             def contact_worker(w_name, idx):
-                w_info = available_workers[w_name]
-                worker_conn = None
-                try:
-                    print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
-                    worker_conn = rpyc.connect(
-                        w_info["host"], 
-                        w_info["port"], 
-                        config={
-                            'allow_pickle': True,
-                            'sync_request_timeout': 600,
-                            'keepalive': True
-                        }
-                    )
-                    with self.connessioni_lock:
-                        self.connessioni_attive.append(worker_conn)
-
-                    while len(all_trained_trees) < target_alberi:
-                        try: 
-                            task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=2)
-                        except queue.Empty:
-                            with results_lock:
-                                total_attuali = len(all_trained_trees)
-                                num_worker_attivi = len(active_worker_names)
-                            
-                            if total_attuali >= target_alberi or num_worker_attivi <= 1:
-                                break
-                            time.sleep(1)
-                            continue
-                            
-                        quota_chunk = end_t - start_t
-                        print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
-                        try:
-                            result_raw = worker_conn.root.exposed_train_local_federated_forest(
-                                job_id=self.current_job_id,
-                                dataset_type=self._resolve_dataset_type(payload),
-                                n_estimators_local=quota_chunk,
-                                worker_index=idx,
-                                hyperparameters={
-                                    **hp, 
-                                    "random_state": chunk_seed + (idx * 1000),
-                                    "feature_selezionate": feature_selezionate,
-                                    
-                                },
-                            )
-                            result_trees = pickle.loads(obtain(result_raw))
-                            
-                            with results_lock:
-                                all_trained_trees.extend(result_trees)
-                                current_total = len(all_trained_trees)
-                                try:
-                                    t_chk_start = time.perf_counter()
-                                    with open(checkpoint_trees_path, "ab") as f_chk:
-                                        pickle.dump(all_trained_trees, f_chk)
-                                    checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
-                                    print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
-                                except Exception as e_fs:
-                                    print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
-                                
-                                if hasattr(self, 'state_manager') and self.state_manager:
-                                    try:
-                                        self.state_manager.update_request_status(
-                                            job_id=self.current_job_id,
-                                            status="PROCESSING",
-                                            orchestrator_id=self.orchestrator_name,
-                                            retries=payload.get("retries", 0),
-                                            base_random_state=seed,
-                                            alberi_addestrati=current_total,
-                                        )
-                                    except Exception as e_db:
-                                        print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
-                                
-                            print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
-                            task_queue.task_done()
-                            
-                        except Exception as e:
-                            print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
-                            task_queue.put((task_id, start_t, end_t, chunk_seed))
-                            print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
-                            
-                            with results_lock:
-                                if w_name in active_worker_names:
-                                    active_worker_names.remove(w_name)
-                            break 
-                            
-                except Exception as conn_err:
-                    print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
-                    with results_lock:
-                        if w_name in active_worker_names:
-                            active_worker_names.remove(w_name)
-                finally:
-                    if worker_conn:
+                task = assigned_tasks.get(w_name)
+                if task is None:
+                    return 
+                task_id, start_t, end_t, chunk_seed = task
+                quota_chunk = end_t - start_t
+                while True:
+                    while True:
+                        available_now = ServiceRegistry.get_available_workers(self.environment)
+                        if w_name in available_now:
+                            w_info = available_now[w_name]
+                            break
+                        print(f"[{self.orchestrator_name}] [WAIT] Worker '{w_name}' non raggiungibile. "
+                              f"Il suo Task {task_id} ({quota_chunk} alberi) resta in attesa: "
+                              f"nessun altro worker lo prenderà in carico.")
+                        time.sleep(RETRY_WAIT_SECONDS)
+                    worker_conn = None
+                    try: 
+                        print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                        worker_conn = rpyc.connect(
+                            w_info["host"], 
+                            w_info["port"], 
+                            config={
+                                'allow_pickle': True,
+                                'sync_request_timeout': 600,
+                                'keepalive': True
+                            }
+                        )
                         with self.connessioni_lock:
-                            if worker_conn in self.connessioni_attive:
-                                self.connessioni_attive.remove(worker_conn)
-                        try:
-                            worker_conn.close()
-                        except Exception:
-                            pass
+                            self.connessioni_attive.append(worker_conn)
+                        print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+                        result_raw = worker_conn.root.exposed_train_local_federated_forest(
+                            job_id=self.current_job_id,
+                            dataset_type=self._resolve_dataset_type(payload),
+                            n_estimators_local=quota_chunk,
+                            worker_index=idx,
+                            hyperparameters={
+                                **hp, 
+                                "random_state": chunk_seed + (idx * 1000),
+                                "feature_selezionate": feature_selezionate,
+                                
+                            },
+                        )
+                        result_trees = pickle.loads(obtain(result_raw))
+                        with results_lock:
+                            all_trained_trees.extend(result_trees)
+                            current_total = len(all_trained_trees)
+                            try:
+                                t_chk_start = time.perf_counter()
+                                with open(checkpoint_trees_path, "ab") as f_chk:
+                                    pickle.dump(all_trained_trees, f_chk)
+                                checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
+                                print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
+                            except Exception as e_fs:
+                                print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+                            if hasattr(self, 'state_manager') and self.state_manager:
+                                try:
+                                    self.state_manager.update_request_status(
+                                        job_id=self.current_job_id,
+                                        status="PROCESSING",
+                                        orchestrator_id=self.orchestrator_name,
+                                        retries=payload.get("retries", 0),
+                                        base_random_state=seed,
+                                        alberi_addestrati=current_total,
+                                    )
+                                except Exception as e_db:
+                                    print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                             
+                        print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                        return  # task di questo worker concluso, il thread termina
+                    except Exception as e:
+                        print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
+                        print(f"[{self.orchestrator_name}-Thread] Task {task_id} NON viene riassegnato ad altri worker. "
+                              f"In attesa che '{w_name}' si riavvii per riprendere lo stesso chunk.")
+                        time.sleep(RETRY_WAIT_SECONDS)
+                        continue  # nessun task_queue.put(): il chunk resta di proprietà esclusiva di w_name
+                    finally:
+                        if worker_conn:
+                            with self.connessioni_lock:
+                                if worker_conn in self.connessioni_attive:
+                                    self.connessioni_attive.remove(worker_conn)
+                            try:
+                                worker_conn.close()
+                            except Exception:
+                                pass
             threads = []
             for i, worker_name in enumerate(worker_names):
                 t = threading.Thread(target=contact_worker, args=(worker_name, i))
                 threads.append(t)
                 t.start()
-
+ 
             for t in threads:
                 t.join()
             print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")   
-                
-            if not task_queue.empty() and len(active_worker_names) == 0:
-                print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
-                raise RuntimeError("Sotto-sistema Fault Tolerance interrotto: Nessun worker disponibile rimasto.")
-
+ 
             if not all_trained_trees:
                 raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
-
+ 
             if len(all_trained_trees) > target_alberi:
                 print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
                 collected_trees = random.sample(all_trained_trees, target_alberi)
@@ -355,95 +351,109 @@ class FederatedOrchestrator(BaseOrchestrator):
         y_true_global = []
         total_samples_ref = [0]
         failed_workers = set()
-        self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
+        self.chunk_sent_event.clear()   
         results_lock = threading.Lock()
         active_worker_names = list(worker_names)
+        INF_RETRY_WAIT_SECONDS = 10
 
         def validate_worker(w_name, idx):
-            conn = None
-            try:
-                w_info = available_workers[w_name]
-                if not w_info:
-                    return
-
-                print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
-                conn = rpyc.connect(
-                    w_info["host"], w_info["port"],
-                    config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300}
-                )
-                with self.connessioni_lock:
-                    self.connessioni_attive.append(conn)
-                self.chunk_sent_event.set()
-                
-                worker_hyperparameters = {
-                    **hyperparameters,
-                    "dataset_type": self._resolve_dataset_type(payload),
-                    "feature_selezionate": feature_selezionate,
-                    "tree_type": tree_type,
-                }
-                if tree_type == "classifier" and hasattr(global_model, "classes_"):
-                    worker_hyperparameters["global_classes"] = global_model.classes_.tolist()
-                # ----------------------------------------------------------------------------
-
-                print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
-                raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
-                    "forest": forest_bytes,
-                    "job_id": job_id,
-                    "worker_index": idx,
-                    "hyperparameters": worker_hyperparameters
-                }))
-                worker_data = pickle.loads(obtain(raw_response))
-
-                with results_lock:
-                    y_pred_global.extend(worker_data["y_pred"])
-                    y_true_global.extend(worker_data["y_true"])
-                    total_samples_ref[0] += worker_data["n_samples"]
-                    print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' ({worker_data['n_samples']} record).")
-
-            except Exception as ex:
-                print(f"   [ERRORE INF] Fallimento su '{w_name}': {ex}")
-                with results_lock:
-                    if w_name in active_worker_names:
-                        active_worker_names.remove(w_name)
-                    failed_workers.add(w_name)
-            finally:
-                if conn:
+            wait_started_at = time.perf_counter()
+            while True:
+                while True:
+                    available_now = ServiceRegistry.get_available_workers(self.environment)
+                    if w_name in available_now:
+                        w_info = available_now[w_name]
+                        break
+ 
+                    if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
+                        print(f"[{self.orchestrator_name}] [TIMEOUT INF] Worker '{w_name}' non è tornato disponibile "
+                              f"entro {self.worker_wait_timeout:.0f}s. I suoi campioni vengono ESCLUSI dalla metrica "
+                              f"finale (status PARTIAL), non richiesti ad altri worker.")
+                        with results_lock:
+                            failed_workers.add(w_name)
+                        return
+                    print(f"[{self.orchestrator_name}] [WAIT INF] Worker '{w_name}' non raggiungibile. "
+                          f"La sua validazione resta in attesa: nessun altro worker userà il suo test-shard.")
+                    time.sleep(INF_RETRY_WAIT_SECONDS)
+                conn = None
+                try:
+                    print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                    conn = rpyc.connect(
+                        w_info["host"], w_info["port"],
+                        config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300}
+                    )
                     with self.connessioni_lock:
-                        if conn in self.connessioni_attive:
-                            self.connessioni_attive.remove(conn)
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
+                        self.connessioni_attive.append(conn)
+                    self.chunk_sent_event.set()
+ 
+                    worker_hyperparameters = {
+                        **hyperparameters,
+                        "dataset_type": self._resolve_dataset_type(payload),
+                        "feature_selezionate": feature_selezionate,
+                        "tree_type": tree_type,
+                    }
+                    if tree_type == "classifier" and hasattr(global_model, "classes_"):
+                        worker_hyperparameters["global_classes"] = global_model.classes_.tolist()
+                    # ----------------------------------------------------------------------------
+                    print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
+                    raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
+                        "forest": forest_bytes,
+                        "job_id": job_id,
+                        "worker_index": idx,
+                        "hyperparameters": worker_hyperparameters
+                    }))
+                    worker_data = pickle.loads(obtain(raw_response))
+ 
+                    with results_lock:
+                        y_pred_global.extend(worker_data["y_pred"])
+                        y_true_global.extend(worker_data["y_true"])
+                        total_samples_ref[0] += worker_data["n_samples"]
+                        print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' ({worker_data['n_samples']} record).")
+                    return  # successo, il thread termina
+ 
+                except Exception as ex:
+                    print(f"   [ERRORE INF] Fallimento su '{w_name}': {ex}. In attesa che torni disponibile "
+                          f"(la sua validazione NON verrà eseguita da altri worker).")
+                    time.sleep(INF_RETRY_WAIT_SECONDS)
+                    continue  # torna al ciclo di attesa, stesso worker
+                finally:
+                    if conn:
+                        with self.connessioni_lock:
+                            if conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(conn)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+ 
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names):
             t = threading.Thread(target=validate_worker, args=(name, idx))
             t.start()
             threads.append(t)
-
+ 
         for t in threads:
             t.join()
-
+ 
         with self.connessioni_lock:
             for conn in self.connessioni_attive:
                 try: conn.close()
                 except Exception: pass
-
+ 
         rpc_inference_time = time.perf_counter() - rpc_start_time
-
+ 
         if not y_pred_global:
             print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
             return {}
-
+ 
         if failed_workers:
             print(f"[{self.orchestrator_name}] [WARN] {len(failed_workers)} worker non hanno risposto: {failed_workers}. Metriche calcolate sui rimanenti.")
-
+ 
         total_inference_time = time.perf_counter() - inference_start_time
-
+ 
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
-
+ 
         metrics = self._print_and_validate_metrics_federated(
             y_pred=np.array(y_pred_global, dtype=np.float64),
             y_true=np.array(y_true_global, dtype=y_true_dtype),
@@ -463,7 +473,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 )
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
-
+ 
         return {
             "status": "SUCCESS" if not failed_workers else "PARTIAL",
             "testing_set_size": total_samples_ref[0],
@@ -471,7 +481,10 @@ class FederatedOrchestrator(BaseOrchestrator):
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
             "metrics": metrics
-        }   
+        } 
+
+            
+  
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:

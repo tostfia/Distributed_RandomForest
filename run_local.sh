@@ -58,6 +58,12 @@ fi
 
 echo "[SYSTEM] Rilevati $NUM_WORKERS worker dal file .env"
 
+if [ ! -f "$(pwd)/worker_supervisor.py" ]; then
+    echo "[ERRORE] worker_supervisor.py non trovato nella root del progetto ($(pwd))."
+    echo "         Serve per il restart-on-failure automatico dei worker in locale."
+    exit 1
+fi
+
 # Configurazione della rete
 if [ "$MODE" = "delay" ]; then
     echo "[RETENET] Configurazione ritardo di rete: aggiungo 50ms di latenza su localhost..."
@@ -88,7 +94,7 @@ for ((i=1; i<=NUM_WORKERS; i++)); do
     echo "[START] Avvio $WORKER_NAME sulla porta $PORT..."
     
     # Modificato: include anche la cartella /src nel PYTHONPATH
-    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
+    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; python \"${ROOT_DIR}/worker_supervisor.py\" -- python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
 done
 
 sleep 2

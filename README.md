@@ -73,10 +73,12 @@ In realtà poi basta fare: pip install -r requirements.txt, poi per quanto rigua
 
 
 Aggiunto uno script per eseguire i ritardi di rete in locale. Possibilità di averli sia sul locale senza docker sia sul distribuito con docker: chmod +x run_local.sh. Dopodiché per eseguire il codice: ./run_local.sh delay. Inoltre, per poter avviare più terminali da bash, si è installato il seguente motore grafico: sudo dnf install gnome-terminal -y
+Farlo anche per run_local_test.sh, run_test.sh, clean_local.sh
 
 Prima di effettuare la build, vanno lanciati questi comandi: 
 sudo chown -R $USER:$USER ./.local_storage
 chmod -R 775 ./.local_storage
+
 
 anche per la cartella ./.saved_models
 
