@@ -1,3 +1,4 @@
+import signal
 import time
 import threading
 import os
@@ -8,7 +9,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
 
     def run(self) -> dict:
         ft_cfg = self.config.get("inference_worker_fault", {})
-        kill_delay = ft_cfg.get("kill_worker_after_seconds", 2)
+        kill_delay = ft_cfg.get("kill_worker_after_seconds")
         task_type = self.config.get("selected_task", "classifier")
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
@@ -35,20 +36,30 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             if not signaled:
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
             
-            print(f"[TEST TRIGGER] Chunk inviato, ora simulo il guasto del Worker locale dopo {kill_delay} secondi...")
+            is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
+            print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker (Locale)...")
             try:
-                with self.orchestrator.connessioni_lock:
-                    if self.orchestrator.connessioni_attive:
-                        target_conn = self.orchestrator.connessioni_attive[0]
-                    else:
-                        target_conn = None
-                if target_conn:
-                    target_conn.close()
-                    print("[TEST TRIGGER] Connessione RPyC interrotta con successo!")
+                if is_docker:
+                    import docker
+                    client = docker.from_env()
+                    containers = client.containers.list(filters={"label": "com.docker.compose.service=worker"})
+                    for c in containers:
+                        if "worker-1" in c.name:
+                            c.kill()
+                            break
                 else:
-                    print("[TEST ERRORE] Nessuna connessione attiva da interrompere.")
+                    worker_port = 18861
+                    cmd_out = os.popen(f"lsof -t -i:{worker_port} 2>/dev/null || fuser {worker_port}/tcp 2>/dev/null").read().strip()
+                    if cmd_out:
+                        pids = cmd_out.split()
+                        my_pid = str(os.getpid())
+                        valid_pids = [p for p in pids if p != my_pid]
+                        if valid_pids:
+                            # Uccidiamo il figlio. Il supervisor capterà l'exit code != 0 e farà il backoff
+                            os.kill(int(valid_pids[0]), signal.SIGKILL)
+                            print(f"[TEST TRIGGER] Processo Worker locale (PID {valid_pids[0]}) abbattuto!")
             except Exception as e:
-                print(f"[TEST ERRORE] {e}")
+                    print(f"[TEST ERRORE] Impossibile eseguire il kill: {e}")
 
         threading.Thread(target=kill_worker_local, daemon=True).start()
         start_time = time.perf_counter()
@@ -69,10 +80,10 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             test_status = "FAILED"
             
         duration = time.perf_counter() - start_time
-        
+        mode = os.environ.get("SYS_MODE", "centralized")
         return {
             "scenario_description": "Crash improvviso Worker su thread/processi Python locali durante l'inferenza.",
-            "execution_mode": "local",
+            "execution_mode": "centralized" if mode == "centralized" else "federated",
             "status": test_status,
             "duration_seconds": round(duration, 2),
             "accuracy_metrics": accuracy_metrics

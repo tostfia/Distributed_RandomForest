@@ -33,7 +33,7 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 # del dataset) dalla complessità del modello.
 # ---------------------------------------------------------------------------
 SYNTHETIC_REGRESSOR_REFERENCE_HP = {
-    "n_estimators": 100,
+    "n_estimators": 40,
     "max_depth": None,
     "min_samples_split": 2,
     "bootstrap": True,

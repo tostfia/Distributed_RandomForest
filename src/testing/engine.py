@@ -56,7 +56,10 @@ class TestEngine:
                 worker_name = f"Worker-Locale-{i:02d}"
                 port = port_base + i-1
                 print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
-                cmd = ["python", "-m", "src.worker.main", worker_name, str(port), self.mode, self.env]
+                cmd = [
+                    "python", "worker_supervisor.py", "--", 
+                    "python", "-m", "src.worker.main", worker_name, str(port), self.mode, self.env
+                ]
                 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.worker_processes.append(p)
             time.sleep(1)  # Simula il tempo di avvio dei worker

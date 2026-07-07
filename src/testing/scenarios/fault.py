@@ -1,6 +1,7 @@
 import time
 import threading
 import os
+import signal
 from src.testing.scenarios.base import BaseTestScenario
 
 
@@ -10,22 +11,47 @@ class FaultToleranceScenario(BaseTestScenario):
 
     def run(self) -> dict:
         ft_cfg = self.config.get("fault_tolerance", {})
-        kill_delay = ft_cfg.get("kill_worker_after_seconds", 10)
+        
+        mode = os.environ.get("SYS_MODE", "centralized")
+       
         task_type = self.config.get("selected_task", "classifier")
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
         else:
             target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
         def kill_worker_local():
-            time.sleep(kill_delay)
+            kill_delay = ft_cfg.get("kill_worker_after_seconds")
+            if mode == "federated":
+                kill_delay = kill_delay + 50
+
+            signaled = self.orchestrator.chunk_sent_event.wait(timeout=kill_delay)
+            if not signaled:
+                print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
+            is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker (Locale)...")
             try:
-                if hasattr(self.orchestrator, "connessioni_attive") and self.orchestrator.connessioni_attive:
-                    target_conn = self.orchestrator.connessioni_attive[0]
-                    target_conn.close()
-                    print("[TEST TRIGGER] Connessione RPyC interrotta con successo!")
+                if is_docker:
+                    import docker
+                    client = docker.from_env()
+                    containers = client.containers.list(filters={"label": "com.docker.compose.service=worker"})
+                    for c in containers:
+                        if "worker-1" in c.name:
+                            c.kill()
+                            break
+                else:
+                    worker_port = 18861
+                    cmd_out = os.popen(f"lsof -t -i:{worker_port} 2>/dev/null || fuser {worker_port}/tcp 2>/dev/null").read().strip()
+                    if cmd_out:
+                        pids = cmd_out.split()
+                        my_pid = str(os.getpid())
+                        valid_pids = [p for p in pids if p != my_pid]
+                        if valid_pids:
+                            # Uccidiamo il figlio. Il supervisor capterà l'exit code != 0 e farà il backoff
+                            os.kill(int(valid_pids[0]), signal.SIGKILL)
+                            print(f"[TEST TRIGGER] Processo Worker locale (PID {valid_pids[0]}) abbattuto!")
             except Exception as e:
-                print(f"[TEST ERRORE] {e}")
+                    print(f"[TEST ERRORE] Impossibile eseguire il kill: {e}")
+            
 
         threading.Thread(target=kill_worker_local, daemon=True).start()
         
@@ -36,7 +62,7 @@ class FaultToleranceScenario(BaseTestScenario):
         
         return {
             "scenario_description": "Crash improvviso Worker su thread/processi Python locali.",
-            "execution_mode": "local",
+            "execution_mode": "centralized" if mode == "centralized" else "federated",
             "status": "SUCCESS" if num_trees == target_trees else "FAILED",
             "trees_built": num_trees, 
             "duration_seconds": round(duration, 2)
