@@ -325,10 +325,23 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset SINTETICO: {dataset_path}")
     else:
         dataset_type = "real"
-        default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
         
-        print("  • Inserisci l'URL S3 o il path locale del dataset reale.")
-        dataset_path = get_input(f"    (Premi INVIO per il default pubblico): \n    --> ", default_s3_url).strip()
+        # 1. Recuperiamo l'URL dal .env (se configurato) o usiamo la stringa come fallback
+        s3_public_url = os.getenv("DEFAULT_DATASET_S3_URL", "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/")
+        
+        # 2. CONTROLLO DINAMICO: Determiniamo il valore di default in base all'ambiente
+        if environment.lower() == "aws":
+            # Se siamo su AWS, proponiamo l'URL S3 direttamente come default preimpostato
+            default_s3_url = s3_public_url
+            prompt_message = f"    Inserisci l'URL S3.\n [Default: {default_s3_url}]: \n    --> "
+        else:
+            # Se siamo in locale, puoi lasciare il comportamento classico o un default locale
+            default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"  
+            prompt_message = f"     Inserisci il path locale del dataset reale.\n (Premi INVIO per il default): \n    --> "
+        
+        # 3. Mostriamo sempre la domanda all'utente
+        print("  • Configurazione percorso sorgente dati:")
+        dataset_path = get_input(prompt_message, default_s3_url).strip()
         print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
 
     # 4. Configurazione Iperparametri
