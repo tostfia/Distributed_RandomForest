@@ -11,8 +11,6 @@ data/db_files/
 
 dataset_cache/
 
-outputs_baseline/
-
 # Escludi i dataset CSV (sia il dataset originale che quello campionato)
 data/*.csv
 workers_cache/*.csv
