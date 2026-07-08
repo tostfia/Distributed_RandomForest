@@ -4,7 +4,7 @@
 awscliv2.zip
 aws/
 
-*.pkl
+outputs_baseline/*.pkl
 
 # === DATI LOCALI / DATABASE FINTO ===
 # Impedisce di caricare su Git i file JSON generati dai test locali di DynamoDB
