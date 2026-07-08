@@ -21,7 +21,7 @@ from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
-
+from src.dataset.checkpoint_dao import CheckpointDAOFactory
 TEST_SIZE = 0.2
 
 
