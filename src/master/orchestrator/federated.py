@@ -6,7 +6,6 @@ import random
 import socket
 import threading
 import time
-import queue
 import traceback
 import rpyc
 import numpy as np
@@ -196,7 +195,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                 
             feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
             results_lock = threading.Lock()
-            active_worker_names = list(worker_names)
             checkpoint_time_accum = [0.0]
             RETRY_WAIT_SECONDS = 10
             def contact_worker(w_name, idx):
@@ -205,12 +203,20 @@ class FederatedOrchestrator(BaseOrchestrator):
                     return 
                 task_id, start_t, end_t, chunk_seed = task
                 quota_chunk = end_t - start_t
+                wait_started_at = time.perf_counter()
                 while True:
                     while True:
                         available_now = ServiceRegistry.get_available_workers(self.environment)
                         if w_name in available_now:
                             w_info = available_now[w_name]
                             break
+                        
+                        if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
+                            print(f"[{self.orchestrator_name}] [TIMEOUT] Worker '{w_name}' non tornato disponibile "
+                                f"entro {self.worker_wait_timeout:.0f}s. Task {task_id} ({quota_chunk} alberi) "
+                                f"ABBANDONATO per questo round. Verrà ritentato al prossimo step con i worker rimasti.")
+                            return  # rinuncia al chunk per questo step, senza bloccare gli altri thread
+
                         print(f"[{self.orchestrator_name}] [WAIT] Worker '{w_name}' non raggiungibile. "
                               f"Il suo Task {task_id} ({quota_chunk} alberi) resta in attesa: "
                               f"nessun altro worker lo prenderà in carico.")
@@ -353,7 +359,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         failed_workers = set()
         self.chunk_sent_event.clear()   
         results_lock = threading.Lock()
-        active_worker_names = list(worker_names)
         INF_RETRY_WAIT_SECONDS = 10
 
         def validate_worker(w_name, idx):
@@ -483,8 +488,6 @@ class FederatedOrchestrator(BaseOrchestrator):
             "metrics": metrics
         } 
 
-            
-  
     
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:
@@ -637,7 +640,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         return []
     
     def select_from_config(self, dataset_type: str = "real"):
-        # Il nome del file varia in base al tipo di dataset: config_real.json o config_synthetic.json
         config_filename = f"config_{dataset_type}.json"
         config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
         
