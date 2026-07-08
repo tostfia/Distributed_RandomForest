@@ -51,7 +51,7 @@ class SyntheticDataLoader(DatasetLoader):
             except Exception as e:
                 print(f"Errore durante la lettura del file di configurazione: {e}")
 
-        self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 500000)
+        self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 300000)
         self.n_features = n_features if n_features is not None else config.get("n_features", 30)
         self.random_seed = random_seed
         self.filename = filename if (filename := config.get("filename")) is not None else "synthetic_dataset.csv"
