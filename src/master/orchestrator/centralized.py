@@ -11,7 +11,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.utils.extmath import weighted_mode
-from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score
+from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
@@ -38,6 +38,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             orchestrator_name=name,
             queue_name="centralized_queue"
         )
+        self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
@@ -136,22 +137,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
             else:
                 # Se non esistono o siamo in AWS (implementabile con check su S3), esegui l'ETL normalmente
                 self._prepare_data(payload, seed)
-
-        if self.environment == "aws":
-            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{self.current_job_id}.pkl"
-        else:
-            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{self.current_job_id}.pkl"
+        checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
+        if self.environment != "aws":
             os.makedirs("./.local_storage", exist_ok=True)
-        
         all_trained_trees = []
 
         # ─── FASE DI RESUME: SE ABBIAMO SUBITO UN FAILOVER E ABBIAMO GIÀ ALBERI PRONTI ───
         if start_alberi > 0:
             print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Rilevato start_alberi = {start_alberi}. Ripristino checkpoint fisico...")
-            if os.path.exists(checkpoint_trees_path):
+            if self.checkpoint_dao.exists(checkpoint_trees_path):
                 try:
-                    with open(checkpoint_trees_path, "rb") as f:
-                        all_trained_trees = pickle.load(f)
+                    all_trained_trees = self.checkpoint_dao.load(checkpoint_trees_path)
+                    
                     print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
                     # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
                     start_alberi = len(all_trained_trees)
@@ -266,8 +263,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 current_total = len(all_trained_trees)
                                 # SALVATAGGIO FISICO ATOMICO PROGRESSIVO
                                 try:
-                                    with open(checkpoint_trees_path, "wb") as f_chk:
-                                        pickle.dump(all_trained_trees, f_chk)
+                                    self.checkpoint_dao.save(checkpoint_trees_path, all_trained_trees)
                                     print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
                                 except Exception as e_fs:
                                     print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
@@ -366,12 +362,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 global_model.n_features_in_ = n_features
                 global_model.n_outputs_ = 1
                 
-                TARGET_DIR = "./saved_models"
-                os.makedirs(TARGET_DIR, exist_ok=True)
-                model_path = os.path.join(TARGET_DIR, f"model_{self.current_job_id}.pkl")
                 
-                with open(model_path, "wb") as f:
-                    pickle.dump(global_model, f)
+                model_path = self._resolve_model_path(self.current_job_id)
+                self.checkpoint_dao.save(model_path, global_model)
                 
                 print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
                 
@@ -399,13 +392,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA FAULT-TOLERANT ===")
         inference_start_time = time.perf_counter()
-
+        model_path = self._resolve_model_path(job_id)
         # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) E TESTING SET (.csv) IN BASE ALL'AMBIENTE
         if self.environment == "aws":
-            model_path = f"s3://my-cluster-datasets-bucket/saved_models/model_{job_id}.pkl"
             self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
         else:
-            model_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
             self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
 
         print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Risoluzione asset logici per il Job ID: {job_id}")
@@ -413,18 +404,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"[{self.orchestrator_name}] Path Dataset calcolato: {self.test_data_path}")
 
         # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
-        if self.environment == "local":
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
-            print(f"[{self.orchestrator_name}] Caricamento della foresta locale da {model_path}...")
-            with open(model_path, "rb") as f:
-                global_model = pickle.load(f)
-        else:
-            print(f"[{self.orchestrator_name}] Ambiente AWS: caricamento foresta...")
-            local_fallback_path = os.path.join("./saved_models", f"model_{job_id}.pkl")
-            with open(local_fallback_path, "rb") as f:
-                global_model = pickle.load(f)
-        
+        if not self.checkpoint_dao.exists(model_path):
+            raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+        print(f"[{self.orchestrator_name}] Caricamento della foresta globale da {model_path}...")
+        global_model = self.checkpoint_dao.load(model_path)
+
         all_trees = global_model.estimators_
         total_trees = len(all_trees)
         print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
@@ -522,9 +506,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             predictions_chunks.append((start_idx, sub_predictions))
                             inference_cp_path = self._get_inference_checkpoint_path(job_id)
                             try:
-                                with open(inference_cp_path, "wb") as f_chk:
-                                    pickle.dump(predictions_chunks, f_chk)
-                                print(f"   [RPC INF <- {w_name}] [CHECKPOINT INFERENZA OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {len(predictions_chunks)} chunk.")
+                               self.checkpoint_dao.save(inference_cp_path, predictions_chunks)
+                               print(f"   [RPC INF <- {w_name}] [CHECKPOINT INFERENZA OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {len(predictions_chunks)} chunk.")
                             except Exception as e_fs:
                                 print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere i chunk di inferenza parziali su file: {e_fs}")
                             
@@ -659,6 +642,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
             recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
             f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
+            auc = roc_auc_score(y_test, final_predictions) if n_classes == 2 else None
             cm = confusion_matrix(y_test, final_predictions)
             
             print(f"  Tipo di Modello:                        CLASSIFICATORE")
@@ -668,6 +652,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"  PRECISION DISTRIBUITA:                  {precision * 100:.2f} %")
             print(f"  RECALL DISTRIBUITA:                     {recall * 100:.2f} %")
             print(f"  F1-SCORE DISTRIBUITO:                   {f1 * 100:.2f} %")
+            print(f"  AUC DISTRIBUITO:                         {auc:.4f}" if auc is not None else "  AUC DISTRIBUITO:                         N/A (multi-classe)")
             print("-" * 75)
             print("  Matrice di Confusione:")
             print(cm)
@@ -700,14 +685,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
         
         # 2. Se ci sono alberi fisici da blindare su disco/S3, lo facciamo qui
         if alberi_reali is not None and len(alberi_reali) > 0:
-            if self.environment == "aws":
-                checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
-            else:
-                checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
-            
+            checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
             try:
-                with open(checkpoint_trees_path, "wb") as f:
-                    pickle.dump(alberi_reali, f)
+                self.checkpoint_dao.save(checkpoint_trees_path, alberi_reali)
                 print(f"[{self.orchestrator_name}] [CENTRALIZED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi salvati in storage.")
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [ERRORE STORAGE] Fallito salvataggio fisico degli alberi: {e}")
@@ -717,20 +697,31 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Override del metodo di pulizia per rimuovere il file pickle parziale.
         """
         super()._clean_checkpoint(job_id)
-        if self.environment == "aws":
-            checkpoint_trees_path = f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
-        else:
-            checkpoint_trees_path = f"./.local_storage/checkpoint_trees_{job_id}.pkl"
-            
-        if os.path.exists(checkpoint_trees_path):
-            try:
-                os.remove(checkpoint_trees_path)
-                print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso file temporaneo degli alberi parziali.")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {checkpoint_trees_path}: {e}")
+        checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
+        try:
+            self.checkpoint_dao.delete(checkpoint_trees_path)
+            print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso checkpoint degli alberi parziali.")
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {checkpoint_trees_path}: {e}")
+ 
         inference_cp = self._get_inference_checkpoint_path(job_id)
-        if os.path.exists(inference_cp):
-            os.remove(inference_cp)
+        try:
+            self.checkpoint_dao.delete(inference_cp)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {inference_cp}: {e}")
+    
+    def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+        return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+    
+    def _resolve_model_path(self, job_id: str) -> str:
+        """Path del modello globale aggregato, in una sotto-cartella dedicata alla
+        modalità centralizzata per evitare collisioni col modello federato in caso
+        di job_id riutilizzati tra le due modalità."""
+        if self.environment == "aws":
+            return f"s3://my-cluster-datasets-bucket/saved_models/centralized/model_{job_id}.pkl"
+        return os.path.join("./saved_models", f"model_{job_id}.pkl")
     
     
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
@@ -741,10 +732,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
     
     def _load_inference_checkpoint(self, job_id: str):
         path = self._get_inference_checkpoint_path(job_id)
-        if self.environment == "local" and os.path.exists(path):
+        if self.checkpoint_dao.exists(path):
             try:
-                with open(path, "rb") as f:
-                    chunks = pickle.load(f)
+                chunks = self.checkpoint_dao.load(path)
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Caricati {len(chunks)} chunk di inferenza dal checkpoint.")
                 return chunks
             except Exception as e:
