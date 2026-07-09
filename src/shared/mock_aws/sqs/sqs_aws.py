@@ -23,6 +23,7 @@ ambiguità su quale coda appartenga un dato ReceiptHandle.
 
 import json
 import os
+import uuid
 from typing import Optional
 
 import boto3
@@ -56,11 +57,20 @@ class AwsSQSQueue(SQSQueueInterface):
             raise ValueError("[AWS SQS]: Il messaggio deve contenere un 'job_id' univoco.")
 
         queue_url = self._resolve_queue_url(queue_name)
+        
+        deduplication_id = str(uuid.uuid4())
+        
+        # Usiamo il job_id come GroupId in modo che i messaggi dello stesso job 
+        # rimangano perfettamente sequenziali all'interno di SQS FIFO
+        group_id = message_dict["job_id"]
+
         self._client.send_message(
             QueueUrl=queue_url,
             MessageBody=json.dumps(message_dict),
+            MessageGroupId=group_id,
+            MessageDeduplicationId=deduplication_id
         )
-        print(f"[AWS SQS] Messaggio inviato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
+        print(f"[AWS SQS] [FIFO] Messaggio inviato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
 
     def receive_message(self, queue_name: str, visibility_timeout: int = 30) -> Optional[dict]:
         queue_url = self._resolve_queue_url(queue_name)
