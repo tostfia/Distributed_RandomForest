@@ -5,7 +5,7 @@ import boto3
 
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 from src.shared.config import SystemConfig
-from shared.mock_aws.dynamodb.dynamodb import dynamo_db as mock_dynamodb
+from src.shared.mock_aws.dynamodb.dynamodb import dynamo_db as mock_dynamodb
 
 cfg = SystemConfig()
 
@@ -64,6 +64,36 @@ class ServiceRegistry:
                     "last_heartbeat": last_heartbeat
                 }
         return available_workers
+    
+    @classmethod
+    def get_expired_workers(cls) -> Dict[str, Any]:
+        """Recupera tutti i worker scaduti (non disponibili)."""
+        current_time = int(time.time())
+        expired_workers = {}
+
+        db = cls._get_db_client()
+        try:
+            response = db.scan_table(cls.WORKERS_TABLE)
+            items = response.get("Items", [])
+        except Exception as e:
+            print(f"[ServiceRegistry ERRORE DynamoDB]: {e}")
+            return {}
+
+        for item in items:
+            worker_name = cls._extract_data(item, "worker_name")
+            if not worker_name:
+                continue 
+            last_heartbeat = int(cls._extract_data(item, "last_heartbeat") or 0)
+            
+            if current_time - last_heartbeat > cls.TIME_OUT_SECONDS:
+                expired_workers[worker_name] = {
+                    "host": cls._extract_data(item, "host"),
+                    "port": cls._extract_data(item, "port"),
+                    "status": cls._extract_data(item, "status"),
+                    "last_heartbeat": last_heartbeat,
+                    "second_since_heartbeat": current_time - last_heartbeat
+                }
+        return expired_workers
 
     @classmethod
     def is_orchestrator_available(cls, orchestrator_name: str) -> bool:

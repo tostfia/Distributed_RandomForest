@@ -152,6 +152,30 @@ class BaseOrchestrator(ABC):
             except Exception:
                 pass
 
+    def _cleanup_dead_workers(self):
+        try:
+            expired = ServiceRegistry.get_expired_workers()
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [WARN] Impossibile leggere i worker scaduti: {e}")
+            return
+ 
+        for worker_name, info in expired.items():
+            print(f"[{self.orchestrator_name}] [CLEANUP] Worker '{worker_name}' scaduto "
+                  f"({info['seconds_since_heartbeat']}s senza heartbeat). Deregistrazione in corso...")
+ 
+            try:
+                pending_tasks = TaskRegistry.get_tasks_by_worker(worker_name)
+                orphaned = [t for t in pending_tasks if t.get("status") not in ("COMPLETED", "FAILED")]
+                if orphaned:
+                    print(f"[{self.orchestrator_name}] [CLEANUP] Worker '{worker_name}' aveva "
+                          f"{len(orphaned)} task non conclusi al momento della scadenza: "
+                          f"{[(t.get('job_id'), t.get('status')) for t in orphaned]}")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile leggere WorkerTasks per '{worker_name}': {e}")
+ 
+            ServiceRegistry.deregister_worker(worker_name)
+
+
     def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
         """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
@@ -159,6 +183,7 @@ class BaseOrchestrator(ABC):
                 
                 ServiceRegistry.update_orchestrator_heartbeat(self.orchestrator_name)
                 self._refresh_leadership_lock()
+                self._cleanup_dead_workers()
             except Exception as e:
                 print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat/lock: {e}")
 

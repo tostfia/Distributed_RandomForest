@@ -18,6 +18,7 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key
 
 
 class AwsDynamoDB:
@@ -137,6 +138,31 @@ class AwsDynamoDB:
         while "LastEvaluatedKey" in response:
             response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
             items.extend(response.get("Items", []))
+        return {"Items": [self._from_dynamo(i) for i in items]}
+    
+    def query_by_index(self, table_name: str, index_name: str, key_name: str, key_value: str) -> dict:
+        """
+        Esegue una query su un Global Secondary Index (GSI).
+        """
+        table = self._table(table_name)
+        items = []
+        
+        # Eseguiamo la prima query sull'indice
+        response = table.query(
+            IndexName=index_name,
+            KeyConditionExpression=Key(key_name).eq(str(key_value))
+        )
+        items.extend(response.get("Items", []))
+        
+        # Gestione dell'impaginazione (limite di 1MB di DynamoDB)
+        while "LastEvaluatedKey" in response:
+            response = table.query(
+                IndexName=index_name,
+                KeyConditionExpression=Key(key_name).eq(str(key_value)),
+                ExclusiveStartKey=response["LastEvaluatedKey"]
+            )
+            items.extend(response.get("Items", []))
+            
         return {"Items": [self._from_dynamo(i) for i in items]}
 
 aws_dynamo_db = AwsDynamoDB()

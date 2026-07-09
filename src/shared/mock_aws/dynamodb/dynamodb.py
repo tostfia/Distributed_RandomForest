@@ -116,5 +116,24 @@ class MockDynamoDB:
             for key, value in table_data.items()
         ]
         return {"Items": items_list}
+    
+    def query_by_index(self, table_name: str, index_name: str, key_name: str, key_value: str) -> dict:
+        """
+        Simula una query su un GSI filtrando in memoria i dati della tabella.
+        (index_name viene ignorato nel mock, ma serve per mantenere l'interfaccia 
+        identica a quella di AWS).
+        """
+        table_data = self._load_table(table_name)
+        pk_name = self._get_primary_key_name(table_name)
+        items_list = []
+        
+        for key, value in table_data.items():
+            # Controlliamo se l'attributo cercato (es. job_id) corrisponde al valore richiesto
+            if value.get(key_name) == key_value:
+                # Ricostruiamo l'item inserendo la Primary Key esattamente come fa scan_table
+                item_compliant = {**value, pk_name: key}
+                items_list.append(item_compliant)
+                
+        return {"Items": items_list}
 
 dynamo_db = MockDynamoDB()
