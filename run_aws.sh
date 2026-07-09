@@ -33,7 +33,7 @@ from botocore.exceptions import ClientError
 REGION = "eu-west-1"
 
 S3_BUCKET_NAME = "distributed-rf-datasets"          # deve essere globalmente univoco su S3
-SQS_QUEUE_NAMES = ["centralized_queue", "federated_queue"]
+SQS_QUEUE_NAMES = ["centralized_queue.fifo", "federated_queue.fifo"]
 
 # --- Parametri EC2 / Auto Scaling Group (DA COMPILARE) ---
 EC2_AMI_ID = "ami-XXXXXXXXXXXXXXXXX"                # es. Amazon Linux 2023 nella tua region
@@ -112,14 +112,22 @@ def create_dynamo_tables():
 def create_sqs_queues():
     for queue_name in SQS_QUEUE_NAMES:
         try:
+            attributes = {
+                "VisibilityTimeout": "60",       # coerente col default usato da BaseOrchestrator.start()
+                "MessageRetentionPeriod": "86400",  # 1 giorno
+            }
+            
+            # Se la coda è FIFO, AWS richiede esplicitamente l'attributo FifoQueue
+            if queue_name.endswith(".fifo"):
+                attributes["FifoQueue"] = "true"
+            
             response = sqs.create_queue(
                 QueueName=queue_name,
-                Attributes={
-                    "VisibilityTimeout": "60",       # coerente col default usato da BaseOrchestrator.start()
-                    "MessageRetentionPeriod": "86400",  # 1 giorno
-                },
+                Attributes=attributes,
             )
             print(f"[SQS] Coda '{queue_name}' creata: {response['QueueUrl']}")
         except ClientError as e:
             if e.response["Error"]["Code"] == "QueueAlreadyExists":
-                print(f"[SQS] Coda '{
+                print(f"[SQS] Coda '{queue_name}' già esistente.")
+            else:
+                raise

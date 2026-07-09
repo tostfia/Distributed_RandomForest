@@ -22,9 +22,10 @@ class SystemConfig:
             cls._instance.aws_region = os.getenv("AWS_REGION", "us-east-1")
 
             queue_prefix = os.getenv("SQS_QUEUE_PREFIX", "")
+            queue_suffix = ".fifo" if cls._instance.env == "aws" else ""
             
-            cls._instance.sqs_centralized_queue = f"{queue_prefix}centralized_queue.fifo"
-            cls._instance.sqs_federated_queue = f"{queue_prefix}federated_queue.fifo"
+            cls._instance.sqs_centralized_queue = f"{queue_prefix}centralized_queue{queue_suffix}"
+            cls._instance.sqs_federated_queue = f"{queue_prefix}federated_queue{queue_suffix}"
 
             cls._instance.s3_bucket_name = os.getenv("DATASETS_BUCKET_NAME", "")
             if cls._instance.env == "aws" and not cls._instance.s3_bucket_name:
