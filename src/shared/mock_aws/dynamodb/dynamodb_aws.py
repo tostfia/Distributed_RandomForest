@@ -14,7 +14,9 @@ Interfaccia mantenuta identica:
 
 import os
 import decimal
+import time
 from typing import Optional
+
 
 import boto3
 from botocore.exceptions import ClientError
@@ -164,5 +166,65 @@ class AwsDynamoDB:
             items.extend(response.get("Items", []))
             
         return {"Items": [self._from_dynamo(i) for i in items]}
+
+    def try_acquire_lock(self, table_name: str, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        now = int(time.time())
+        expires_at = now + int(ttl)
+        table = self._table(table_name)
+
+        try:
+            table.put_item(
+                Item={
+                    "lock_key": lock_key,
+                    "leader": owner,
+                    "expires_at": expires_at,
+                    "timestamp": now,
+                },
+                ConditionExpression="attribute_not_exists(lock_key) OR expires_at < :now",
+                ExpressionAttributeValues={":now": now},
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+
+    
+    def refresh_lock(self, table_name: str, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        now = int(time.time())
+        expires_at = now + int(ttl)
+        table = self._table(table_name)
+
+        try:
+            table.update_item(
+                Key={"lock_key": lock_key},
+                UpdateExpression="SET expires_at = :exp, #ts = :ts",
+                ConditionExpression="leader = :owner",
+                ExpressionAttributeNames={"#ts": "timestamp"},
+                ExpressionAttributeValues={
+                    ":owner": owner,
+                    ":exp": expires_at,
+                    ":ts": now,
+                },
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
+    
+    def release_lock(self, table_name: str, lock_key: str, owner: str) -> bool:
+        table = self._table(table_name)
+        try:
+            table.delete_item(
+                Key={"lock_key": lock_key},
+                ConditionExpression="leader = :owner",
+                ExpressionAttributeValues={":owner": owner},
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
 
 aws_dynamo_db = AwsDynamoDB()

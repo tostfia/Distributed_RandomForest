@@ -21,20 +21,20 @@ la stessa istanza di AwsDynamoDB (e la sua cache di tabelle boto3).
 import time
 from typing import Optional
 
-from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
+from src.shared.config import SystemConfig
+from shared.factory import get_aws_services
 from src.shared.mock_aws.interfaces import StateManagerInterface
 
 
 JOBS_TABLE = "ModelStatus"
 WORKER_TASKS_TABLE = "WorkerTasks"
 LOCKS_TABLE = "OrchestratorLocks"
-
+cfg = SystemConfig()  # Configurazione globale dell'ambiente (local, aws, ecc.)
 
 class AwsStateManager(StateManagerInterface):
 
-    def __init__(self, region_name: Optional[str] = None):
-        self._db = DynamoDBFactory.get_db("aws", region_name=region_name)
-
+    def __init__(self):
+        self.db = get_aws_services(cfg.env)
     @staticmethod
     def _unwrap(response: Optional[dict]) -> dict:
         """get_item restituisce {'Item': {...}} oppure {}; qui normalizziamo a dict piatto."""
@@ -164,7 +164,7 @@ class AwsStateManager(StateManagerInterface):
         # Stessa scrittura condizionata: si applica solo se siamo ancora leader
         # (o se il lock è scaduto, caso limite che non dovrebbe verificarsi
         # se il refresh avviene con la cadenza attesa dall'heartbeat).
-        return self._db.try_acquire_lock(LOCKS_TABLE, lock_key, owner, ttl)
+        return self._db.refresh_lock(LOCKS_TABLE, lock_key, owner, ttl)
 
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
         return self._db.release_lock(LOCKS_TABLE, lock_key, owner)
