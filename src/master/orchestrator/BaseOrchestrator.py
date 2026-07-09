@@ -5,12 +5,10 @@ import os
 import sys
 import time
 import threading
-import boto3
-from botocore.exceptions import ClientError
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.binding.serviceregistry import ServiceRegistry
-
+from src.shared.binding.taskregistry import TaskRegistry
 
 class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str):
@@ -27,6 +25,20 @@ class BaseOrchestrator(ABC):
         except Exception as e:
             print(f"[{self.orchestrator_name.upper()}] Errore inizializzazione servizi: {e}")
             sys.exit(1)
+            
+    def _track_task(self, task_id, job_id: str, worker_name: str, status: str):
+
+        try:
+            db = DynamoDBFactory.get(self.environment)
+            db.put_item("WorkerTasks", f"{job_id}_{task_id}", {
+                "job_id": job_id,
+                "task_id": task_id,
+                "worker_name": worker_name,
+                "status": status,
+                "update_at": int(time.time())
+            })
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] Errore tracciamento task {task_id} per job {job_id[:8]}: {e}")
 
     def _get_lock_key(self) -> str:
         return "global_orchestrator_leader_lock"
@@ -470,6 +482,15 @@ class BaseOrchestrator(ABC):
                     print(f"[{self.orchestrator_name}] Il Job {job_id[:8]} era gestito da {old_owner} (mancato).")
                     print(f"[{self.orchestrator_name}] Sincronizzazione stato e subentro immediato in corso...\n")
                     
+                    try: 
+                        pending_tasks = TaskRegistry.get_tasks_for_job(job_id)
+                        by_status = {}
+                        for t in pending_tasks:
+                            by_status[t.get("status")] = by_status.get(t.get("status"), 0) + 1
+                        print(f"[{self.orchestrator_name}] Stato dei task per Job {job_id[:8]}: {by_status}")
+                    except Exception as e:
+                        print(f"[{self.orchestrator_name}] [WARN] Impossibile recuperare lo stato dei task per Job {job_id[:8]}: {e}")
+                    print(f"[{self.orchestrator_name}] Sincronizzazione stato e subentro immediato in corso...\n")
                     job_meta = self._load_job_meta(job_id)
                     recovered_payload = {
                         "job_id": job_id,

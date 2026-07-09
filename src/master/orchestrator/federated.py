@@ -20,7 +20,7 @@ from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
-
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 class FederatedOrchestrator(BaseOrchestrator):
     
     def __init__(self, orchestrator_name: str = None, num_workers: int = None):
@@ -123,6 +123,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment == "aws":
             pass
+            
         else:
             self._ensure_local_bootstrap(payload)
             os.makedirs("./.local_storage", exist_ok=True)
@@ -234,6 +235,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         with self.connessioni_lock:
                             self.connessioni_attive.append(worker_conn)
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
                         result_raw = worker_conn.root.exposed_train_local_federated_forest(
                             job_id=self.current_job_id,
                             dataset_type=self._resolve_dataset_type(payload),
@@ -271,11 +273,13 @@ class FederatedOrchestrator(BaseOrchestrator):
                                     print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                             
                         print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
                         return  # task di questo worker concluso, il thread termina
                     except Exception as e:
                         print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
                         print(f"[{self.orchestrator_name}-Thread] Task {task_id} NON viene riassegnato ad altri worker. "
                               f"In attesa che '{w_name}' si riavvii per riprendere lo stesso chunk.")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="WAITINGFORWORKER")
                         time.sleep(RETRY_WAIT_SECONDS)
                         continue  # nessun task_queue.put(): il chunk resta di proprietà esclusiva di w_name
                     finally:
@@ -606,7 +610,7 @@ class FederatedOrchestrator(BaseOrchestrator):
     
     def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
         return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
  
     def _resolve_model_path(self, job_id: str) -> str:
@@ -614,12 +618,12 @@ class FederatedOrchestrator(BaseOrchestrator):
         modalità federata per evitare collisioni col modello centralizzato in caso
         di job_id riutilizzati tra le due modalità."""
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/saved_models/federated/model_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/saved_models/federated/model_{job_id}.pkl"
         return os.path.join("./saved_models", f"model_{job_id}.pkl")
 
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/checkpoints/inference_chunks_{job_id}.pkl"
         return f"./.local_storage/inference_chunks_{job_id}.pkl"
     
     def _load_inference_checkpoint(self, job_id: str):

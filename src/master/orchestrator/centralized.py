@@ -24,7 +24,7 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 TEST_SIZE = 0.2
 
-
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
@@ -97,8 +97,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
-            self.train_data_path = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{self.current_job_id}.csv"
-            self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{self.current_job_id}.csv"
+            self.train_data_path = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{self.current_job_id}.csv"
+            self.test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{self.current_job_id}.csv"
         else:
             self.train_data_path = f"./.local_storage/shared_train_{self.current_job_id}.csv"
             self.test_data_path = f"./.local_storage/shared_test_{self.current_job_id}.csv"
@@ -122,8 +122,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
         if self.train_data_path is None or self.current_job_id != expected_job_id:
             if self.environment == "aws":
-                expected_train = f"s3://my-cluster-datasets-bucket/distributed_trains/shared_train_{expected_job_id}.csv"
-                expected_test = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{expected_job_id}.csv"
+                expected_train = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}.csv"
+                expected_test = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{expected_job_id}.csv"
             else:
                 expected_train = f"./.local_storage/shared_train_{expected_job_id}.csv"
                 expected_test = f"./.local_storage/shared_test_{expected_job_id}.csv"
@@ -245,7 +245,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
                         quota_chunk = end_t - start_t
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
-                        
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
                         try:
                             result_raw = worker_conn.root.train_subset_forest(
                                 source_info=source_info,
@@ -283,11 +283,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                         print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                                 
                             print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                            self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
                             task_queue.task_done()
                             
                         except Exception as e:
+
+                            self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="FAILED")
                             print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
-                            
                             # FAULT TOLERANCE REALE: Reinserimento immediato del chunk per la fault tolerance
                             task_queue.put((task_id, start_t, end_t, chunk_seed))
                             print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
@@ -395,7 +397,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         model_path = self._resolve_model_path(job_id)
         # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) E TESTING SET (.csv) IN BASE ALL'AMBIENTE
         if self.environment == "aws":
-            self.test_data_path = f"s3://my-cluster-datasets-bucket/distributed_tests/shared_test_{job_id}.csv"
+            self.test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{job_id}.csv"
         else:
             self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
 
@@ -490,7 +492,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
                     quota_alberi = end_idx - start_idx
                     print(f"[{self.orchestrator_name}-InfThread] Assegnazione Task {task_id} ({quota_alberi} alberi: {start_idx}-{end_idx}) a {w_name}")
-                    
+                    self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="PROCESSING")
                     try:
                         self.chunk_sent_event.set()
                         
@@ -512,6 +514,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere i chunk di inferenza parziali su file: {e_fs}")
                             
                         print(f"   [RPC INF <- {w_name}] Task {task_id} completato con successo.")
+                        self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="COMPLETED")
                         task_queue.task_done()
                         
                     except Exception as e:
@@ -521,10 +524,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         if retries > MAX_RETRIES_PER_TASK:
                             # Segnaliamo il fallimento permanente invece di loopar all'infinito
                             print(f"[FATAL] Task {task_id} ha superato il limite di {MAX_RETRIES_PER_TASK} retry. Abort.")
+                            self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="FAILED")
                             failed_tasks.add(task_id)
                             task_queue.task_done()
                         else:
                             # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
+                            self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="REQUEUED")
                             task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
                             print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
                         
@@ -634,6 +639,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             final_predictions = final_predictions.ravel().astype(int)
             y_test = y_test.astype(int)
 
+            y_probs = np.mean(predictions_matrix, axis=0)
             n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
             avg_method = "binary" if n_classes <= 2 else "weighted"
             
@@ -642,7 +648,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
             recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
             f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
-            auc = roc_auc_score(y_test, final_predictions) if n_classes == 2 else None
+            auc = roc_auc_score(y_test, y_probs) if n_classes == 2 else None
             cm = confusion_matrix(y_test, final_predictions)
             
             print(f"  Tipo di Modello:                        CLASSIFICATORE")
@@ -711,8 +717,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {inference_cp}: {e}")
     
     def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
+        
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/checkpoint_trees_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
         return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
     
     def _resolve_model_path(self, job_id: str) -> str:
@@ -720,13 +727,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
         modalità centralizzata per evitare collisioni col modello federato in caso
         di job_id riutilizzati tra le due modalità."""
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/saved_models/centralized/model_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/saved_models/centralized/model_{job_id}.pkl"
         return os.path.join("./saved_models", f"model_{job_id}.pkl")
     
     
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
-            return f"s3://my-cluster-datasets-bucket/checkpoints/inference_chunks_{job_id}.pkl"
+            return f"s3://{BUCKET_NAME}/checkpoints/inference_chunks_{job_id}.pkl"
         return f"./.local_storage/inference_chunks_{job_id}.pkl"
     
     

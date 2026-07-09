@@ -50,4 +50,3 @@ saved_models/*
 synthetic/*
 !.synthetic/.gitkeep
 !synthetic/*.json
-

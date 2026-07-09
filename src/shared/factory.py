@@ -1,10 +1,7 @@
-import sys
 from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterface
-
-# Importiamo le interfacce e i DAO per la Factory dei Dati
-# Nota: Assicurati che i path di import corrispondano alla tua struttura delle cartelle
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
-
+from src.shared.mock_aws.sqs import sqs_queue
+from src.shared.mock_aws.statemanager import state_manager
 
 def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
@@ -31,16 +28,10 @@ def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerI
         except ImportError as e:
             print(f"\n[FACTORY] [FALLBACK] {e}")
             print("[FACTORY] Deviazione automatica sui Mock persistenti del File System...\n")
-            
-            from src.shared.mock_aws.sqs import sqs_queue
-            from src.shared.mock_aws.statemanager import state_manager
             return sqs_queue, state_manager
     else:
         # Ambiente locale: usiamo direttamente le istanze dei mock JSON persistenti
         print("[FACTORY] Modalità LOCAL attiva: caricamento dei Mock basati su File JSON.")
-        from src.shared.mock_aws.sqs import sqs_queue
-        from src.shared.mock_aws.statemanager import state_manager
-        
         return sqs_queue, state_manager
 
 
