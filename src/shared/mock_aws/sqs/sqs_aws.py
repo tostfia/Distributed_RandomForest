@@ -35,7 +35,7 @@ from src.shared.mock_aws.interfaces import SQSQueueInterface
 class AwsSQSQueue(SQSQueueInterface):
 
     def __init__(self, region_name: Optional[str] = None):
-        region_name = region_name or os.environ.get("AWS_REGION", "eu-west-1")
+        region_name = region_name or os.environ.get("AWS_REGION", "eu-east-1")
         self._client = boto3.client("sqs", region_name=region_name)
         self._queue_url_cache: dict[str, str] = {}
         self._receipt_to_queue: dict[str, str] = {}
