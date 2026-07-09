@@ -19,13 +19,14 @@ class SystemConfig:
             if cls._instance.mode not in ["centralized", "federated"]:
                 raise ValueError(f"SYS_MODE non valido nel file .env: {cls._instance.mode}")
             
-            cls.instance.aws_region = os.getenv("AWS_REGION", "us-east-1")
+            cls._instance.aws_region = os.getenv("AWS_REGION", "us-east-1")
 
-            queue_prefix = os.getenv("SQS_QUEUE_PREFIX","")
-            cls.instance.sqs_centralized_queue = f"{queue_prefix}centralized-queue"
-            cls.instance.sqs_federated_queue = f"{queue_prefix}federated-queue"
+            queue_prefix = os.getenv("SQS_QUEUE_PREFIX", "")
+            
+            cls._instance.sqs_centralized_queue = f"{queue_prefix}centralized_queue.fifo"
+            cls._instance.sqs_federated_queue = f"{queue_prefix}federated_queue.fifo"
 
-            cls._instance.s3_bucket_name = os.getenv("S3_BUCKET_NAME","")
+            cls._instance.s3_bucket_name = os.getenv("S3_BUCKET_NAME", "")
             if cls._instance.env == "aws" and not cls._instance.s3_bucket_name:
                 raise ValueError("S3_BUCKET_NAME non specificato nel file .env per l'ambiente AWS.")
             
