@@ -9,6 +9,7 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.binding.taskregistry import TaskRegistry
+from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
 class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str):
