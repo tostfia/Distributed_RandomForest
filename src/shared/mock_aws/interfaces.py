@@ -46,3 +46,15 @@ class StateManagerInterface(ABC):
     def complete_request(self, job_id: str, orchestrator_id: str) -> None:
         """Imposta lo stato finale su COMPLETED al termine della computazione."""
         pass
+
+    @abstractmethod
+    def acquire_global_lock(self, lock_key: str, owner_id: str, ttl: int = 30) -> bool:
+        pass
+
+    @abstractmethod
+    def refresh_global_lock(self, lock_key: str, owner_id: str, ttl: int = 30) -> bool:
+        pass
+
+    @abstractmethod
+    def release_global_lock(self, lock_key: str, owner_id: str) -> bool:
+        pass
