@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 
-from Distributed_RandomForest.src.shared.mock_aws.statemanager.interfaces import SQSQueueInterface
+from src.shared.mock_aws.statemanager.interfaces import SQSQueueInterface
 
 class MockSQSQueue(SQSQueueInterface):
     def __init__(self):
@@ -50,44 +50,54 @@ class MockSQSQueue(SQSQueueInterface):
                 time.sleep(0.05)
         print("[MOCK SQS - ERRORE CRITICO] Impossibile scrivere lo stato di SQS su disco.")
 
-    def send_message(self, queue_name: str, message_dict: dict) -> None:
-        """Invia il messaggio a una coda specifica (centralized_queue o federated_queue)."""
+    def send_message(self, queue_name: str, message_dict: dict, **kwargs) -> None:
+        """
+        Invia il messaggio a una coda specifica.
+        Accetta **kwargs (come MessageGroupId e MessageDeduplicationId) per compatibilità con l'interfaccia FIFO.
+        """
         if "job_id" not in message_dict:
             raise ValueError("[MOCK SQS]: Il messaggio deve contenere un 'job_id' univoco.")
         
         state = self._load_state()
         
-        if queue_name not in state or queue_name == "in_flight":
+        # Rimuove l'eventuale estensione .fifo passata dall'orchestrator per mappare le chiavi interne del JSON
+        sanitized_queue_name = queue_name.replace(".fifo", "")
+        
+        if sanitized_queue_name not in state or sanitized_queue_name == "in_flight":
             raise ValueError(f"[MOCK SQS]: La coda '{queue_name}' non è valida.")
         
-        state[queue_name].append(message_dict)
+        # SQS FIFO Garantito in locale: append inserisce alla fine della lista (FIFO)
+        state[sanitized_queue_name].append(message_dict)
         self._save_state(state)
         
-        print(f"[MOCK SQS] Messaggio registrato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
+        print(f"[MOCK SQS] [FIFO] Messaggio registrato in '{sanitized_queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
 
     def receive_message(self, queue_name: str, visibility_timeout: int = 300) -> dict | None:
-        """Fa polling selettivo e gestisce istantaneamente il riciclo dei messaggi scaduti."""
+        """Fa polling selettivo e gestisce il riciclo dei messaggi scaduti rimettendoli in TESTA."""
         state = self._load_state()
         now = time.time()
         updated = False
+        
+        sanitized_queue_name = queue_name.replace(".fifo", "")
 
+        # Gestione Visibility Timeout Scaduto
         for receipt_handle, data in list(state["in_flight"].items()):
-            if data["queue_name"] == queue_name and now >= data["time_out"]:
-                print(f"[MOCK SQS] Visibility Timeout SCADUTO in '{queue_name}'. Il messaggio torna visibile.")
-                state[queue_name].append(data["message"])
+            if data["queue_name"] == sanitized_queue_name and now >= data["time_out"]:
+                print(f"[MOCK SQS] Visibility Timeout SCADUTO in '{sanitized_queue_name}'. Ripristino in TESTA per invarianza FIFO.")
+                state[sanitized_queue_name].insert(0, data["message"])
                 del state["in_flight"][receipt_handle]
                 updated = True
 
-        if queue_name not in state or not state[queue_name]:
+        if sanitized_queue_name not in state or not state[sanitized_queue_name]:
             if updated: 
                 self._save_state(state)
             return None
         
-        msg = state[queue_name].pop(0)
+        msg = state[sanitized_queue_name].pop(0)
         new_receipt_handle = f"MB_RECEIPT_{str(uuid.uuid4())[:8]}"
 
         state["in_flight"][new_receipt_handle] = {
-            "queue_name": queue_name,
+            "queue_name": sanitized_queue_name,
             "message": msg,
             "time_out": now + visibility_timeout
         }
@@ -114,27 +124,20 @@ class MockSQSQueue(SQSQueueInterface):
         else:
             print(f"[MOCK SQS] [ERRORE CANCELLAZIONE] ReceiptHandle non valido o scaduto: {receipt_handle}")
             return False
+
     def change_message_visibility(self, queue_name: str, receipt_handle: str, visibility_timeout: int) -> bool:
-        """
-        Modifica ed estende il Visibility Timeout di un messaggio attualmente in-flight.
-        Simula il comportamento dell'omonima API di AWS SQS.
-        """
+        """Modifica ed estende il Visibility Timeout di un messaggio attualmente in-flight."""
         state = self._load_state()
         now = time.time()
         
-        # Verifichiamo se il messaggio è ancora in elaborazione ed appartiene alla coda corretta
         if receipt_handle in state["in_flight"]:
-            # Aggiorniamo il timestamp di scadenza: ora attuale + nuova estensione
             state["in_flight"][receipt_handle]["time_out"] = now + visibility_timeout
-            
-            # Salviamo lo stato aggiornato in modo concorrenziale su JSON
             self._save_state(state)
             
             job_id = state["in_flight"][receipt_handle]["message"].get("job_id", "unknown")
             print(f"[MOCK SQS] [HEARTBEAT OK] Visibilità estesa per {receipt_handle} (Job ID: {job_id[:8]}...) di altri {visibility_timeout}s.")
             return True
         else:
-            # Caso in cui il messaggio potrebbe essere già stato eliminato o scaduto prima del heartbeat
             print(f"[MOCK SQS] [HEARTBEAT WARN] Impossibile aggiornare la visibilità. ReceiptHandle non trovato: {receipt_handle}")
             return False
 
