@@ -52,7 +52,7 @@ class AwsSQSQueue(SQSQueueInterface):
             self._queue_url_cache[queue_name] = response["QueueUrl"]
         return self._queue_url_cache[queue_name]
 
-    def send_message(self, queue_name: str, message_dict: dict) -> None:
+    def send_message(self, queue_name: str, message_dict: dict,**kwargs) -> None:
         if "job_id" not in message_dict:
             raise ValueError("[AWS SQS]: Il messaggio deve contenere un 'job_id' univoco.")
 
