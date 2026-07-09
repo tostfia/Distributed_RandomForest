@@ -30,7 +30,7 @@ class BaseOrchestrator(ABC):
     def _track_task(self, task_id, job_id: str, worker_name: str, status: str):
 
         try:
-            db = DynamoDBFactory.get(self.environment)
+            db = DynamoDBFactory.get_db(self.environment)
             db.put_item("WorkerTasks", f"{job_id}_{task_id}", {
                 "job_id": job_id,
                 "task_id": task_id,
@@ -286,12 +286,14 @@ class BaseOrchestrator(ABC):
 
         # 1. Prepariamo e avviamo il thread di Heartbeat per la visibilità SQS
         stop_visibility = threading.Event()
-        visibility_thread = threading.Thread(
-            target=self._visibility_heartbeat_loop,
-            args=(receipt_handle, stop_visibility),
-            daemon=True
-        )
-        visibility_thread.start()
+        visibility_thread = None
+        if receipt_handle:
+            visibility_thread = threading.Thread(
+                target=self._visibility_heartbeat_loop,
+                args=(receipt_handle, stop_visibility),
+                daemon=True
+            )
+            visibility_thread.start()
         try:
             job_id = payload.get("job_id")
             # Estraiamo il tipo di richiesta dal payload, di default assumiamo sia "TRAINING" per retrocompatibilità
@@ -310,7 +312,8 @@ class BaseOrchestrator(ABC):
                     # Eseguiamo la predizione distribuita (implementata dalle classi figlie)
                     self._execute_inference_step(payload)
                     # Eliminiamo il messaggio solo a successo ottenuto
-                    self.sqs_queue.delete_message(receipt_handle)
+                    if receipt_handle:
+                        self.sqs_queue.delete_message(receipt_handle)
                     print(f"[{self.orchestrator_name}] Inferenza per Job {job_id[:8]} completata con successo.")
                 except Exception as inf_error:
                     print(f"[{self.orchestrator_name}] [ERRORE DURANTE INFERENZA]: {inf_error}")
@@ -399,9 +402,10 @@ class BaseOrchestrator(ABC):
                 )
         finally:
             # Segnaliamo al thread di heartbeat di terminare
-            stop_visibility.set()
-            visibility_thread.join(timeout=2)
-            print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread terminato per il messaggio corrente.")
+            if visibility_thread:
+                stop_visibility.set()
+                visibility_thread.join(timeout=2)
+                print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread terminato per il messaggio corrente.")
 
     @abstractmethod
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):

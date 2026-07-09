@@ -26,9 +26,9 @@ class SystemConfig:
             cls._instance.sqs_centralized_queue = f"{queue_prefix}centralized_queue.fifo"
             cls._instance.sqs_federated_queue = f"{queue_prefix}federated_queue.fifo"
 
-            cls._instance.s3_bucket_name = os.getenv("S3_BUCKET_NAME", "")
+            cls._instance.s3_bucket_name = os.getenv("DATASETS_BUCKET_NAME", "")
             if cls._instance.env == "aws" and not cls._instance.s3_bucket_name:
-                raise ValueError("S3_BUCKET_NAME non specificato nel file .env per l'ambiente AWS.")
+                raise ValueError("DATASETS_BUCKET_NAME non specificato nel file .env per l'ambiente AWS.")
             
             print(f"[CONFIG] Sistema caricato: {cls._instance.mode.upper()} | Ambiente: {cls._instance.env.upper()}")
             
