@@ -22,7 +22,7 @@ import time
 from typing import Optional
 
 from src.shared.config import SystemConfig
-from shared.factory import get_aws_services
+from src.shared.factory import get_aws_services
 from src.shared.mock_aws.interfaces import StateManagerInterface
 
 
