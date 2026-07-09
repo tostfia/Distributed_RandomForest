@@ -8,7 +8,6 @@ TABLE_NAME = "ModelStatus"
 class MockStateManager(StateManagerInterface):
     
     def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
-        """Registra il job appena nato sul database in stato QUEUED accettando il seed dal modello Pydantic."""
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
@@ -22,7 +21,6 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
 
     def obtain_request(self, job_id: str) -> Optional[dict]:
-        """Ottieni lo stato attuale del job da DynamoDB."""
         return dynamo_db.get_item(TABLE_NAME, job_id)
 
     def update_request_status(
@@ -34,9 +32,7 @@ class MockStateManager(StateManagerInterface):
         base_random_state: Optional[int] = None,
         alberi_addestrati: int = 0
     ) -> None:
-        """Aggiorna lo stato del job tracciando i progressi senza imporre un seed di fallback."""
         current_job = self.obtain_request(job_id) or {}
-        
         final_seed = base_random_state if base_random_state is not None else current_job.get("base_random_state")
         
         payload = {
@@ -54,9 +50,7 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Job ID: {job_id[:8]}... aggiornato a stato: {status} da {orchestrator_id}{info_progress}")
 
     def complete_request(self, job_id: str, orchestrator_id: str) -> None:
-        """Finalizza la richiesta impostando lo stato su COMPLETED preservando il seed esistente."""
         current_job = self.obtain_request(job_id) or {}
-        
         payload = {
             "status": "COMPLETED",
             "dataset_path": current_job.get("dataset_path"),
@@ -70,7 +64,6 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id} | Seed finale: {payload['base_random_state']}")
 
     def register_worker_task(self, job_id: str, worker_id: str, status: str) -> None:
-        """Registra che un worker specifico ha ricevuto una parte del lavoro."""
         task_id = f"{job_id}#{worker_id}"
         payload = {
             "status": status,
@@ -82,7 +75,6 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Task registrato: Job {job_id[:8]} -> Worker {worker_id} in stato {status}")
 
     def update_worker_task_status(self, job_id: str, worker_id: str, status: str) -> None:
-        """Aggiorna lo stato di un worker specifico (chiamato dal worker)."""
         task_id = f"{job_id}#{worker_id}"
         current = dynamo_db.get_item("WorkerTasks", task_id) or {}
         current.update({"status": status, "timestamp": time.time()})
@@ -90,10 +82,8 @@ class MockStateManager(StateManagerInterface):
         print(f"[StateManager] Worker {worker_id} ha aggiornato status a {status}")
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
-        """Controlla se tutti i task per un dato Job sono COMPLETED."""
         response = dynamo_db.scan_table("WorkerTasks") 
         all_tasks = response.get("Items", [])
-        
         job_tasks = [t for t in all_tasks if t.get('job_id') == job_id]
         completed_tasks = [t for t in job_tasks if t.get('status') == 'COMPLETED']
         
@@ -101,11 +91,6 @@ class MockStateManager(StateManagerInterface):
         return len(completed_tasks) == expected_count
     
     def get_active_jobs(self) -> list:
-        """
-        Restituisce gli ID di tutti i job attualmente in stato PROCESSING.
-        Usato da _perform_active_recovery per individuare job orfani (es. dopo
-        un failover dell'orchestratore) e riprenderne il lavoro.
-        """
         response = dynamo_db.scan_table(TABLE_NAME)
         all_jobs = response.get("Items", [])
         active_ids = [j.get("job_id") for j in all_jobs if j.get("status") == "PROCESSING" and j.get("job_id")]
@@ -113,12 +98,22 @@ class MockStateManager(StateManagerInterface):
         return active_ids
 
     def get_job_status(self, job_id: str) -> Optional[str]:
-        """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
         response = dynamo_db.get_item(TABLE_NAME, job_id)
         item = response.get("Item") if isinstance(response, dict) and "Item" in response else response
         if item and isinstance(item, dict):
             return item.get("status")
         return None
 
-# Istanza globale esportata per la Factory polimorfa
+    # --- Simulazione Lock per Ambiente Locale ---
+    def acquire_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        print(f"[Mock StateManager] Lock globale '{lock_key}' acquisito localmente da {owner}")
+        return True
+
+    def refresh_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        return True
+
+    def release_global_lock(self, lock_key: str, owner: str) -> bool:
+        print(f"[Mock StateManager] Lock globale '{lock_key}' rilasciato localmente da {owner}")
+        return True
+
 state_manager = MockStateManager()

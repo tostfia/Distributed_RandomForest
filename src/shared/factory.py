@@ -1,6 +1,6 @@
+from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterface
 from src.shared.mock_aws.sqs.sqs_aws import AwsSQSQueue
 from src.shared.mock_aws.statemanager.awsstatemanager import AwsStateManager
-from src.shared.mock_aws.statemanager.interfaces import SQSQueueInterface, StateManagerInterface
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
 from src.shared.mock_aws.sqs.sqs import sqs_queue
 from src.shared.mock_aws.statemanager.statemanager import state_manager

@@ -19,9 +19,10 @@ class SQSQueueInterface(ABC):
 
 
 class StateManagerInterface(ABC):
+   
     @abstractmethod
     def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
-        """Registra la richiesta iniziale nel sistema di tracciamento dello stato passandogli il seed nativo."""
+        """Registra la richiesta iniziale nel sistema di tracciamento."""
         pass
 
     @abstractmethod
@@ -47,14 +48,48 @@ class StateManagerInterface(ABC):
         """Imposta lo stato finale su COMPLETED al termine della computazione."""
         pass
 
+    # ------------------------------------------------------------------
+    # Tracciamento dei worker task
+    # ------------------------------------------------------------------
     @abstractmethod
-    def acquire_global_lock(self, lock_key: str, owner_id: str, ttl: int = 30) -> bool:
+    def register_worker_task(self, job_id: str, worker_id: str, status: str) -> None:
+        """Registra che un worker specifico ha ricevuto una parte del lavoro."""
         pass
 
     @abstractmethod
-    def refresh_global_lock(self, lock_key: str, owner_id: str, ttl: int = 30) -> bool:
+    def update_worker_task_status(self, job_id: str, worker_id: str, status: str) -> None:
+        """Aggiorna lo stato di un worker specifico."""
         pass
 
     @abstractmethod
-    def release_global_lock(self, lock_key: str, owner_id: str) -> bool:
+    def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
+        """Controlla se tutti i task per un dato Job sono COMPLETED."""
+        pass
+
+    @abstractmethod
+    def get_active_jobs(self) -> list:
+        """Restituisce gli ID di tutti i job attualmente in stato PROCESSING."""
+        pass
+
+    @abstractmethod
+    def get_job_status(self, job_id: str) -> Optional[str]:
+        """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
+        pass
+
+    # ------------------------------------------------------------------
+    # Leadership lock globale
+    # ------------------------------------------------------------------
+    @abstractmethod
+    def acquire_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        """Acquisisce un lock distribuito globale."""
+        pass
+
+    @abstractmethod
+    def refresh_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        """Rinfresca il TTL di un lock distribuito esistente."""
+        pass
+
+    @abstractmethod
+    def release_global_lock(self, lock_key: str, owner: str) -> bool:
+        """Rilascia un lock distribuito globale."""
         pass
