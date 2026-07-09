@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 from src.shared.mock_aws.dynamodb.dynamodb import dynamo_db
-from src.shared.mock_aws.statemanager.interfaces import StateManagerInterface
+from src.shared.mock_aws.interfaces import StateManagerInterface
 
 TABLE_NAME = "ModelStatus"
 
