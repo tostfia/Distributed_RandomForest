@@ -22,9 +22,11 @@ from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
-TEST_SIZE = 0.2
 
+
+TEST_SIZE = 0.2
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+
 class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
@@ -34,9 +36,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.train_data_path = None
         self.test_data_path = None
         self.chunk_sent_event = threading.Event()
+        
         super().__init__(
             orchestrator_name=name,
-            queue_name="centralized_queue"
+            queue_name=self.cfg.sqs_centralized_queue
         )
         self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
 

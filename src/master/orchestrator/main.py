@@ -25,6 +25,8 @@ def main():
         print(f" Numero di worker configurato da .env: {num_workers}")
         print(f"[INFO] Istanzio l'Orchestratore Centralizzato...")
         orchestrator = CentralizedOrchestrator(orchestrator_name=orchestrator_name)
+        orchestrator.queue_name = cfg.sqs_centralized_queue
+        print(f"[CONFIG] Coda associata: '{orchestrator.queue_name}'")
         
     elif mode == "federated":
         print(f"[INFO] Modalità Federata rilevata.")
@@ -32,6 +34,8 @@ def main():
         print(f" Numero di worker configurato da .env: {num_workers}")
         print(f"[INFO] Istanzio l'Orchestratore Federato...")
         orchestrator = FederatedOrchestrator(orchestrator_name=orchestrator_name, num_workers=num_workers)
+        orchestrator.queue_name = cfg.sqs_federated_queue
+        print(f"[CONFIG] Coda associata: '{orchestrator.queue_name}'")
         
     else:
         print(f"\n[ERRORE] SYS_MODE '{mode}' non valida.")

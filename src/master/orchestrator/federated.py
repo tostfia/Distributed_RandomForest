@@ -21,25 +21,21 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+
 class FederatedOrchestrator(BaseOrchestrator):
     
     def __init__(self, orchestrator_name: str = None, num_workers: int = None):
         self.cfg = SystemConfig()
         self.num_workers = num_workers or int(os.environ.get("NUM_WORKERS", getattr(self.cfg, "num_workers", 3)))
         name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
+        
         super().__init__(
             orchestrator_name=name,
-            queue_name="federated_queue"
+            queue_name=self.cfg.sqs_federated_queue
         )
         self.chunk_sent_event = threading.Event()
         self.current_job_id = None
         self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
-
-        # Timeout massimo (in secondi) di attesa per un worker caduto prima di
-        # rinunciare al suo chunk/shard specifico. 0 = attesa infinita (default).
-        # Il chunk NON viene MAI dato ad un altro worker: allo scadere del timeout
-        # viene semplicemente scartato (meno alberi/campioni raccolti per questo job),
-        # mai redistribuito.
         self.worker_wait_timeout = float(os.environ.get("FED_WORKER_WAIT_TIMEOUT_SECONDS", 0))
 
 
