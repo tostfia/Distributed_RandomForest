@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 
-from src.shared.mock_aws.interfaces import SQSQueueInterface
+from Distributed_RandomForest.src.shared.mock_aws.statemanager.interfaces import SQSQueueInterface
 
 class MockSQSQueue(SQSQueueInterface):
     def __init__(self):

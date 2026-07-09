@@ -1,7 +1,9 @@
-from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterface
+from Distributed_RandomForest.src.shared.mock_aws.sqs.sqs_aws import AwsSQSQueue
+from Distributed_RandomForest.src.shared.mock_aws.statemanager.awsstatemanager import AwsStateManager
+from Distributed_RandomForest.src.shared.mock_aws.statemanager.interfaces import SQSQueueInterface, StateManagerInterface
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
-from src.shared.mock_aws.sqs import sqs_queue
-from src.shared.mock_aws.statemanager import state_manager
+from Distributed_RandomForest.src.shared.mock_aws.sqs.sqs import sqs_queue
+from Distributed_RandomForest.src.shared.mock_aws.statemanager.statemanager import state_manager
 
 def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
@@ -14,17 +16,7 @@ def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerI
     if env == "aws":
         try:
             print("[FACTORY] Inizializzazione dei servizi AWS reali (Boto3)...")
-            
-            # Caricamento dinamico dei client reali (da implementare nel tuo pacchetto aws reale)
-            # Esempio concettuale di quello che restituirai in produzione:
-            # from src.shared.aws_real.sqs import AwsSQSQueue
-            # from src.shared.aws_real.statemanager import AwsStateManager
-            # return AwsSQSQueue(), AwsStateManager()
-            
-            # ATTENZIONE: Se non hai ancora scritto le classi AWS reali, 
-            # usiamo un fallback temporaneo sui mock invece di fare sys.exit(1)
-            raise ImportError("Classi AWS reali non ancora collegate.")
-            
+            return AwsSQSQueue(), AwsStateManager()
         except ImportError as e:
             print(f"\n[FACTORY] [FALLBACK] {e}")
             print("[FACTORY] Deviazione automatica sui Mock persistenti del File System...\n")
