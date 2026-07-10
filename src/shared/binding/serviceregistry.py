@@ -91,7 +91,7 @@ class ServiceRegistry:
                     "port": cls._extract_data(item, "port"),
                     "status": cls._extract_data(item, "status"),
                     "last_heartbeat": last_heartbeat,
-                    "second_since_heartbeat": current_time - last_heartbeat
+                    "seconds_since_heartbeat": current_time - last_heartbeat
                 }
         return expired_workers
 
@@ -128,7 +128,8 @@ class ServiceRegistry:
         if worker_data:
             worker_data['last_heartbeat'] = int(time.time())
             db.put_item(cls.WORKERS_TABLE, worker_name, worker_data)
-    
+        else:
+            print(f"[ServiceRegistry] [WARN] Heartbeat ignorato: '{worker_name}' non risulta registrato in {cls.WORKERS_TABLE}.")
     @classmethod
     def update_orchestrator_heartbeat(cls, orchestrator_name: str):
         """Aggiorna il timestamp dell'ultimo heartbeat di un orchestratore."""
@@ -138,6 +139,8 @@ class ServiceRegistry:
         if orchestrator_data:
             orchestrator_data['last_heartbeat'] = int(time.time())
             db.put_item(cls.ORCHESTRATORS_TABLE, orchestrator_name, orchestrator_data)
+        else: 
+            print(f"[ServiceRegistry] [WARN] Heartbeat ignorato: '{orchestrator_name}' non risulta registrato in {cls.ORCHESTRATORS_TABLE}.")
 
     @classmethod
     def _extract_data(cls, data: dict, key: str):
