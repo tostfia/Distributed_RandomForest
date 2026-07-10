@@ -57,6 +57,13 @@ class AwsSQSQueue(SQSQueueInterface):
             raise ValueError("[AWS SQS]: Il messaggio deve contenere un 'job_id' univoco.")
 
         queue_url = self._resolve_queue_url(queue_name)
+        
+        deduplication_id = str(uuid.uuid4())
+        
+        # Usiamo il job_id come GroupId in modo che i messaggi dello stesso job 
+        # rimangano perfettamente sequenziali all'interno di SQS FIFO
+        # Sostituisci la riga originale con questa se vuoi l'Opzione 1 (Coda sequenziale unica)
+        group_id = "ML-Training-Group"
 
         send_params = {
             "QueueUrl": queue_url,
@@ -64,7 +71,7 @@ class AwsSQSQueue(SQSQueueInterface):
         }
 
         if queue_name.endswith(".fifo"):
-            send_params["MessageGroupId"] = message_dict["job_id"]
+            send_params["MessageGroupId"] = group_id
             send_params["MessageDeduplicationId"] = str(uuid.uuid4())
             log_tipo_coda = "[FIFO]"
         else:
