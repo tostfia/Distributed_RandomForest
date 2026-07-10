@@ -1,22 +1,34 @@
-from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterface
 from src.shared.mock_aws.sqs.sqs_aws import AwsSQSQueue
+from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterface
+from src.shared.mock_aws.sqs.sqs_gateway import LambdaGatewaySQSQueue
 from src.shared.mock_aws.statemanager.awsstatemanager import AwsStateManager
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
 from src.shared.mock_aws.sqs.sqs import sqs_queue
 from src.shared.mock_aws.statemanager.statemanager import state_manager
 
-def get_aws_services(environment: str) -> tuple[SQSQueueInterface, StateManagerInterface]:
+def get_aws_services(environment: str, role: str = "worker") -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
     Factory polimorfa per il disaccoppiamento dell'infrastruttura cloud.
     In base all'ambiente richiesto ('aws' o 'local'), istanzia e restituisce
     i componenti corretti (Mock basati su file o Client reali basati su boto3).
+    Parametro 'role':
+      - 'client'  -> usato dal client CLI (main.py), che deve SOLO inviare job.
+                     In ambiente 'aws' passa da API Gateway -> Lambda -> SQS.
+      - 'worker'  -> (default) usato da orchestratori/worker, che devono anche
+                     leggere e cancellare messaggi. In ambiente 'aws' usa boto3
+                     diretto su SQS (AwsSQSQueue), come prima di questa modifica.
     """
     env = environment.strip().lower()
     
     if env == "aws":
         try:
-            print("[FACTORY] Inizializzazione dei servizi AWS reali (Boto3)...")
-            return AwsSQSQueue(), AwsStateManager()
+            if role == "client":
+                print("[FACTORY] Inizializzazione client AWS (API Gateway -> Lambda -> SQS)...")
+                queue = LambdaGatewaySQSQueue()
+            else:
+                print("[FACTORY] Inizializzazione worker/orchestratore AWS (Boto3 diretto su SQS)...")
+                queue = AwsSQSQueue()
+            return queue, AwsStateManager()
         except ImportError as e:
             print(f"\n[FACTORY] [FALLBACK] {e}")
             print("[FACTORY] Deviazione automatica sui Mock persistenti del File System...\n")
@@ -42,3 +54,4 @@ class DatasetDAOFactory:
             return AwsS3DAO()
         else:
             raise ValueError(f"Ambiente '{environment}' non supportato dalla Factory DAO.")
+        

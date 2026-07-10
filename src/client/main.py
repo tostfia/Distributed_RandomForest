@@ -8,6 +8,10 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
+import requests
+
+
+
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -23,7 +27,7 @@ BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
 
 # 2. Inizializziamo i servizi globali UNA volta sola all'avvio dello script
 try:
-    sqs_queue, state_manager = get_aws_services(cfg.env)
+    sqs_queue, state_manager = get_aws_services(cfg.env, role="client" )
 except Exception as e:
     print(f"\n[ERRORE] Impossibile inizializzare i servizi per l'ambiente '{cfg.env}': {e}")
     sys.exit(1)

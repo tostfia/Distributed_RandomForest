@@ -60,10 +60,11 @@ class AwsSQSQueue(SQSQueueInterface):
         
         deduplication_id = str(uuid.uuid4())
         
-        # Usiamo il job_id come GroupId in modo che i messaggi dello stesso job 
-        # rimangano perfettamente sequenziali all'interno di SQS FIFO
-        # Sostituisci la riga originale con questa se vuoi l'Opzione 1 (Coda sequenziale unica)
-        group_id = "ML-Training-Group"
+        # Assegnazione dinamica del Group ID in base alla coda di destinazione
+        if "federated" in queue_name:
+            group_id = "ML-Federated-Group"
+        else:
+            group_id = "ML-Training-Group"
 
         send_params = {
             "QueueUrl": queue_url,
