@@ -1,5 +1,6 @@
 import os
 import glob
+import posixpath
 import random
 from typing import List, Sequence, Union
 
@@ -20,7 +21,12 @@ class RawCSVDataLoader(DatasetLoader):
         dataset_seed: int = 123,
         s3_anon: bool = True,
     ):
-        self.data_url = data_url
+        if isinstance(data_url, str):
+            self.data_url = data_url.strip().strip("'\"")
+        elif isinstance(data_url, (list, tuple)):
+            self.data_url = [str(u).strip().strip("'\"") for u in data_url]
+        else:
+            self.data_url = data_url
         self.sample_fraction = float(sample_fraction)
         self.dataset_seed = dataset_seed
         self.s3_anon = s3_anon
@@ -94,8 +100,19 @@ class RawCSVDataLoader(DatasetLoader):
                     print(f"[S3 DISCOVERY] Cache vuota. Scansione directory Cloud: {self.data_url}")
                     try:
                         fs = fsspec.filesystem("s3", anon=self.s3_anon)
-                        raw_files = fs.glob(os.path.join(self.data_url.replace("s3://", ""), "*.csv"))
-                        sources = sorted([f"s3://{f}" for f in raw_files])
+                        # Sostituiamo os.path.join con posixpath per garantire gli slash '/' corretti su S3
+                        clean_url = self.data_url.replace("s3://", "")
+                        search_pattern = posixpath.join(clean_url, "*.csv")
+                        raw_files = fs.glob(search_pattern)
+                        
+                        # Ricostruiamo i path assicurandoci che abbiano il prefisso s3:// corretto
+                        sources = []
+                        for f in raw_files:
+                            if f.startswith("s3://"):
+                                sources.append(f)
+                            else:
+                                sources.append(f"s3://{f}")
+                        sources = sorted(sources)
                     except Exception as e:
                         raise IOError(f"Impossibile listare la cartella S3 {self.data_url}: {e}")
                 else:
@@ -150,7 +167,10 @@ class RawCSVDataLoader(DatasetLoader):
 
     @staticmethod
     def _is_s3_path(path: str) -> bool:
-        return isinstance(path, str) and path.startswith("s3://")
+        if not isinstance(path, str):
+            return False
+        # Applichiamo lo strip anche qui per sicurezza
+        return path.strip().startswith("s3://")
 
     def _validate_parameters(self) -> None:
         if not isinstance(self.dataset_seed, int):

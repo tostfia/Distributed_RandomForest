@@ -60,3 +60,5 @@ synthetic/*
 !synthetic/*.json
 
 .env
+
+aws_creds.sh

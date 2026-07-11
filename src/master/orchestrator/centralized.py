@@ -74,6 +74,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         else:
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
+            print(f"[DEBUG] dataset_path ricevuto = {repr(dataset_path)}")
             loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
             df_raw = loader.load()
             
