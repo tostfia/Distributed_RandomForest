@@ -201,25 +201,32 @@ class BaseWorker(Service, ABC):
         X, y = self._load_data(source_info)
         tree_class = self._get_tree_class()
 
-        # 2. CALCOLO DINAMICO DEI CORE (Locale vs AWS)
+        # 2. CALCOLO DINAMICO DEI CORE
+        # NOTA: la divisione dei core tra worker deve avvenire ogni volta che più worker
+        # condividono la STESSA macchina fisica, indipendentemente dal fatto che il flag
+        # .env sia "aws" o "local" (quel flag indica solo quale storage/coda usare,
+        # non se i worker sono co-locati). Rileviamo la co-locazione interrogando
+        # sempre il ServiceRegistry; se la query fallisce o c'è un solo worker,
+        # ricadiamo sulla regola N-1 standard.
         totale_core_macchina = os.cpu_count() or 1
-        
-        if self.environment != "aws":
-            try:
-                # Interroghiamo il ServiceRegistry usando l'ambiente del worker
-                workers_attivi = ServiceRegistry.get_available_workers(self.environment)
-                num_workers = max(1, len(workers_attivi))
-                
-                # Formula di bilanciamento per i tuoi 8 core in locale
+
+        try:
+            workers_attivi = ServiceRegistry.get_available_workers(self.environment)
+            num_workers = max(1, len(workers_attivi))
+
+            if num_workers > 1:
+                # Più worker rilevati: dividiamo i core disponibili tra tutti quelli
+                # effettivamente attivi, per evitare sovra-allocazione quando sono
+                # co-locati sulla stessa macchina fisica.
                 core_disponibili_rete = max(1, totale_core_macchina - 1)
                 allocated_cores = max(1, int(core_disponibili_rete / num_workers))
-                print(f"[{self.worker_name}] [LOG LOCALE] Rilevati {num_workers} worker attivi sulla macchina.")
-                print(f"[{self.worker_name}] [LOG LOCALE] Allocazione dinamica: {allocated_cores} processi per questo pool.")
-            except Exception as e:
-                print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+                print(f"[{self.worker_name}] [LOG] Rilevati {num_workers} worker attivi (ambiente: {self.environment}).")
+                print(f"[{self.worker_name}] [LOG] Allocazione dinamica: {allocated_cores} processi per questo pool.")
+            else:
+                # Un solo worker rilevato: presumibilmente ha la macchina tutta per sé.
                 allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
-        else:
-            # Su AWS ogni worker ha la sua macchina isolata, usa la regola standard N-1
+        except Exception as e:
+            print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
             allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
 
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
@@ -255,7 +262,18 @@ class BaseWorker(Service, ABC):
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")
         serialized_task = pickle.dumps(local_trees)
-        self._save_task_to_shared_storage(source_info, base_seed, num_trees, serialized_task)
+        try:
+            self._save_task_to_shared_storage(source_info, base_seed, num_trees, serialized_task)
+        except Exception as e:
+            # Il task NON deve risultare "completato con successo" se non è stato
+            # persistito nello storage condiviso: rilanciamo l'eccezione così RPyC
+            # la propaga all'Orchestratore, che potrà marcare il task come fallito
+            # e decidere se ritentarlo, invece di credere erroneamente che sia andato
+            # tutto bene (comportamento precedente, silenziosamente errato).
+            print(f"[!] [{self.worker_name}] ERRORE CRITICO: gli alberi sono stati calcolati "
+                  f"ma il salvataggio nello storage condiviso è fallito. Il task viene "
+                  f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
+            raise
         print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio completato.")
         return serialized_task
     
@@ -307,7 +325,7 @@ class BaseWorker(Service, ABC):
         local_dir = os.path.join("./.local_storage", "trained_tasks")
         local_path = os.path.join(local_dir, f"task_{job_id}_seed_{base_seed}_trees_{num_trees}.json")
         
-        s3_bucket = os.environ.get("TRAINED_TREES_S3_BUCKET", "my-cluster-trained-trees-bucket")
+        s3_bucket = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
         s3_key = f"tasks/{job_id}/task_seed_{base_seed}_trees_{num_trees}.pkl"
         
         return local_dir, local_path, s3_bucket, s3_key
@@ -368,12 +386,20 @@ class BaseWorker(Service, ABC):
                 print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato nello storage locale condiviso.")
             except Exception as e:
                 print(f"[{self.worker_name}] Errore nel salvataggio del task JSON locale: {e}")
+                raise
         else:
             # Ambiente AWS: Scrittura diretta del payload binario su S3
+            size_mb = len(serialized_trees_bytes) / (1024 ** 2)
+            print(f"[{self.worker_name}] [TASK STORAGE] Avvio upload task su S3 "
+                  f"({size_mb:.1f} MB, bucket: {s3_bucket}, key: {s3_key})...")
+            start_ts = time.time()
             try:
                 s3_client = boto3.client("s3")
                 s3_client.put_object(Bucket=s3_bucket, Key=s3_key, Body=serialized_trees_bytes)
-                print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato su S3.")
+                elapsed = time.time() - start_ts
+                print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato su S3 "
+                      f"in {elapsed:.1f}s ({size_mb:.1f} MB).")
             except Exception as e:
-                print(f"[{self.worker_name}] Errore nel caricamento del task su S3: {e}")    
-                
+                elapsed = time.time() - start_ts
+                print(f"[{self.worker_name}] Errore nel caricamento del task su S3 dopo {elapsed:.1f}s: {e}")
+                raise

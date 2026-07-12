@@ -1,8 +1,41 @@
 from abc import ABC, abstractmethod
 import os
+import sys
 import pandas as pd
 import io
+import boto3
+import logging
+import threading
 
+
+
+class _UploadProgress:
+    """Callable che boto3 richiama periodicamente durante upload_fileobj,
+    passando il numero di byte trasmessi in quel 'chunk'. Tiene il conteggio
+    cumulativo ed emette una barra di avanzamento a riga singola."""
+ 
+    def __init__(self, total_bytes: int, label: str = "Upload"):
+        self._total_bytes = total_bytes
+        self._label = label
+        self._seen_so_far = 0
+        self._lock = threading.Lock()
+ 
+    def __call__(self, bytes_amount: int):
+        with self._lock:
+            self._seen_so_far += bytes_amount
+            if self._total_bytes > 0:
+                percentage = (self._seen_so_far / self._total_bytes) * 100
+                mb_seen = self._seen_so_far / (1024 ** 2)
+                mb_total = self._total_bytes / (1024 ** 2)
+                sys.stdout.write(
+                    f"\r[DAO-AWS] {self._label}: {mb_seen:6.1f} / {mb_total:6.1f} MB "
+                    f"({percentage:5.1f}%)"
+                )
+            else:
+                mb_seen = self._seen_so_far / (1024 ** 2)
+                sys.stdout.write(f"\r[DAO-AWS] {self._label}: {mb_seen:6.1f} MB trasferiti")
+            sys.stdout.flush()
+            
 class DatasetDAO(ABC):
     """Interfaccia astratta che definisce il contratto per l'accesso ai dati."""
     
@@ -92,17 +125,25 @@ class AwsS3DAO(DatasetDAO):
         bucket, key = self._parse_s3_uri(path)
         
         # Convertiamo il DataFrame in una stringa CSV in memoria
-        csv_buffer = io.StringIO()
+        csv_buffer = io.BytesIO()
         df.to_csv(csv_buffer, index=False)
+        total_bytes = csv_buffer.tell()
+        csv_buffer.seek(0)
         
         # Carichiamo il buffer su S3
         s3_client = self._get_isolated_client()
-        s3_client.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue())
+        progress = _UploadProgress(total_bytes, label="Salvataggio dataset")
+        s3_client.upload_fileobj(Fileobj=csv_buffer, Bucket=bucket, Key=key, Callback=progress)
+        print()  # Per andare a capo dopo la barra di avanzamento
         print(f"[DAO-AWS] [OK] Salvataggio su S3 completato con successo!")
         
     def save_binary(self, path: str, data: bytes) -> None:
         print(f"[DAO-AWS] Salvataggio file binario nel bucket S3 su: {path}")
         bucket, key = self._parse_s3_uri(path)
         s3_client = self._get_isolated_client()
-        s3_client.put_object(Bucket=bucket, Key=key, Body=data)
+        buffer = io.BytesIO(data)
+        total_bytes = len(data)
+        progress = _UploadProgress(total_bytes, label="Salvataggio file binario")
+        s3_client.upload_fileobj(Fileobj=buffer, Bucket=bucket, Key=key, Callback=progress)
+        print()  # Per andare a capo dopo la barra di avanzamento
         print(f"[DAO-AWS] [OK] Salvataggio binario completato con successo!")
