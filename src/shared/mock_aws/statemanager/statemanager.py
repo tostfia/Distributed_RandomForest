@@ -1,11 +1,14 @@
+import threading
 import time
 from typing import Optional
 from src.shared.mock_aws.dynamodb.dynamodb import dynamo_db
 from src.shared.mock_aws.interfaces import StateManagerInterface
 
 TABLE_NAME = "ModelStatus"
+JOB_LOCKS_TABLE = "JobLocks"
 
 class MockStateManager(StateManagerInterface):
+    _claim_lock = threading.Lock()  # Lock per la gestione della concorrenza nella simulazione
     
     def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
         payload = {
@@ -15,7 +18,8 @@ class MockStateManager(StateManagerInterface):
             "retries": 0,
             "last_orchestrator": None,
             "alberi_addestrati": 0,
-            "base_random_state": seed
+            "base_random_state": seed,
+           
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
@@ -115,5 +119,24 @@ class MockStateManager(StateManagerInterface):
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
         print(f"[Mock StateManager] Lock globale '{lock_key}' rilasciato localmente da {owner}")
         return True
+    def try_claim_job(self, job_id: str, orchestrator_id: str, lease_seconds: int = 300) -> bool:
+        """
+        Reclama (o rinnova) il possesso esclusivo del job. Ritorna True solo se
+        nessun altro Orchestrator ha una lease valida in corso su questo job_id.
+        Da chiamare prima di iniziare a processare E periodicamente durante
+        l'elaborazione, per rinnovare la lease.
+        """
+        claimed = dynamo_db.try_acquire_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
+        if not claimed:
+            # Se il lock esiste ma è già nostro, try_acquire_lock fallisce
+            # (perché non è scaduto): il rinnovo passa da refresh_lock.
+            claimed = dynamo_db.refresh_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
+ 
+        if not claimed:
+            print(f"[StateManager] [CLAIM FAILED] Job {job_id[:8]}... già posseduto da un altro Orchestrator.")
+        return claimed
+    def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
+        """Rilascia volontariamente la lease (job completato o fallito in modo pulito)."""
+        return dynamo_db.release_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id)
 
 state_manager = MockStateManager()

@@ -11,6 +11,12 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
+
+class MessageOwnershipLostError(Exception):
+    """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
+    pass
+
+
 class BaseOrchestrator(ABC):
     def __init__(self, orchestrator_name: str, queue_name: str):
         self.cfg = SystemConfig()
@@ -81,10 +87,18 @@ class BaseOrchestrator(ABC):
                 finally:
                     fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
+            if not hasattr(self.state_manager, "acquire_global_lock"):
+                print(f"[{self.orchestrator_name}] [WARN] state_manager non supporta i lock: "
+                    f"leadership assegnata senza coordinamento (comportamento degradato).")
+                return True
+
             try:
                 return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=30)
-            except AttributeError:
-                return True
+            except Exception as e:
+                # QUALSIASI errore nell'acquisizione del lock = NON sei leader.
+                # Mai assumere leadership per default in caso di dubbio.
+                print(f"[{self.orchestrator_name}] [ERRORE] Acquisizione lock fallita: {e}")
+                return False
     
     def _refresh_leadership_lock(self):
         lock_key = self._get_lock_key()
@@ -177,7 +191,7 @@ class BaseOrchestrator(ABC):
             ServiceRegistry.deregister_worker(worker_name)
 
 
-    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
+    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 60):
         """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
             try:
@@ -193,33 +207,30 @@ class BaseOrchestrator(ABC):
                     break
                 time.sleep(1)
                 
-    def _visibility_heartbeat_loop(self, receipt_handle: str, stop_event: threading.Event, timeout_extension: int = 30, interval: int = 15):
+    def _visibility_heartbeat_loop(self, receipt_handle: str, stop_event: threading.Event, ownership_lost_event: threading.Event, timeout_extension: int = 180, interval: int = 60):
         """
         Invia periodicamente un comando a SQS per estendere l'invisibilità del messaggio
         correntemente in elaborazione, finché l'evento stop_event non viene settato.
         """
         print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread avviato per il messaggio corrente.")
+
+        first_wait = interval // 2  # primo rinnovo anticipato di sicurezza
         while not stop_event.is_set():
-            # Attesa interrompibile controllando stop_event ogni secondo
-            for _ in range(interval):
+            for _ in range(first_wait if first_wait else interval):
                 if stop_event.is_set():
                     return
                 time.sleep(1)
-            
+            first_wait = interval
             try:
-                # Verifichiamo se il wrapper di SQS espone il metodo per cambiare la visibilità
-                if hasattr(self.sqs_queue, "change_message_visibility"):
-                    self.sqs_queue.change_message_visibility(
-                        queue_name=self.queue_name,
-                        receipt_handle=receipt_handle,
-                        visibility_timeout=timeout_extension
-                    )
-                    print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Invisibilità del messaggio estesa di altri {timeout_extension}s.")
-                else:
-                    # Log di debug se ti sei dimenticato di aggiornare il wrapper (Vedi Passo 4)
-                    print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT-WARN] Metodo change_message_visibility non trovato sul wrapper.")
+                self.sqs_queue.change_message_visibility(
+                    queue_name=self.queue_name,
+                    receipt_handle=receipt_handle,
+                    visibility_timeout=timeout_extension
+                )
             except Exception as e:
-                print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT-ERROR] Impossibile estendere visibilità SQS: {e}")
+                print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT-ERROR] {e}")
+                ownership_lost_event.set()
+                return  # inutile continuare a girare, l'ownership è persa
 
     def start(self):
         """Metodo Template: gestisce l'intero ciclo di vita del polling e del failover."""
@@ -248,11 +259,15 @@ class BaseOrchestrator(ABC):
                         self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
                         self.hb_thread.start()
 
-                        #Recupero addestramento 
-                        self._perform_active_recovery()
-                
+                        try:
+                            self._perform_active_recovery()
+                        except Exception as recovery_error:
+                            print(f"[{self.orchestrator_name}] [ERRORE RECOVERY] Il ripristino attivo è fallito: {recovery_error}")
+                            import traceback
+                            traceback.print_exc()
+                                    
                 try:
-                    sqs_response = self.sqs_queue.receive_message(queue_name=self.queue_name, visibility_timeout=60)
+                    sqs_response = self.sqs_queue.receive_message(queue_name=self.queue_name, visibility_timeout=180)
 
                     if not sqs_response:
                         time.sleep(5)
@@ -286,11 +301,12 @@ class BaseOrchestrator(ABC):
 
         # 1. Prepariamo e avviamo il thread di Heartbeat per la visibilità SQS
         stop_visibility = threading.Event()
+        ownership_lost_event = threading.Event()
         visibility_thread = None
         if receipt_handle:
             visibility_thread = threading.Thread(
                 target=self._visibility_heartbeat_loop,
-                args=(receipt_handle, stop_visibility),
+                args=(receipt_handle, stop_visibility, ownership_lost_event),
                 daemon=True
             )
             visibility_thread.start()
@@ -350,6 +366,10 @@ class BaseOrchestrator(ABC):
                         self.sqs_queue.delete_message(receipt_handle)
                     return
             
+            
+            if not self.state_manager.try_claim_job(job_id, self.orchestrator_name, lease_seconds=300):
+                print(f"[{self.orchestrator_name}] [ABORT] Job {job_id[:8]} già in possesso di un altro Orchestrator.")
+                return
             self.state_manager.update_request_status(
                 job_id=job_id, 
                 status="PROCESSING", 
@@ -368,6 +388,15 @@ class BaseOrchestrator(ABC):
                 current_alberi = alberi_gia_fatti
 
                 while current_alberi < alberi_totali:
+                    if ownership_lost_event.is_set():
+                        raise MessageOwnershipLostError(
+                            f"[{self.orchestrator_name}] Ownership persa a metà elaborazione: "
+                            f"abort per evitare lavoro duplicato/corrotto."
+                        )
+                    if not self.state_manager.try_claim_job(job_id, self.orchestrator_name, lease_seconds=300):
+                        raise MessageOwnershipLostError(
+                            f"[{self.orchestrator_name}] Lease del job persa: un altro Orchestrator l'ha reclamata."
+                        )
                     prossimo_target = min(current_alberi + step_alberi, alberi_totali)
                     
                     alberi_ottenuti = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
@@ -377,6 +406,7 @@ class BaseOrchestrator(ABC):
                         return
                     
                     current_alberi = alberi_ottenuti
+
                     self._save_checkpoint(job_id, current_alberi, retries, base_random_state)
             
                 t_dist = time.perf_counter() - start_dist 
@@ -387,7 +417,9 @@ class BaseOrchestrator(ABC):
 
                 self._generate_performance_report(job_id, t_dist)
                 print(f"[{self.orchestrator_name}] Job {job_id[:8]} completato con successo.")
-
+            except MessageOwnershipLostError as ownership_error:
+                print(f"[{self.orchestrator_name}] [ABORT] {ownership_error}")
+                
             except Exception as eval_error:
                 print(f"[{self.orchestrator_name}] [ERRORE APPLICATIVO]: {eval_error}")
                 import traceback
@@ -402,8 +434,8 @@ class BaseOrchestrator(ABC):
                 )
         finally:
             # Segnaliamo al thread di heartbeat di terminare
+            stop_visibility.set()
             if visibility_thread:
-                stop_visibility.set()
                 visibility_thread.join(timeout=2)
                 print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread terminato per il messaggio corrente.")
 

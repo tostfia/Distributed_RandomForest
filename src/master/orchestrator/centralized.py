@@ -52,7 +52,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
     
     def _prepare_data(self, payload: dict, base_seed: int):
         t0 = time.perf_counter()
-        self.current_job_id = payload.get("job_id", "unknown_job")
+        job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
         dataset_type = self._resolve_dataset_type(payload)
         hp = payload.get("hyperparameters", {})
@@ -101,21 +101,24 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
-            self.train_data_path = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{self.current_job_id}.csv"
-            self.test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{self.current_job_id}.csv"
+            train_data_path = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{job_id}.csv"
+            test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{job_id}.csv"
         else:
-            self.train_data_path = f"./.local_storage/shared_train_{self.current_job_id}.csv"
-            self.test_data_path = f"./.local_storage/shared_test_{self.current_job_id}.csv"
+            train_data_path = f"./.local_storage/shared_train_{job_id}.csv"
+            test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
             
         print(f"\n[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         try:
             dao = DatasetDAOFactory.get_dao(self.environment)
-            dao.save_dataset(path=self.train_data_path, df=train_df)
-            dao.save_dataset(path=self.test_data_path, df=test_df)
+            dao.save_dataset(path=train_data_path, df=train_df)
+            dao.save_dataset(path=test_data_path, df=test_df)
             print(f"[DEBUG TIMING] _prepare_data completato in {time.perf_counter() - t0:.2f}s")
             print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
+        self.current_job_id = job_id
+        self.train_data_path = train_data_path
+        self.test_data_path = test_data_path
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
@@ -132,14 +135,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 expected_train = f"./.local_storage/shared_train_{expected_job_id}.csv"
                 expected_test = f"./.local_storage/shared_test_{expected_job_id}.csv"
             
-            # Verifichiamo se lo storage condiviso ha già i dati pronti
-            if self.environment == "local" and os.path.exists(expected_train) and os.path.exists(expected_test):
+            dao = DatasetDAOFactory.get_dao(self.environment)
+            if dao.exists(expected_train) and dao.exists(expected_test):
                 print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT ETL] Dataset già presente nello storage condiviso. Salto la fase ETL.")
                 self.train_data_path = expected_train
                 self.test_data_path = expected_test
                 self.current_job_id = expected_job_id
             else:
-                # Se non esistono o siamo in AWS (implementabile con check su S3), esegui l'ETL normalmente
                 self._prepare_data(payload, seed)
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment != "aws":

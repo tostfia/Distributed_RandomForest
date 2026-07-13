@@ -1,40 +1,11 @@
 from abc import ABC, abstractmethod
 import os
-import sys
+
 import pandas as pd
 import io
-import boto3
-import logging
-import threading
 
 
 
-class _UploadProgress:
-    """Callable che boto3 richiama periodicamente durante upload_fileobj,
-    passando il numero di byte trasmessi in quel 'chunk'. Tiene il conteggio
-    cumulativo ed emette una barra di avanzamento a riga singola."""
- 
-    def __init__(self, total_bytes: int, label: str = "Upload"):
-        self._total_bytes = total_bytes
-        self._label = label
-        self._seen_so_far = 0
-        self._lock = threading.Lock()
- 
-    def __call__(self, bytes_amount: int):
-        with self._lock:
-            self._seen_so_far += bytes_amount
-            if self._total_bytes > 0:
-                percentage = (self._seen_so_far / self._total_bytes) * 100
-                mb_seen = self._seen_so_far / (1024 ** 2)
-                mb_total = self._total_bytes / (1024 ** 2)
-                sys.stdout.write(
-                    f"\r[DAO-AWS] {self._label}: {mb_seen:6.1f} / {mb_total:6.1f} MB "
-                    f"({percentage:5.1f}%)"
-                )
-            else:
-                mb_seen = self._seen_so_far / (1024 ** 2)
-                sys.stdout.write(f"\r[DAO-AWS] {self._label}: {mb_seen:6.1f} MB trasferiti")
-            sys.stdout.flush()
             
 class DatasetDAO(ABC):
     """Interfaccia astratta che definisce il contratto per l'accesso ai dati."""
@@ -52,6 +23,9 @@ class DatasetDAO(ABC):
     @abstractmethod
     def save_binary(self, path: str, data: bytes) -> None:
         """Salva dati binari generici (es. modelli pickle) sulla destinazione."""
+        pass
+    @abstractmethod
+    def exists(self, path: str) -> bool:
         pass
 
 class LocalFileSystemDAO(DatasetDAO):
@@ -74,6 +48,9 @@ class LocalFileSystemDAO(DatasetDAO):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
+
+    def exists(self, path: str) -> bool:
+        return os.path.exists(path)
 
 
 class AwsS3DAO(DatasetDAO):
@@ -125,25 +102,27 @@ class AwsS3DAO(DatasetDAO):
         bucket, key = self._parse_s3_uri(path)
         
         # Convertiamo il DataFrame in una stringa CSV in memoria
-        csv_buffer = io.BytesIO()
-        df.to_csv(csv_buffer, index=False)
-        total_bytes = csv_buffer.tell()
-        csv_buffer.seek(0)
+        csv_data = df.to_csv(index=False).encode('utf-8')
         
         # Carichiamo il buffer su S3
         s3_client = self._get_isolated_client()
-        progress = _UploadProgress(total_bytes, label="Salvataggio dataset")
-        s3_client.upload_fileobj(Fileobj=csv_buffer, Bucket=bucket, Key=key, Callback=progress)
+        s3_client.put_object(Bucket=bucket, Key=key, Body=csv_data)
         print()  # Per andare a capo dopo la barra di avanzamento
         print(f"[DAO-AWS] [OK] Salvataggio su S3 completato con successo!")
         
     def save_binary(self, path: str, data: bytes) -> None:
         print(f"[DAO-AWS] Salvataggio file binario nel bucket S3 su: {path}")
         bucket, key = self._parse_s3_uri(path)
+       
         s3_client = self._get_isolated_client()
-        buffer = io.BytesIO(data)
-        total_bytes = len(data)
-        progress = _UploadProgress(total_bytes, label="Salvataggio file binario")
-        s3_client.upload_fileobj(Fileobj=buffer, Bucket=bucket, Key=key, Callback=progress)
-        print()  # Per andare a capo dopo la barra di avanzamento
+        s3_client.put_object(Bucket=bucket, Key=key, Body=data)
         print(f"[DAO-AWS] [OK] Salvataggio binario completato con successo!")
+
+    def exists(self, path: str) -> bool:
+        bucket, key = self._parse_s3_uri(path)
+        s3_client = self._get_isolated_client()
+        try:
+            s3_client.head_object(Bucket=bucket, Key=key)
+            return True
+        except s3_client.exceptions.ClientError:
+            return False

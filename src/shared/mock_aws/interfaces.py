@@ -93,3 +93,8 @@ class StateManagerInterface(ABC):
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
         """Rilascia un lock distribuito globale."""
         pass
+
+    @abstractmethod
+    def try_claim_job(self, job_id: str, orchestrator_id: str,lease_seconds: int = 300) -> bool:
+        """Tenta di reclamare un job per un orchestratore specifico."""
+        pass

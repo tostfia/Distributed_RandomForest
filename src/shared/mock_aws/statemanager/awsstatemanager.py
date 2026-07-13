@@ -1,6 +1,8 @@
 import time
 from typing import Optional
 
+from aiohttp import ClientError
+
 from src.shared.mock_aws.interfaces import StateManagerInterface
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 from src.shared.config import SystemConfig
@@ -8,6 +10,7 @@ from src.shared.config import SystemConfig
 JOBS_TABLE = "ModelStatus"
 WORKER_TASKS_TABLE = "WorkerTasks"
 LOCKS_TABLE = "OrchestratorLocks"
+JOB_LOCKS_TABLE = "JobLocks"
 cfg = SystemConfig()
 
 class AwsStateManager(StateManagerInterface):
@@ -30,6 +33,7 @@ class AwsStateManager(StateManagerInterface):
             "last_orchestrator": None,
             "alberi_addestrati": 0,
             "base_random_state": seed,
+          
         }
         self._db.put_item(JOBS_TABLE, job_id, payload)
         print(f"[AWS StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
@@ -115,3 +119,15 @@ class AwsStateManager(StateManagerInterface):
 
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
         return self._db.release_lock(LOCKS_TABLE, lock_key, owner)
+    
+
+    def try_claim_job(self, job_id: str, orchestrator_id: str, lease_seconds: int = 300) -> bool:
+        claimed = self._db.try_acquire_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
+        if not claimed:
+            # Se il lock esiste ma è già nostro, try_acquire_lock fallisce
+            # (perché non è scaduto): il rinnovo passa da refresh_lock.
+            claimed = self._db.refresh_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
+ 
+        if not claimed:
+            print(f"[AWS StateManager] [CLAIM FAILED] Job {job_id[:8]}... già posseduto da un altro Orchestrator.")
+        return claimed

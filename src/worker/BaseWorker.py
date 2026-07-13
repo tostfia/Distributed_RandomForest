@@ -323,32 +323,29 @@ class BaseWorker(Service, ABC):
         job_id = filename.replace("shared_train_", "").replace(".csv", "")
         
         local_dir = os.path.join("./.local_storage", "trained_tasks")
-        local_path = os.path.join(local_dir, f"task_{job_id}_seed_{base_seed}_trees_{num_trees}.json")
+        base_name = f"task_{job_id}_seed_{base_seed}_trees_{num_trees}"
+        local_meta_path = os.path.join(local_dir, base_name + ".meta.json")
+        local_bin_path = os.path.join(local_dir, base_name + ".bin")
         
         s3_bucket = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
         s3_key = f"tasks/{job_id}/task_seed_{base_seed}_trees_{num_trees}.pkl"
         
-        return local_dir, local_path, s3_bucket, s3_key
+        return local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key
     
     def _load_task_from_shared_storage(self, source_info: str, base_seed: int, num_trees: int) -> bytes:
         """Tenta di recuperare i byte serializzati dell'INTERO TASK dallo storage condiviso."""
-        local_dir, local_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
+        local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
         
         if self.environment == "local":
-            if os.path.exists(local_path):
+            if os.path.exists(local_bin_path):
                 try:
                     
-                    with open(local_path, "r", encoding="utf-8") as f:
-                        payload = json.load(f)
-                    
-                    serialized_b64 = payload.get("task_pickle_b64")
-                    if serialized_b64:
-                        print(f"[{self.worker_name}] [TASK HIT] Trovato task locale persistito per seed {base_seed}.")
-                        return base64.b64decode(serialized_b64.encode('utf-8'))
+                    with open(local_bin_path, "rb") as f:
+                        return f.read()
                 except Exception as e:
-                    print(f"[{self.worker_name}] Errore durante la lettura del task JSON locale: {e}")
+                    print(f"[{self.worker_name}] Errore durante la lettura del task binario locale: {e}")
         else:
-            # Ambiente AWS: Lettura diretta dei byte da Amazon S3
+                       
             try:
                 
                 s3_client = boto3.client("s3")
@@ -365,24 +362,27 @@ class BaseWorker(Service, ABC):
     
     def _save_task_to_shared_storage(self, source_info: str, base_seed: int, num_trees: int, serialized_trees_bytes: bytes):
         """Persiste in modo atomico i byte dell'intero TASK nello storage condiviso."""
-        local_dir, local_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
+        local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
         
         if self.environment == "local":
             try:
                 
                 os.makedirs(local_dir, exist_ok=True)
-                serialized_b64 = base64.b64encode(serialized_trees_bytes).decode('utf-8')
+                tmp_bin_path = local_bin_path + ".tmp"
+                with open(tmp_bin_path, "wb") as f:
+                    f.write(serialized_trees_bytes)
+                os.replace(tmp_bin_path, local_bin_path)
                 
-                temp_path = local_path + ".tmp"
-                with open(temp_path, "w", encoding="utf-8") as f:
+                tmp_meta = local_meta_path + ".tmp"
+                with open(tmp_meta, "w", encoding="utf-8") as f:
                     json.dump({
                         "base_seed": base_seed,
                         "num_trees": num_trees,
-                        "task_pickle_b64": serialized_b64,
+                        "size_bytes": len(serialized_trees_bytes),
                         "timestamp": time.time()
                     }, f, indent=2)
                 # Sostituzione atomica per prevenire corruzioni di file
-                os.replace(temp_path, local_path)
+                os.replace(tmp_meta, local_meta_path)
                 print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato nello storage locale condiviso.")
             except Exception as e:
                 print(f"[{self.worker_name}] Errore nel salvataggio del task JSON locale: {e}")
@@ -395,7 +395,13 @@ class BaseWorker(Service, ABC):
             start_ts = time.time()
             try:
                 s3_client = boto3.client("s3")
-                s3_client.put_object(Bucket=s3_bucket, Key=s3_key, Body=serialized_trees_bytes)
+                from boto3.s3.transfer import TransferConfig
+                import io
+                s3_client.put_object(
+                    Bucket=s3_bucket,
+                    Key=s3_key,
+                    Body=serialized_trees_bytes  # Passi direttamente i byte, senza io.BytesIO
+                )
                 elapsed = time.time() - start_ts
                 print(f"[{self.worker_name}] [TASK STORAGE] Task {base_seed} salvato su S3 "
                       f"in {elapsed:.1f}s ({size_mb:.1f} MB).")

@@ -14,6 +14,7 @@ Interfaccia mantenuta identica:
 
 import os
 import decimal
+import threading
 import time
 from typing import Optional
 
@@ -33,15 +34,16 @@ class AwsDynamoDB:
         'orchestrators_registry': 'orchestrator_name',
         'ModelStatus': 'job_id',
         'WorkerTasks': 'task_id',
+        'OrchestratorLocks': 'lock_key',
+        'JobLocks': 'lock_key',
     }
 
     def __init__(self, region_name: Optional[str] = None):
-        region_name = region_name or os.environ.get("AWS_REGION", "us-east-1")
-        # boto3 legge automaticamente le credenziali da:
-        # variabili d'ambiente AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
-        # oppure da ~/.aws/credentials (profilo "default")
-        self._resource = boto3.resource("dynamodb", region_name=region_name)
-        self._tables_cache = {}
+        
+        
+        self._region_name = region_name or os.environ.get("AWS_REGION", "us-east-1")
+        self._thread_local = threading.local()
+      
 
     # ------------------------------------------------------------------
     # Utility interne
@@ -52,10 +54,19 @@ class AwsDynamoDB:
             raise ValueError(f"Tabella '{table_name}' non riconosciuta.")
         return self._PK_MAPPING[table_name]
 
+    def _get_resource(self):
+        if not hasattr(self._thread_local, "resource"):
+            self._thread_local.resource = boto3.resource("dynamodb", region_name=self._region_name)
+        return self._thread_local.resource
+
     def _table(self, table_name: str):
-        if table_name not in self._tables_cache:
-            self._tables_cache[table_name] = self._resource.Table(table_name)
-        return self._tables_cache[table_name]
+        if table_name not in self._PK_MAPPING:
+            raise ValueError(f"Tabella '{table_name}' non riconosciuta.")
+        if not hasattr(self._thread_local, "tables"):
+            self._thread_local.tables = {}
+        if table_name not in self._thread_local.tables:
+            self._thread_local.tables[table_name] = self._get_resource().Table(table_name)
+        return self._thread_local.tables[table_name]
 
     @staticmethod
     def _to_dynamo(value):

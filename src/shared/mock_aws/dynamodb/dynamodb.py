@@ -2,7 +2,7 @@ import json
 import os
 import fcntl
 from typing import Optional
-
+import time
 class MockDynamoDB:
     def __init__(self):
         base = os.environ.get("LOCAL_STORAGE_PATH", os.path.join(".", ".local_storage"))
@@ -52,6 +52,8 @@ class MockDynamoDB:
             'orchestrators_registry': 'orchestrator_name',
             'ModelStatus': 'job_id',
             'WorkerTasks': 'task_id',
+            'OrchestratorLocks': 'lock_key',
+            'JobLocks': 'lock_key',
         }
         if table_name not in mapping:
             raise ValueError(f"Tabella '{table_name}' non riconosciuta.")
@@ -135,5 +137,52 @@ class MockDynamoDB:
                 items_list.append(item_compliant)
                 
         return {"Items": items_list}
+    def try_acquire_lock(self, table_name: str, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        """
+        Acquisisce il lock in modo atomico SOLO se: non esiste ancora,
+        oppure la lease precedente è scaduta. Equivale a:
+        ConditionExpression="attribute_not_exists(lock_key) OR expires_at < :now"
+        """
+        now = time.time()
+        expires_at = now + ttl
+ 
+        def modify(table):
+            current = table.get(lock_key)
+            if current and current.get("expires_at", 0) >= now:
+                return table, False  # lock ancora valido, posseduto da qualcun altro
+            table[lock_key] = {"leader": owner, "expires_at": expires_at, "timestamp": now}
+            return table, True
+ 
+        acquired = self._locked_read_modify_write(table_name, modify)
+        if acquired:
+            print(f"[Mock DynamoDB] Lock '{lock_key}' su '{table_name}' acquisito da {owner} (ttl={ttl}s).")
+        return acquired
+ 
+    def refresh_lock(self, table_name: str, lock_key: str, owner: str, ttl: int = 30) -> bool:
+        """Rinnova un lock SOLO se il possessore attuale coincide con owner."""
+        now = time.time()
+        expires_at = now + ttl
+ 
+        def modify(table):
+            current = table.get(lock_key)
+            if not current or current.get("leader") != owner:
+                return table, False
+            current["expires_at"] = expires_at
+            current["timestamp"] = now
+            table[lock_key] = current
+            return table, True
+ 
+        return self._locked_read_modify_write(table_name, modify)
+ 
+    def release_lock(self, table_name: str, lock_key: str, owner: str) -> bool:
+        """Rilascia il lock SOLO se il possessore attuale coincide con owner."""
+        def modify(table):
+            current = table.get(lock_key)
+            if not current or current.get("leader") != owner:
+                return table, False
+            del table[lock_key]
+            return table, True
+ 
+        return self._locked_read_modify_write(table_name, modify)
 
 dynamo_db = MockDynamoDB()
