@@ -71,7 +71,7 @@ class AwsS3DAO(DatasetDAO):
         config_timeout = Config(
             connect_timeout=15,  # 15 secondi per connettersi
             read_timeout=30,     # 30 secondi per trasmettere i dati
-            retries={'max_attempts': 2}
+            retries={'max_attempts': 5, "mode": "adaptive"}
         )
         return local_session.client('s3', config=config_timeout)
 
