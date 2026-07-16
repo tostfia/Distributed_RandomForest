@@ -1,1 +1,32 @@
+# Cache pesanti e dataset (I colpevoli principali)
+dataset_cache/
+outputs_baseline/
+synthetic/
+saved_models/
+workers_cache/
+.local_storage/
+
+# Installatori e tool AWS locali
+aws/
+awscliv2.zip
+
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+# Cronologia di Git (non serve a Fargate)
+.git/
+.gitignore
+
+# Report e log locali
+test_reports/
+*.log
+
+# Cache di Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/.env
 .env

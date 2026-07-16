@@ -1,13 +1,16 @@
 #!/bin/bash
 
-# Prende la cartella in cui risiede questo script
+# Prende la cartella in cui risiede questo script (e.g., .../Distributed_RandomForest/script_local)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-# Definisce i percorsi
+# Risale di un livello per trovare la root del progetto (e.g., .../Distributed_RandomForest)
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Definisce i percorsi relativi alla root del progetto
 TARGET_DIRS=(
-    "$SCRIPT_DIR/.local_storage/"
-    "$SCRIPT_DIR/saved_models/"
-    "$SCRIPT_DIR/workers_cache/"
+    "$PROJECT_ROOT/.local_storage/"
+    "$PROJECT_ROOT/saved_models/"
+    "$PROJECT_ROOT/workers_cache/"
 )
 
 echo "[CLEANUP] Avvio pulizia selettiva dei contenuti..."

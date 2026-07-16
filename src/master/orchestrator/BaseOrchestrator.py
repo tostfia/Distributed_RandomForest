@@ -50,7 +50,7 @@ class BaseOrchestrator(ABC):
     def _get_lock_key(self) -> str:
         return "global_orchestrator_leader_lock"
     
-    def _try_acquire_leadership(self, ttl: int = 30) -> bool:
+    def _try_acquire_leadership(self, ttl: int = 180) -> bool:
             
         lock_key = self._get_lock_key()
 
@@ -133,7 +133,7 @@ class BaseOrchestrator(ABC):
                     fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
             try:
-                self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=30)
+                self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=180)
             except Exception:
                 pass
 
@@ -191,7 +191,7 @@ class BaseOrchestrator(ABC):
             ServiceRegistry.deregister_worker(worker_name)
 
 
-    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 60):
+    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
         """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
             try:
@@ -545,7 +545,7 @@ class BaseOrchestrator(ABC):
                     print(f"[{self.orchestrator_name}] Sincronizzazione stato e subentro immediato in corso...\n")
                     
                     try: 
-                        pending_tasks = TaskRegistry.get_tasks_for_job(job_id)
+                        pending_tasks = TaskRegistry.get_tasks_by_job(job_id)
                         by_status = {}
                         for t in pending_tasks:
                             by_status[t.get("status")] = by_status.get(t.get("status"), 0) + 1

@@ -22,8 +22,8 @@ ORCHESTRATOR_DESIRED_COUNT=2
 
 WORKER_CPU=1024
 WORKER_MEMORY=2048
-ORCH_CPU=512
-ORCH_MEMORY=1024
+ORCH_CPU=2048
+ORCH_MEMORY=4096
 
 BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
 
@@ -127,7 +127,7 @@ else
 fi
 
 echo "==> [8/10] Registrazione Task Definition WORKER..."
-WORKER_TASK_DEF=$(cat <<EOF
+cat <<EOF > /tmp/worker-task-def.json
 {
   "family": "rf-worker-task",
   "requiresCompatibilities": ["FARGATE"],
@@ -157,7 +157,7 @@ WORKER_TASK_DEF=$(cat <<EOF
       ],
       "command": [
         "sh", "-c",
-        "export RPC_ADVERTISE_HOST=\$(curl -s \\\"\$ECS_CONTAINER_METADATA_URI_V4\\\" | python3 -c \\\"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\\\"); echo \\\"Registrazione con IP: \$RPC_ADVERTISE_HOST\\\"; exec python -m src.worker.main Worker-\${EC2_ID}-\${TRAINING_MODE}-\$(hostname) ${RPC_PORT} ${TRAINING_MODE} aws"
+        "export RPC_ADVERTISE_HOST=\$(curl -s \"\$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: \$RPC_ADVERTISE_HOST\"; exec python -m src.worker.main Worker-\${EC2_ID}-\${TRAINING_MODE}-\$(hostname) ${RPC_PORT} ${TRAINING_MODE} aws"
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -172,13 +172,11 @@ WORKER_TASK_DEF=$(cat <<EOF
   ]
 }
 EOF
-)
-echo "$WORKER_TASK_DEF" > /tmp/worker-task-def.json
 aws ecs register-task-definition --cli-input-json file:///tmp/worker-task-def.json --region "$REGION" > /dev/null
 echo "    Task Definition worker registrata."
 
 echo "==> [9/10] Registrazione Task Definition ORCHESTRATOR..."
-ORCH_TASK_DEF=$(cat <<EOF
+cat <<EOF > /tmp/orchestrator-task-def.json
 {
   "family": "rf-orchestrator-task",
   "requiresCompatibilities": ["FARGATE"],
@@ -222,8 +220,6 @@ ORCH_TASK_DEF=$(cat <<EOF
   ]
 }
 EOF
-)
-echo "$ORCH_TASK_DEF" > /tmp/orchestrator-task-def.json
 aws ecs register-task-definition --cli-input-json file:///tmp/orchestrator-task-def.json --region "$REGION" > /dev/null
 echo "    Task Definition orchestrator registrata."
 
