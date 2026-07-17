@@ -71,7 +71,7 @@ class BaseOrchestrator(ABC):
                             owner = lock_data.get("leader")
                             timestamp = lock_data.get("timestamp", 0)
                             # Lock valido e di qualcun altro → standby
-                            if owner != self.orchestrator_name and (now - timestamp) < 25:
+                            if owner != self.orchestrator_name and (now - timestamp) < ttl:
                                 return False
                         except (json.JSONDecodeError, KeyError, ValueError):
                             print(f"[{self.orchestrator_name}] Lock corrotto, tento sovrascrittura...")
@@ -93,7 +93,7 @@ class BaseOrchestrator(ABC):
                 return True
 
             try:
-                return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=30)
+                return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=ttl)
             except Exception as e:
                 # QUALSIASI errore nell'acquisizione del lock = NON sei leader.
                 # Mai assumere leadership per default in caso di dubbio.
@@ -206,6 +206,25 @@ class BaseOrchestrator(ABC):
                 if stop_event.is_set():
                     break
                 time.sleep(1)
+
+    def _job_lease_heartbeat_loop(self, job_id: str, stop_event: threading.Event,
+                               lease_lost_event: threading.Event,
+                               lease_seconds: int = 300, interval: int = 60):
+        """Rinnova periodicamente la lease del job, indipendentemente dalla durata
+        dello step di training in corso (che può superare abbondantemente lease_seconds
+        a causa dei timeout RPC verso i worker)."""
+        while not stop_event.is_set():
+            for _ in range(interval):
+                if stop_event.is_set():
+                    return
+                time.sleep(1)
+            try:
+                if not self.state_manager.try_claim_job(job_id, self.orchestrator_name, lease_seconds=lease_seconds):
+                    print(f"[{self.orchestrator_name}] [JOB-LEASE] Lease persa per il job {job_id[:8]}!")
+                    lease_lost_event.set()
+                    return
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [JOB-LEASE-ERROR] {e}")
                 
     def _visibility_heartbeat_loop(self, receipt_handle: str, stop_event: threading.Event, ownership_lost_event: threading.Event, timeout_extension: int = 180, interval: int = 60):
         """
@@ -298,10 +317,13 @@ class BaseOrchestrator(ABC):
     def _process_job(self, payload: dict, receipt_handle: str):
 
         """Logica di instradamento del lavoro in base al tipo di richiesta."""
-
+        job_id = payload.get("job_id")
+        request_type = payload.get("request_type", "TRAINING").upper()
         # 1. Prepariamo e avviamo il thread di Heartbeat per la visibilità SQS
         stop_visibility = threading.Event()
         ownership_lost_event = threading.Event()
+        stop_job_lease = threading.Event()
+        job_lease_lost_event = threading.Event()
         visibility_thread = None
         if receipt_handle:
             visibility_thread = threading.Thread(
@@ -310,16 +332,15 @@ class BaseOrchestrator(ABC):
                 daemon=True
             )
             visibility_thread.start()
+        job_lease_thread = threading.Thread(
+            target=self._job_lease_heartbeat_loop,
+            args=(job_id, stop_job_lease, job_lease_lost_event),
+            kwargs={"lease_seconds": 300, "interval": 60},
+            daemon=True
+        )
+        job_lease_thread.start()
         try:
-            job_id = payload.get("job_id")
-            # Estraiamo il tipo di richiesta dal payload, di default assumiamo sia "TRAINING" per retrocompatibilità
-            request_type = payload.get("request_type", "TRAINING").upper()
-
-            # Salviamo subito i metadati originali del job (dataset_path, dataset_type,
-            # hyperparameters, request_type) su un sidecar locale: lo state_manager/DynamoDB
-            # NON li conserva, quindi senza questo salvataggio un eventuale recovery dopo
-            # un failover dell'orchestratore ripartirebbe con hyperparameters={} e senza
-            # dataset_path, usando silenziosamente dei default sbagliati o fallendo.
+           
             self._save_job_meta(job_id, payload)
 
             if request_type == "INFERENCE":
@@ -388,7 +409,7 @@ class BaseOrchestrator(ABC):
                 current_alberi = alberi_gia_fatti
 
                 while current_alberi < alberi_totali:
-                    if ownership_lost_event.is_set():
+                    if ownership_lost_event.is_set() or job_lease_lost_event.is_set():
                         raise MessageOwnershipLostError(
                             f"[{self.orchestrator_name}] Ownership persa a metà elaborazione: "
                             f"abort per evitare lavoro duplicato/corrotto."
@@ -435,9 +456,13 @@ class BaseOrchestrator(ABC):
         finally:
             # Segnaliamo al thread di heartbeat di terminare
             stop_visibility.set()
+            stop_job_lease.set()
             if visibility_thread:
                 visibility_thread.join(timeout=2)
                 print(f"[{self.orchestrator_name}] [SQS-HEARTBEAT] Thread terminato per il messaggio corrente.")
+            if job_lease_thread:
+                job_lease_thread.join(timeout=2)
+                print(f"[{self.orchestrator_name}] [JOB-LEASE] Thread terminato per il job corrente.")
 
     @abstractmethod
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int):
