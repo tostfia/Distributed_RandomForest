@@ -232,10 +232,10 @@ WORKER_SVC_EXISTS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --servic
   --query "services[0].status" --output text --region "$REGION" 2>/dev/null || echo "MISSING")
 
 if [ "$WORKER_SVC_EXISTS" == "ACTIVE" ]; then
-  echo "    Service worker-service esistente: aggiorno la task definition..."
+  echo "    Service worker-service esistente: forzo il rimpiazzo dei container..."
   aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
     --task-definition rf-worker-task --desired-count "$WORKER_DESIRED_COUNT" \
-    --region "$REGION" > /dev/null
+    --force-new-deployment --region "$REGION" > /dev/null
 else
   echo "    Creazione Service worker-service (desired-count=$WORKER_DESIRED_COUNT)..."
   aws ecs create-service \
@@ -253,10 +253,10 @@ ORCH_SVC_EXISTS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services
   --query "services[0].status" --output text --region "$REGION" 2>/dev/null || echo "MISSING")
 
 if [ "$ORCH_SVC_EXISTS" == "ACTIVE" ]; then
-  echo "    Service orchestrator-service esistente: aggiorno la task definition..."
+  echo "    Service orchestrator-service esistente: forzo il rimpiazzo dei container..."
   aws ecs update-service --cluster "$CLUSTER_NAME" --service orchestrator-service \
     --task-definition rf-orchestrator-task --desired-count "$ORCHESTRATOR_DESIRED_COUNT" \
-    --region "$REGION" > /dev/null
+    --force-new-deployment --region "$REGION" > /dev/null
 else
   echo "    Creazione Service orchestrator-service (desired-count=$ORCHESTRATOR_DESIRED_COUNT)..."
   aws ecs create-service \

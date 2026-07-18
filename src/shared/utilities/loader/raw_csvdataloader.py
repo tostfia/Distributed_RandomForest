@@ -47,31 +47,16 @@ class RawCSVDataLoader(DatasetLoader):
 
         random.seed(self.dataset_seed)
 
-        if self.sample_fraction < 1.0:
-            skip_logic = lambda i: i > 0 and random.random() > self.sample_fraction
-        else:
-            skip_logic = None
-
         for source in sources:
             print(f"   - Lettura e conversione sorgente: {source}")
 
-            # Leggiamo il file applicando lo skip_logic e le conversioni
-            df_temp = self._read_single_csv(
-                source=source,
-                skip_logic=skip_logic
-            )
+            # Lettura UNICA della sorgente (niente più skiprows in fase di parsing: con S3
+            # il traffico di rete avviene comunque per l'intero oggetto, quindi non risparmiava
+            # banda e obbligava a un secondo download identico per popolare la cache).
+            # Il campionamento, se richiesto, viene applicato in memoria DOPO il download,
+            # dentro _read_single_csv.
+            df_temp = self._read_single_csv(source=source)
             chunks.append(df_temp)
-
-            # S3 CACHING LOGIC: Se stavamo leggendo da S3, salviamo il file INTERO localmente
-            if self._is_s3_path(source):
-                filename = os.path.basename(source)
-                local_cache_path = os.path.join(self.cache_dir, filename)
-                if not os.path.exists(local_cache_path):
-                    print(f"     [CACHE] Salvo una copia locale di {filename} per i prossimi test...")
-                    os.makedirs(self.cache_dir, exist_ok=True)
-                    storage_options = {"anon": self.s3_anon}
-                    df_full = pd.read_csv(source, low_memory=False, storage_options=storage_options)
-                    df_full.to_csv(local_cache_path, index=False)
 
         if not chunks:
             raise ValueError("Nessun DataFrame caricato.")
@@ -136,16 +121,15 @@ class RawCSVDataLoader(DatasetLoader):
 
         return sources
 
-    def _read_single_csv(self, source: str, skip_logic: callable) -> pd.DataFrame:
+    def _read_single_csv(self, source: str) -> pd.DataFrame:
         storage_options = None
         if self._is_s3_path(source):
             storage_options = {"anon": self.s3_anon}
 
         try:
-            # 1. pd.read_csv con lo skip_logic basato sul generatore random globale
+            # 1. Download COMPLETO e UNICO della sorgente (senza skiprows)
             df_temp = pd.read_csv(
                 source,
-                skiprows=skip_logic,
                 low_memory=False,
                 storage_options=storage_options,
             )
@@ -159,6 +143,21 @@ class RawCSVDataLoader(DatasetLoader):
 
             cols_to_convert  = df_temp.columns.difference(['Label'])
             df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors='coerce')
+
+            # 4. S3 CACHING LOGIC: se la sorgente era S3, salviamo su disco il file GIA'
+            #    scaricato al passo 1 (invece di riscaricarlo una seconda volta per intero)
+            if self._is_s3_path(source):
+                filename = os.path.basename(source)
+                local_cache_path = os.path.join(self.cache_dir, filename)
+                if not os.path.exists(local_cache_path):
+                    print(f"     [CACHE] Salvo una copia locale di {filename} per i prossimi test...")
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    df_temp.to_csv(local_cache_path, index=False)
+
+            # 5. Campionamento in memoria (sostituisce il vecchio skip_logic basato su skiprows,
+            #    che comunque non risparmiava banda perché il download avveniva per intero)
+            if self.sample_fraction < 1.0:
+                df_temp = df_temp.sample(frac=self.sample_fraction, random_state=self.dataset_seed)
 
             return df_temp
 

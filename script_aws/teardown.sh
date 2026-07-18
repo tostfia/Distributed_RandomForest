@@ -9,7 +9,7 @@ set -e
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
 
-echo "==> Richiedo l'azzeramento del Service worker-service..."
+echo "==> [1/4] Abbattimento nodi computazionali Fargate..."
 aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
   --desired-count 0 --region "$REGION" > /dev/null 2>&1 || echo "    (worker-service non trovato, salto)"
 
@@ -22,10 +22,24 @@ echo "==> SINCRONIZZAZIONE AWS: Attendo la distruzione di TUTTI i container atti
 echo "    (Fargate sta spegnendo i vecchi nodi zombie. Il terminale si sbloccherà automaticamente, attendi...)"
 
 # Questo comando blocca l'esecuzione finché i nodi in esecuzione (running-count) non scendono a 0 (pari al desired-count)
+echo "==> [2/4] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
 aws ecs wait services-stable \
   --cluster "$CLUSTER_NAME" \
   --services worker-service orchestrator-service \
   --region "$REGION"
+echo "    Fargate ha spento tutti i container."
+
+echo "==> [3/4] Svuotamento Code SQS FIFO..."
+QUEUES=("centralized_queue.fifo" "federated_queue.fifo")
+for q in "${QUEUES[@]}"; do
+  URL=$(aws sqs get-queue-url --queue-name "$q" --query "QueueUrl" --output text --region "$REGION" 2>/dev/null || echo "None")
+  if [ "$URL" != "None" ] && [ ! -z "$URL" ]; then
+    # Il comando purge elimina istantaneamente tutti i messaggi nella coda
+    aws sqs purge-queue --queue-url "$URL" --region "$REGION" 2>/dev/null || echo "    (Coda $q già vuota o purgatata di recente)"
+    echo "    Coda $q svuotata con successo."
+  fi
+done
+
 
 echo ""
 echo "========================================================================"
