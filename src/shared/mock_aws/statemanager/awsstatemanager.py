@@ -131,3 +131,12 @@ class AwsStateManager(StateManagerInterface):
         if not claimed:
             print(f"[AWS StateManager] [CLAIM FAILED] Job {job_id[:8]}... già posseduto da un altro Orchestrator.")
         return claimed
+    
+    def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
+        """Rilascia volontariamente la lease (job completato o fallito in modo pulito).
+        Speculare al metodo equivalente di MockStateManager, per mantenere identica
+        l'interfaccia tra i due ambienti."""
+        released = self._db.release_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id)
+        if released:
+            print(f"[AWS StateManager] Lease rilasciata per Job ID: {job_id[:8]}... da {orchestrator_id}")
+        return released

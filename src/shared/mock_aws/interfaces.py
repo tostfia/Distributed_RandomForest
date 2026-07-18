@@ -98,3 +98,7 @@ class StateManagerInterface(ABC):
     def try_claim_job(self, job_id: str, orchestrator_id: str,lease_seconds: int = 300) -> bool:
         """Tenta di reclamare un job per un orchestratore specifico."""
         pass
+
+    @abstractmethod
+    def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
+        pass

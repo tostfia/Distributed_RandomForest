@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import signal
 import threading
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
@@ -120,22 +121,23 @@ class BaseOrchestrator(ABC):
                                 lock_data = json.load(f)
                             if lock_data.get("leader") != self.orchestrator_name:
                                 print(f"[{self.orchestrator_name}] Refresh ignorato: non sono più il leader.")
-                                return
+                                return False
                         except (json.JSONDecodeError, KeyError):
                             pass
 
                     with open(lock_path, "w", encoding="utf-8") as f:
                         json.dump({"leader": self.orchestrator_name, "timestamp": time.time()}, f, indent=2)
-
+                    return True
                 except Exception as e:
                     print(f"[{self.orchestrator_name}] Errore nel rinnovo del lock: {e}")
                 finally:
                     fcntl.flock(mutex, fcntl.LOCK_UN)
         else:
             try:
-                self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=180)
-            except Exception:
-                pass
+                return bool(self.state_manager.refresh_global_lock(lock_key, self.orchestrator_name, ttl=180))
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE] Refresh lock fallito: {e}")
+                return False
 
     def _release_leadership(self):
 
@@ -191,13 +193,16 @@ class BaseOrchestrator(ABC):
             ServiceRegistry.deregister_worker(worker_name)
 
 
-    def _heartbeat_loop(self, stop_event: threading.Event, interval: int = 10):
+    def _heartbeat_loop(self, stop_event: threading.Event,leadership_lost_event:threading.Event, interval: int = 10):
         """Invia heartbeat di rete e tiene in vita il lock di leadership ogni 10 secondi."""
         while not stop_event.is_set():
             try:
                 
                 ServiceRegistry.update_orchestrator_heartbeat(self.orchestrator_name)
-                self._refresh_leadership_lock()
+                if not self._refresh_leadership_lock():
+                    print(f"[{self.orchestrator_name}] [LEADERSHIP LOST] Il lock non è più nostro. Rientro in standby.")
+                    leadership_lost_event.set()
+                    return
                 self._cleanup_dead_workers()
             except Exception as e:
                 print(f"[{self.orchestrator_name}] Errore durante l'aggiornamento del heartbeat/lock: {e}")
@@ -258,13 +263,20 @@ class BaseOrchestrator(ABC):
         print("=====================================================\n")
 
         ServiceRegistry.register_orchestrator(self.orchestrator_name)
+        def _handle_sigterm(signum, frame):
+            raise KeyboardInterrupt()
 
+        signal.signal(signal.SIGTERM, _handle_sigterm)
         is_leader = False
         
         self.hb_thread = None
-
+        leadership_lost_event = threading.Event()
         try:
             while True:
+                if leadership_lost_event.is_set():
+                    print(f"[{self.orchestrator_name}] [DOWNGRADE] Rientro in standby, riprovo l'acquisizione.")
+                    is_leader = False
+                    leadership_lost_event.clear()
                 if not is_leader:
                     is_leader = self._try_acquire_leadership()
                     if not is_leader:
@@ -275,7 +287,7 @@ class BaseOrchestrator(ABC):
                         print(f"\n[{self.orchestrator_name}] [ACTIVE] !!! LEADERSHIP ACQUISITA !!!")
                         print(f"[{self.orchestrator_name}] Avvio dell'heartbeat thread e attivazione del polling sulla coda: '{self.queue_name}'\n")
                         # Avviamo il thread di heartbeat SOLO dopo aver conquistato la leadership
-                        self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,), daemon=True)
+                        self.hb_thread = threading.Thread(target=self._heartbeat_loop, args=(self._stop_heartbeat,leadership_lost_event), daemon=True)
                         self.hb_thread.start()
 
                         try:
@@ -432,6 +444,10 @@ class BaseOrchestrator(ABC):
             
                 t_dist = time.perf_counter() - start_dist 
                 self.state_manager.complete_request(job_id=job_id, orchestrator_id=self.orchestrator_name)
+                try:
+                    self.state_manager.release_job_lease(job_id, self.orchestrator_name)
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [WARN] Impossibile rilasciare la job lease per {job_id[:8]}: {e}")
                 if receipt_handle:
                     self.sqs_queue.delete_message(receipt_handle)
                 self._clean_checkpoint(job_id)
@@ -453,6 +469,10 @@ class BaseOrchestrator(ABC):
                     base_random_state=base_random_state,
                     alberi_addestrati=current_alberi
                 )
+                try:
+                    self.state_manager.release_job_lease(job_id, self.orchestrator_name)
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [WARN] Impossibile rilasciare la job lease per {job_id[:8]}: {e}")
         finally:
             # Segnaliamo al thread di heartbeat di terminare
             stop_visibility.set()
