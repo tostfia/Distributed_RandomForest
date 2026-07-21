@@ -288,7 +288,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             except Exception:
                                 pass
             threads = []
-            for i, worker_name in enumerate(worker_names):
+            for i, worker_name in enumerate(worker_names, start=1):
                 t = threading.Thread(target=contact_worker, args=(worker_name, i))
                 threads.append(t)
                 t.start()
@@ -419,7 +419,7 @@ class FederatedOrchestrator(BaseOrchestrator):
  
         rpc_start_time = time.perf_counter()
         threads = []
-        for idx, name in enumerate(worker_names):
+        for idx, name in enumerate(worker_names, start=1):
             t = threading.Thread(target=validate_worker, args=(name, idx))
             t.start()
             threads.append(t)
