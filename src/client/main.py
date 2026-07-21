@@ -8,6 +8,11 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
+import requests
+import shutil
+
+
+
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -241,64 +246,296 @@ def handle_inference():
     return
 
 
+def download_model(job_id: str) -> None:
+    """
+    Esporta localmente il modello addestrato associato al Job ID.
+
+    In ambiente locale copia il modello dalla cartella saved_models.
+    In ambiente AWS scarica il modello dal bucket S3 configurato.
+    """
+    model_filename = f"model_{job_id}.pkl"
+
+    training_entry = next(
+        (
+            entry
+            for entry in load_history()
+            if entry.get("type") == "training"
+            and entry.get("id") == job_id
+        ),
+        None,
+    )
+
+    training_mode = (
+        training_entry.get("mode")
+        if training_entry and training_entry.get("mode")
+        else cfg.mode
+    )
+
+    print(
+        f"[INFO] Modalità del modello utilizzata per il download: "
+        f"{training_mode.upper()}"
+    )
+
+    default_destination = os.path.join(
+        "./downloads",
+        model_filename,
+    )
+
+    destination_path = get_input(
+        f"Percorso di destinazione "
+        f"[Default: {default_destination}]: ",
+        default_destination,
+    ).strip()
+
+    destination_path = os.path.expanduser(destination_path)
+    destination_directory = os.path.dirname(destination_path) or "."
+    os.makedirs(destination_directory, exist_ok=True)
+
+    if cfg.env == "local":
+        saved_models_path = os.path.join(
+            "./saved_models",
+            model_filename,
+        )
+
+        root_path = os.path.join(
+            ".",
+            model_filename,
+        )
+
+        if os.path.exists(saved_models_path):
+            source_path = saved_models_path
+        elif os.path.exists(root_path):
+            source_path = root_path
+        else:
+            raise FileNotFoundError(
+                f"Il modello locale non è stato trovato né in "
+                f"'{saved_models_path}' né in '{root_path}'."
+            )
+
+        if os.path.abspath(source_path) == os.path.abspath(
+            destination_path
+        ):
+            print(
+                f"\n[INFO] Il modello si trova già nel percorso "
+                f"richiesto: '{destination_path}'"
+            )
+            return
+
+        shutil.copy2(source_path, destination_path)
+
+    elif cfg.env == "aws":
+        import boto3
+        from botocore.exceptions import ClientError
+
+        bucket_name = cfg.s3_bucket_name
+
+        if not bucket_name:
+            raise ValueError(
+                "DATASETS_BUCKET_NAME non è configurato "
+                "per l'ambiente AWS."
+            )
+
+        model_key = (
+            f"saved_models/{training_mode}/"
+            f"{model_filename}"
+        )
+
+        print(
+            f"[INFO] Download da "
+            f"s3://{bucket_name}/{model_key}"
+        )
+
+        s3_client = boto3.client(
+            "s3",
+            region_name=cfg.aws_region,
+        )
+
+        try:
+            s3_client.download_file(
+                bucket_name,
+                model_key,
+                destination_path,
+            )
+        except ClientError as exc:
+            error_code = (
+                exc.response
+                .get("Error", {})
+                .get("Code", "")
+            )
+
+            if error_code in (
+                "404",
+                "NoSuchKey",
+                "NotFound",
+            ):
+                raise FileNotFoundError(
+                    f"Il modello non è presente in "
+                    f"s3://{bucket_name}/{model_key}"
+                ) from exc
+
+            raise
+
+    else:
+        raise ValueError(
+            f"Ambiente '{cfg.env}' non supportato."
+        )
+
+    file_size = os.path.getsize(destination_path)
+
+    print(
+        f"\n[OK] Modello scaricato correttamente in: "
+        f"'{destination_path}'"
+    )
+    print(f"[INFO] Dimensione del file: {file_size} byte")
+    print(
+        "[ATTENZIONE] I file Pickle devono essere caricati "
+        "esclusivamente se provengono da fonti attendibili."
+    )
+
 def handle_model_request():
     print("\n=== RICHIESTA E VERIFICA STATO MODELLO ===")
-    job_id = get_input("Inserisci il Job ID del modello da verificare: ").strip()
-    
+
+    job_id = get_input(
+        "Inserisci il Job ID del modello da verificare: "
+    ).strip()
+
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
 
-    print(f"[INFO] Interrogazione dello Stato per il Job {job_id} in corso...")
+    print(
+        f"[INFO] Interrogazione dello Stato per il Job "
+        f"{job_id} in corso..."
+    )
 
     try:
         # 1. Interroghiamo lo StateManager per capire lo stato nel cluster locale
         job_status = state_manager.get_job_status(job_id)
-        
+
         if not job_status:
-            print(f"\n[ATTENZIONE] Nessun record trovato nel database per il Job ID '{job_id}'.")
-            print("[INFO] Verifica che l'ID sia corretto o che l'addestramento sia effettivamente partito.")
+            print(
+                f"\n[ATTENZIONE] Nessun record trovato nel "
+                f"database per il Job ID '{job_id}'."
+            )
+            print(
+                "[INFO] Verifica che l'ID sia corretto o che "
+                "l'addestramento sia effettivamente partito."
+            )
             return
 
-        print(f"  • Stato attuale nel Cluster: {job_status.upper()}")
-
+        print(
+            f"  • Stato attuale nel Cluster: "
+            f"{job_status.upper()}"
+        )
+        
         # 2. Gestione basata sullo stato del ciclo di vita del job
         if job_status.upper() == "QUEUED":
-            print(f"\n[IN CODA] Il Job {job_id} è attualmente in coda su SQS.")
-            print("[INFO] Il messaggio è in attesa che l'Orchestratore lo prenda in carico.")
+            print(
+                f"\n[IN CODA] Il Job {job_id} è attualmente "
+                "in coda su SQS."
+            )
+            print(
+                "[INFO] Il messaggio è in attesa che "
+                "l'Orchestratore lo prenda in carico."
+            )
             return
 
         elif job_status.upper() == "PROCESSING":
-            print(f"\n[IN CORSO] Il modello {job_id} è in fase di addestramento distribuito. ")
-            print("[INFO] L'Orchestratore sta coordinando i calcoli paralleli sui nodi Worker via RPC.")
+            print(
+                f"\n[IN CORSO] Il modello {job_id} è in fase "
+                "di addestramento distribuito."
+            )
+            print(
+                "[INFO] L'Orchestratore sta coordinando i "
+                "calcoli paralleli sui nodi Worker via RPC."
+            )
             return
 
         elif job_status.upper() == "FAILED":
-            print(f"\n[FALLITO] L'addestramento per il Job {job_id} è fallito.")
-            print("[INFO] Il sistema di failover ha intercettato un errore infrastrutturale o applicativo.")
+            print(
+                f"\n[FALLITO] L'addestramento per il Job "
+                f"{job_id} è fallito."
+            )
+            print(
+                "[INFO] Il sistema di failover ha intercettato "
+                "un errore infrastrutturale o applicativo."
+            )
             return
 
         elif job_status.upper() == "COMPLETED":
-            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id} è terminato con successo! ")
-            
+            print(
+                f"\n[COMPLETATO] L'addestramento per il Job "
+                f"{job_id} è terminato con successo!"
+            )
+
             model_filename = f"model_{job_id}.pkl"
-            model_path = os.path.join("./saved_models", model_filename)
+            model_path = os.path.join(
+                "./saved_models",
+                model_filename,
+            )
             
             # 3. Controllo di persistenza fisica (Solo per ambiente LOCAL)
             if cfg.env == "local":
                 if os.path.exists(model_path):
-                    print(f"[OK] File binario del modello rilevato in: '{model_path}'")
-                    print("[INFO] Il modello è valido e pronto al 100% per ricevere richieste di inferenza.")
+                    print(
+                        f"[OK] File binario del modello rilevato "
+                        f"in: '{model_path}'"
+                    )
+                    print(
+                        "[INFO] Il modello è pronto per ricevere "
+                        "richieste di inferenza."
+                    )
+
                 elif os.path.exists(model_filename):
-                    print(f"[OK] File binario del modello rilevato nella root: '{model_filename}'")
+                    print(
+                        f"[OK] File binario del modello rilevato "
+                        f"nella root: '{model_filename}'"
+                    )
+
                 else:
-                    print(f"\n[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato in '{model_path}'.")
-            
+                    print(
+                        f"\n[ATTENZIONE] Il DB dichiara "
+                        f"'COMPLETED', ma il file binario "
+                        f"'{model_filename}' non è stato trovato "
+                        f"in '{model_path}'."
+                    )
+                    return
+
             elif cfg.env == "aws":
-                print(f"[INFO] In ambiente AWS, il file si assume caricato e pronto sul bucket S3.")
-                
+                print(
+                    "[INFO] Il modello risulta completato. "
+                    "La presenza su S3 sarà verificata durante "
+                    "il download."
+                )
+
+            download_choice = get_input(
+                "\nVuoi scaricare/esportare il modello? "
+                "(S/N) [Default: N]: ",
+                "N",
+            ).strip()
+
+            if download_choice.upper() == "S":
+                try:
+                    download_model(job_id)
+                except Exception as download_error:
+                    print(
+                        f"\n[ERRORE DOWNLOAD] Impossibile "
+                        f"scaricare il modello: {download_error}"
+                    )
+
+            return
+
+        else:
+            print(
+                f"\n[ATTENZIONE] Stato del job non riconosciuto: "
+                f"'{job_status}'."
+            )
+
     except Exception as e:
-        print(f"\n[ERRORE] Impossibile recuperare lo stato dal database: {e}")
+        print(
+            f"\n[ERRORE] Impossibile recuperare lo stato "
+            f"dal database: {e}"
+        )
 
     return
 
