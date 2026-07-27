@@ -58,13 +58,11 @@ class AwsSQSQueue(SQSQueueInterface):
 
         queue_url = self._resolve_queue_url(queue_name)
         
-        deduplication_id = str(uuid.uuid4())
-        
         # Assegnazione dinamica del Group ID in base alla coda di destinazione
         if "federated" in queue_name:
             group_id = "ML-Federated-Group"
         else:
-            group_id = "ML-Training-Group"
+            group_id = "ML-Centralized-Group"
 
         send_params = {
             "QueueUrl": queue_url,

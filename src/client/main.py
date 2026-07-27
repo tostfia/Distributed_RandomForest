@@ -8,10 +8,6 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
-import requests
-
-
-
 
 # 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
@@ -214,7 +210,7 @@ def handle_inference():
         return
 
     # 5. Instradamento sulla coda corretta
-    target_queue = "federated_queue" if cfg.mode == "federated" else "centralized_queue"
+    target_queue = "federated_queue.fifo" if cfg.mode == "federated" else "centralized_queue.fifo"
 
     try:
         # Inviamo il model_dump() serializzato sulla coda corretta
@@ -330,13 +326,12 @@ def handle_training():
     else:
         dataset_type = "real"
         
-        # 1. Recuperiamo l'URL dal .env (se configurato) o usiamo la stringa come fallback
-        s3_public_url = os.getenv("DEFAULT_DATASET_S3_URL", "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/")
+        bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+        default_s3_url = f"s3://{bucket_name}/real/WorldDataset.csv"
         
         # 2. CONTROLLO DINAMICO: Determiniamo il valore di default in base all'ambiente
         if environment.lower() == "aws":
             # Se siamo su AWS, proponiamo l'URL S3 direttamente come default preimpostato
-            default_s3_url = s3_public_url
             prompt_message = f"    Inserisci l'URL S3.\n [Default: {default_s3_url}]: \n    --> "
         else:
             # Se siamo in locale, puoi lasciare il comportamento classico o un default locale
@@ -412,7 +407,7 @@ def handle_training():
         print(f"Impossibile salvare 'config.json' in locale: {e}")
 
     # 6. Invio del pacchetto e gestione dello stato
-    target_queue = "federated_queue" if request.mode == "federated" else "centralized_queue"
+    target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
     
     try:
         state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
