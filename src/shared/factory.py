@@ -3,8 +3,8 @@ from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterf
 from src.shared.mock_aws.sqs.sqs_gateway import LambdaGatewaySQSQueue
 from src.shared.mock_aws.statemanager.awsstatemanager import AwsStateManager
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
-from src.shared.mock_aws.sqs.sqs import sqs_queue
-from src.shared.mock_aws.statemanager.statemanager import state_manager
+from src.shared.mock_aws.sqs.sqs import MockSQSQueue
+from src.shared.mock_aws.statemanager.statemanager import MockStateManager
 
 def get_aws_services(environment: str, role: str = "worker") -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
@@ -29,14 +29,14 @@ def get_aws_services(environment: str, role: str = "worker") -> tuple[SQSQueueIn
                 print("[FACTORY] Inizializzazione worker/orchestratore AWS (Boto3 diretto su SQS)...")
                 queue = AwsSQSQueue()
             return queue, AwsStateManager()
-        except ImportError as e:
+        except Exception as e:
             print(f"\n[FACTORY] [FALLBACK] {e}")
             print("[FACTORY] Deviazione automatica sui Mock persistenti del File System...\n")
-            return sqs_queue, state_manager
+            return MockSQSQueue(), MockStateManager()
     else:
         # Ambiente locale: usiamo direttamente le istanze dei mock JSON persistenti
         print("[FACTORY] Modalità LOCAL attiva: caricamento dei Mock basati su File JSON.")
-        return sqs_queue, state_manager
+        return MockSQSQueue(), MockStateManager()
 
 
 class DatasetDAOFactory:

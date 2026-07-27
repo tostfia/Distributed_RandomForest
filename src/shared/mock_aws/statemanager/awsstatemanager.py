@@ -1,8 +1,5 @@
 import time
 from typing import Optional
-
-from aiohttp import ClientError
-
 from src.shared.mock_aws.interfaces import StateManagerInterface
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 from src.shared.config import SystemConfig
@@ -96,9 +93,14 @@ class AwsStateManager(StateManagerInterface):
         self._db.put_item(WORKER_TASKS_TABLE, task_id, current_item)
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
-        response = self._db.scan_table(WORKER_TASKS_TABLE)
-        all_tasks = response.get("Items", [])
-        job_tasks = [t for t in all_tasks if t.get("job_id") == job_id]
+        # Usiamo la query usando il GSI 'job_id-index'
+        response = self._db.query_table(
+            table_name="WorkerTasks",
+            index_name="job_id-index",
+            key_condition={"job_id": job_id}
+        )
+        
+        job_tasks = response.get("Items", [])
         completed_tasks = [t for t in job_tasks if t.get("status") == "COMPLETED"]
         return len(completed_tasks) == expected_count
 

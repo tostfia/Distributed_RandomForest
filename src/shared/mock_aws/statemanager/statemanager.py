@@ -108,17 +108,16 @@ class MockStateManager(StateManagerInterface):
             return item.get("status")
         return None
 
-    # --- Simulazione Lock per Ambiente Locale ---
+    # In MockStateManager:
     def acquire_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
-        print(f"[Mock StateManager] Lock globale '{lock_key}' acquisito localmente da {owner}")
-        return True
+        return dynamo_db.try_acquire_lock("OrchestratorLocks", lock_key, owner, ttl)
 
     def refresh_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
-        return True
+        return dynamo_db.refresh_lock("OrchestratorLocks", lock_key, owner, ttl)
 
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
-        print(f"[Mock StateManager] Lock globale '{lock_key}' rilasciato localmente da {owner}")
-        return True
+        return dynamo_db.release_lock("OrchestratorLocks", lock_key, owner)
+    
     def try_claim_job(self, job_id: str, orchestrator_id: str, lease_seconds: int = 300) -> bool:
         """
         Reclama (o rinnova) il possesso esclusivo del job. Ritorna True solo se
@@ -138,5 +137,3 @@ class MockStateManager(StateManagerInterface):
     def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
         """Rilascia volontariamente la lease (job completato o fallito in modo pulito)."""
         return dynamo_db.release_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id)
-
-state_manager = MockStateManager()
