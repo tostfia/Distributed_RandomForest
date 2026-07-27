@@ -25,12 +25,11 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
-            "timestamp": time.time(),
+            "timestamp": int(time.time()),  # Cast a int per DynamoDB
             "retries": 0,
             "last_orchestrator": None,
             "alberi_addestrati": 0,
             "base_random_state": seed,
-          
         }
         self._db.put_item(JOBS_TABLE, job_id, payload)
         print(f"[AWS StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
@@ -53,7 +52,7 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": status,
             "dataset_path": current_item.get("dataset_path"),
-            "timestamp": time.time(),
+            "timestamp": int(time.time()),  # Cast a int per DynamoDB
             "retries": retries,
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,
@@ -67,7 +66,7 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": "COMPLETED",
             "dataset_path": current_item.get("dataset_path"),
-            "timestamp": time.time(),
+            "timestamp": int(time.time()),  # Cast a int per DynamoDB
             "retries": current_item.get("retries", 0),
             "last_orchestrator": orchestrator_id,
             "base_random_state": current_item.get("base_random_state"),
@@ -80,22 +79,21 @@ class AwsStateManager(StateManagerInterface):
         task_id = f"{job_id}#{worker_id}"
         payload = {
             "status": status,
-            "timestamp": time.time(),
+            "timestamp": int(time.time()),  # Cast a int per DynamoDB
             "job_id": job_id,
-            "worker_id": worker_id,
+            "worker_name": worker_id,  # Allineato all'AttributeDefinition su AWS
         }
         self._db.put_item(WORKER_TASKS_TABLE, task_id, payload)
 
     def update_worker_task_status(self, job_id: str, worker_id: str, status: str) -> None:
         task_id = f"{job_id}#{worker_id}"
         current_item = self._unwrap(self._db.get_item(WORKER_TASKS_TABLE, task_id))
-        current_item.update({"status": status, "timestamp": time.time()})
+        current_item.update({"status": status, "timestamp": int(time.time())})
         self._db.put_item(WORKER_TASKS_TABLE, task_id, current_item)
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
-        # Usiamo la query usando il GSI 'job_id-index'
         response = self._db.query_table(
-            table_name="WorkerTasks",
+            table_name=WORKER_TASKS_TABLE,
             index_name="job_id-index",
             key_condition={"job_id": job_id}
         )
@@ -121,13 +119,10 @@ class AwsStateManager(StateManagerInterface):
 
     def release_global_lock(self, lock_key: str, owner: str) -> bool:
         return self._db.release_lock(LOCKS_TABLE, lock_key, owner)
-    
 
     def try_claim_job(self, job_id: str, orchestrator_id: str, lease_seconds: int = 300) -> bool:
         claimed = self._db.try_acquire_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
         if not claimed:
-            # Se il lock esiste ma è già nostro, try_acquire_lock fallisce
-            # (perché non è scaduto): il rinnovo passa da refresh_lock.
             claimed = self._db.refresh_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
  
         if not claimed:
@@ -135,9 +130,6 @@ class AwsStateManager(StateManagerInterface):
         return claimed
     
     def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
-        """Rilascia volontariamente la lease (job completato o fallito in modo pulito).
-        Speculare al metodo equivalente di MockStateManager, per mantenere identica
-        l'interfaccia tra i due ambienti."""
         released = self._db.release_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id)
         if released:
             print(f"[AWS StateManager] Lease rilasciata per Job ID: {job_id[:8]}... da {orchestrator_id}")
