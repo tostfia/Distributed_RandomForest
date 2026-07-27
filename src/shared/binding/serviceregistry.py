@@ -1,11 +1,9 @@
 import os
 import time
 from typing import Dict, Any
-import boto3
 
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 from src.shared.config import SystemConfig
-from src.shared.mock_aws.dynamodb.dynamodb import dynamo_db as mock_dynamodb
 
 cfg = SystemConfig()
 

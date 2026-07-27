@@ -5,13 +5,54 @@ set -e
 # DEPLOY: Random Forest Distribuito su ECS Fargate (AWS Academy Learner Lab)
 # =====================================================================
 # Prerequisiti:
-#   - AWS CLI configurato con le credenziali del Learner Lab (~/.aws/credentials)
+#   - File .env presente nella root con le credenziali AWS aggiornate
 #   - Docker funzionante (docker --version)
 #   - Da lanciare dalla root del progetto (dove sta il Dockerfile)
 # =====================================================================
 
-# ---------------------- VARIABILI DA CONTROLLARE UNA VOLTA -----------
-REGION="us-east-1"
+# ---------------------------------------------------------------------
+# [SETUP ENV-FIRST] Lettura e sincronizzazione dinamica da file .env
+# ---------------------------------------------------------------------
+
+ENV_FILE=".env"
+
+if [ -f "$ENV_FILE" ]; then
+  echo "==> [PRE-CHECK] Caricamento configurazioni e credenziali da $ENV_FILE..."
+  
+  # Funzione helper per estrarre il valore di una chiave ignorando spazi attorno all'uguale e virgolette
+  get_env_var() {
+    local key="$1"
+    grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE" | cut -d '=' -f 2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+  }
+
+  # 1. Caricamento Credenziali AWS
+  ENV_AWS_KEY=$(get_env_var "AWS_ACCESS_KEY_ID")
+  ENV_AWS_SECRET=$(get_env_var "AWS_SECRET_ACCESS_KEY")
+  ENV_AWS_TOKEN=$(get_env_var "AWS_SESSION_TOKEN")
+  ENV_AWS_REGION=$(get_env_var "AWS_DEFAULT_REGION")
+
+  if [ -n "$ENV_AWS_KEY" ]; then export AWS_ACCESS_KEY_ID="$ENV_AWS_KEY"; fi
+  if [ -n "$ENV_AWS_SECRET" ]; then export AWS_SECRET_ACCESS_KEY="$ENV_AWS_SECRET"; fi
+  if [ -n "$ENV_AWS_TOKEN" ]; then export AWS_SESSION_TOKEN="$ENV_AWS_TOKEN"; fi
+  if [ -n "$ENV_AWS_REGION" ]; then export AWS_DEFAULT_REGION="$ENV_AWS_REGION"; fi
+
+  # 2. Caricamento Modalità di Training e Bucket S3
+  ENV_SYS_MODE=$(get_env_var "SYS_MODE")
+  ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
+  ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
+
+  # Priorità per la modalità: parametro $1 > SYS_MODE > TRAINING_MODE > default "centralized"
+  DETECTED_MODE="${1:-${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}}"
+  DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+  DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
+else
+  echo "==> [ATTENZIONE] File $ENV_FILE non trovato. Uso parametri di fallback."
+  DETECTED_MODE="${1:-centralized}"
+  DETECTED_REGION="us-east-1"
+  DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
+fi
+
+REGION="$DETECTED_REGION"
 CLUSTER_NAME="forest-cluster"
 REPO_NAME="rf-distributed"
 SG_NAME="rf-distributed-sg"
@@ -25,7 +66,8 @@ WORKER_MEMORY=2048
 ORCH_CPU=2048
 ORCH_MEMORY=4096
 
-BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
+BUCKET_NAME="$DETECTED_BUCKET"
+TRAINING_MODE="$DETECTED_MODE"
 
 # TRAINING_MODE: parametrizzabile.
 # Uso: ./deploy.sh                -> usa il default sotto (centralized)
@@ -37,7 +79,11 @@ if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; t
   echo "ERRORE: TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
   exit 1
 fi
-# -----------------------------------------------------------------------
+
+echo "    [ENV CONFIG] REGION        : $REGION"
+echo "    [ENV CONFIG] TRAINING_MODE : $TRAINING_MODE"
+echo "    [ENV CONFIG] BUCKET_NAME   : $BUCKET_NAME"
+echo "-----------------------------------------------------------------------"
 
 echo "==> [0/10] Controllo di sicurezza: .env non deve finire nell'immagine..."
 if [ -f ".env" ] && [ ! -f ".dockerignore" ] || ( [ -f ".env" ] && ! grep -qxF ".env" .dockerignore 2>/dev/null ); then
@@ -274,6 +320,8 @@ echo "========================================================================"
 echo " DEPLOY COMPLETATO"
 echo "========================================================================"
 echo " Training mode:  $TRAINING_MODE"
+echo " Region:         $REGION"
+echo " Bucket S3:      $BUCKET_NAME"
 echo " Cluster:        $CLUSTER_NAME"
 echo " Security Group: $SG_ID"
 echo " Subnet usate:   $SUBNET_1, $SUBNET_2"
