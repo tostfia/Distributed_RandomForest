@@ -32,6 +32,6 @@ class DynamoDBFactory:
             return cls._aws_instance
 
         if cls._mock_instance is None:
-            from src.shared.mock_aws.dynamodb.dynamodb import dynamo_db
+            from Distributed_RandomForest.src.shared.mock_aws.dynamodb.dynamodb_mock import dynamo_db
             cls._mock_instance = dynamo_db
         return cls._mock_instance
