@@ -27,7 +27,7 @@ class LambdaGatewaySQSQueue(SQSQueueInterface):
             )
         self.base_url = url.rstrip("/")
 
-    def send_message(self, queue_name: str, message_dict: dict) -> None:
+    def send_message(self, queue_name: str, message_dict: dict, **kwargs) -> dict:
         path = "federated" if "federated" in queue_name else "centralized"
         url = f"{self.base_url}/jobs/{path}"
 
