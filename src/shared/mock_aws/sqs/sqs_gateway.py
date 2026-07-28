@@ -37,7 +37,7 @@ class LambdaGatewaySQSQueue(SQSQueueInterface):
         body = response.json()
         return {"MessageId": body.get("message_id"), "job_id": body.get("job_id")}
 
-    def receive_message(self, queue_name: str, visibility_timeout: int = 30) -> Optional[dict]:
+    def receive_message(self, queue_name: str, visibility_timeout: int = 300) -> Optional[dict]:
         raise NotImplementedError(
             "LambdaGatewaySQSQueue è un client 'solo invio' (producer) che passa da "
             "API Gateway. Il consumo dei messaggi va fatto con AwsSQSQueue lato "
