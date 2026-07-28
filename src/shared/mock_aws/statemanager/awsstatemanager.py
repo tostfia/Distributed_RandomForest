@@ -25,7 +25,7 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
-            "timestamp": int(time.time()),  # Cast a int per DynamoDB
+            "timestamp": int(time.time()),
             "retries": 0,
             "last_orchestrator": None,
             "alberi_addestrati": 0,
@@ -52,7 +52,7 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": status,
             "dataset_path": current_item.get("dataset_path"),
-            "timestamp": int(time.time()),  # Cast a int per DynamoDB
+            "timestamp": int(time.time()),
             "retries": retries,
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,
@@ -66,7 +66,7 @@ class AwsStateManager(StateManagerInterface):
         payload = {
             "status": "COMPLETED",
             "dataset_path": current_item.get("dataset_path"),
-            "timestamp": int(time.time()),  # Cast a int per DynamoDB
+            "timestamp": int(time.time()),
             "retries": current_item.get("retries", 0),
             "last_orchestrator": orchestrator_id,
             "base_random_state": current_item.get("base_random_state"),
@@ -79,9 +79,9 @@ class AwsStateManager(StateManagerInterface):
         task_id = f"{job_id}#{worker_id}"
         payload = {
             "status": status,
-            "timestamp": int(time.time()),  # Cast a int per DynamoDB
+            "timestamp": int(time.time()),
             "job_id": job_id,
-            "worker_name": worker_id,  # Allineato all'AttributeDefinition su AWS
+            "worker_name": worker_id,
         }
         self._db.put_item(WORKER_TASKS_TABLE, task_id, payload)
 

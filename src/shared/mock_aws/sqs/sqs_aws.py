@@ -3,7 +3,7 @@ Implementazione reale della coda tramite Amazon SQS (boto3).
 
 Espone la STESSA interfaccia pubblica di MockSQSQueue (sqs.py):
     - send_message(queue_name, message_dict) -> None
-    - receive_message(queue_name, visibility_timeout=30) -> {"Body": dict, "ReceiptHandle": str} | None
+    - receive_message(queue_name, visibility_timeout=300) -> {"Body": dict, "ReceiptHandle": str} | None
     - delete_message(receipt_handle) -> bool
     - change_message_visibility(queue_name, receipt_handle, visibility_timeout) -> bool
 
@@ -80,7 +80,7 @@ class AwsSQSQueue(SQSQueueInterface):
         print(f"[AWS SQS] {log_tipo_coda} Messaggio inviato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
         
        
-    def receive_message(self, queue_name: str, visibility_timeout: int = 30) -> Optional[dict]:
+    def receive_message(self, queue_name: str, visibility_timeout: int = 300) -> Optional[dict]:
         queue_url = self._resolve_queue_url(queue_name)
 
         response = self._client.receive_message(
