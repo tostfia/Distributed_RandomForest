@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import time
+import boto3
+from botocore.exceptions import ClientError
 from datetime import datetime
 from src.testing.engine import TestEngine
 from src.shared.config import SystemConfig
@@ -324,8 +326,6 @@ def download_model(job_id: str) -> None:
         shutil.copy2(source_path, destination_path)
 
     elif cfg.env == "aws":
-        import boto3
-        from botocore.exceptions import ClientError
 
         bucket_name = cfg.s3_bucket_name
 
@@ -340,14 +340,25 @@ def download_model(job_id: str) -> None:
             f"{model_filename}"
         )
 
-        print(
-            f"[INFO] Download da "
-            f"s3://{bucket_name}/{model_key}"
-        )
 
         s3_client = boto3.client(
             "s3",
             region_name=cfg.aws_region,
+        )
+
+        try:
+            presigned_url = s3_client.generate_presigned_url(
+                ClientMethod='get_object',
+                Params={'Bucket': bucket_name, 'Key': model_key},
+                ExpiresIn=3600  # Valido per 1 ora (3600 secondi)
+            )
+            print(f"\n[OK] LINK S3 PER DOWNLOAD DIRETTO VIA BROWSER (valido 1 ora):\n{presigned_url}\n")
+        except ClientError as e:
+            print(f"[ATTENZIONE] Impossibile generare il Presigned URL: {e}")
+
+        print(
+            f"[INFO] Download da "
+            f"s3://{bucket_name}/{model_key}"
         )
 
         try:
@@ -764,7 +775,7 @@ def main():
         print("\n--- MENÙ OPERAZIONI ---")
         print("[1] Avvia processo di addestramento distribuito")
         print("[2] Avvia processo di inferenza distribuito")
-        print("[3] Verifica stato modello")
+        print("[3] Verifica stato modello e download (Pickle)")
         print("[4] Esegui Baseline Locale")
         print("[5] Visualizza storico delle richieste")
         print("[6] Torna al menù precedente")
