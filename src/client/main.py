@@ -657,10 +657,22 @@ def handle_training():
     # 6. Invio del pacchetto e gestione dello stato
     target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
     
+    # 6. Invio del pacchetto e gestione dello stato
+    target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
+    
     try:
-        state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
+        # In locale il client scrive direttamente su DB. 
+        # Su AWS deleghiamo la scrittura alla Lambda tramite API Gateway!
+        if cfg.env == "local":
+            state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
+        
+        # In AWS questo usa LambdaGatewaySQSQueue che fa una POST HTTP ad API Gateway
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
-        print(f"[CLIENT] Richiesta {request.job_id}... inoltrata con successo alla coda '{target_queue}'!")
+        
+        if cfg.env == "aws":
+            print(f"[CLIENT] Richiesta {request.job_id[:8]}... inviata con successo via HTTP ad API Gateway!")
+        else:
+            print(f"[CLIENT] Richiesta {request.job_id[:8]}... inoltrata con successo alla coda '{target_queue}'!")
 
         append_history_entry({
             "type": "training",
