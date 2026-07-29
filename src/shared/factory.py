@@ -3,8 +3,8 @@ from src.shared.mock_aws.interfaces import SQSQueueInterface, StateManagerInterf
 from src.shared.mock_aws.sqs.sqs_gateway import LambdaGatewaySQSQueue
 from src.shared.mock_aws.statemanager.awsstatemanager import AwsStateManager
 from src.dataset.dataset_dao import DatasetDAO, LocalFileSystemDAO, AwsS3DAO
-from Distributed_RandomForest.src.shared.mock_aws.sqs.sqs_mock import MockSQSQueue
-from Distributed_RandomForest.src.shared.mock_aws.statemanager.localstatemanager import MockStateManager
+from src.shared.mock_aws.sqs.sqs_mock import MockSQSQueue
+from src.shared.mock_aws.statemanager.localstatemanager import MockStateManager
 
 def get_aws_services(environment: str, role: str = "worker") -> tuple[SQSQueueInterface, StateManagerInterface]:
     """
