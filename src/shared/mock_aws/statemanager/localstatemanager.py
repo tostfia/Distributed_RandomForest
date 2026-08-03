@@ -1,7 +1,7 @@
 import threading
 import time
 from typing import Optional
-from Distributed_RandomForest.src.shared.mock_aws.dynamodb.dynamodb_mock import dynamo_db
+from src.shared.mock_aws.dynamodb.dynamodb_mock import dynamo_db
 from src.shared.mock_aws.interfaces import StateManagerInterface
 
 TABLE_NAME = "ModelStatus"
