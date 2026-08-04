@@ -49,7 +49,12 @@ def handle_status(path_params: dict) -> dict:
 def handle_submit(event: dict, path_params: dict) -> dict:
     """Gestisce POST /jobs/{mode} (mode = centralized | federated)."""
     body = json.loads(event.get('body') or '{}')
-    mode = path_params.get('mode', 'centralized')
+    route_key = event.get('routeKey', '') or event.get('rawPath', '') or event.get('path', '')
+
+    if 'federated' in route_key.lower():
+        mode = 'federated'
+    else:
+        mode = 'centralized'
 
     job_id = body.get('job_id') or str(uuid.uuid4())
     body['job_id'] = job_id
