@@ -155,7 +155,7 @@ class RawCSVDataLoader(DatasetLoader):
                     df_temp.to_csv(local_cache_path, index=False)
 
             # 5. Campionamento in memoria (sostituisce il vecchio skip_logic basato su skiprows,
-            #    che comunque non risparmiava banda perché il download avveniva per intero)
+            
             if self.sample_fraction < 1.0:
                 df_temp = df_temp.sample(frac=self.sample_fraction, random_state=self.dataset_seed)
 
