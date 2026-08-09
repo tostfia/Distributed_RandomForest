@@ -4,6 +4,8 @@ import boto3
 from botocore.exceptions import ClientError
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+
 class FederatedDataSplitter:
 
     def __init__(self, target_column="Label", test_size=0.20, random_state=123):
@@ -65,8 +67,8 @@ class FederatedDataSplitter:
         elif environment == "aws":
             # --- SCENARIO CLOUD AWS (Storage ad Oggetti S3) ---
             if not bucket_name:
-                bucket_name = "my-cluster-datasets-bucket"
-                
+                bucket_name = BUCKET_NAME
+
             s3_client = boto3.client('s3')
             print(f"[Splitter AWS] Connessione a S3 effettuata. Upload degli shard nel bucket '{bucket_name}'...")
             

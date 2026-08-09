@@ -7,8 +7,11 @@ import socket
 import threading
 import time
 import traceback
+from aiohttp import ClientError
+import boto3
 import rpyc
 import numpy as np
+import re
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -96,10 +99,62 @@ class FederatedOrchestrator(BaseOrchestrator):
             finally:
                 fcntl.flock(mutex, fcntl.LOCK_UN)
 
+    def _ensure_aws_bootstrap(self, payload: dict):
+        """
+        Esegue il bootstrap degli shard su S3 se siamo in ambiente 'aws'.
+        Simmetrico a _ensure_local_bootstrap: usa FederatedDataSplitter con
+        environment="aws", che carica direttamente gli shard in RAM su S3
+        (nessun file temporaneo su disco), nel path che federatedWorker.py
+        si aspetta di trovare in _load_and_preprocess_real_shard:
+            s3://{BUCKET_NAME}/federated_shards/worker_{i}/{train,test}_shard.csv
+        Idempotente: se gli shard sono già su S3, salta la rigenerazione.
+        """
+        datasetype = self._resolve_dataset_type(payload)
+        if datasetype == "synthetic":
+            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Bootstrap S3 saltato "
+                  f"(delegato ai singoli worker).")
+            return
+ 
+        num_workers = self.num_workers
+        s3_client = boto3.client("s3")
+ 
+        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Verifica shard su S3 per {num_workers} worker...")
+        shards_esistenti = True
+        for i in range(1, num_workers + 1):
+            for fname in ("train_shard.csv", "test_shard.csv"):
+                key = f"federated_shards/worker_{i}/{fname}"
+                try:
+                    s3_client.head_object(Bucket=BUCKET_NAME, Key=key)
+                except ClientError:
+                    shards_esistenti = False
+                    break
+            if not shards_esistenti:
+                break
+ 
+        if shards_esistenti:
+            print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Shard già presenti su S3. Salto il ricalcolo.")
+            return
+ 
+        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Shard incompleti o assenti. Avvio Generazione...")
+        data_folder = getattr(self.cfg, "dataset_path", None) or "./data"
+        data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
+        splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
+        splitter.split_and_shard(data_loader, num_workers=num_workers, environment="aws", bucket_name=BUCKET_NAME)
+        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS OK] Shard reali distribuiti su S3.")
+        
     def _perform_active_recovery(self):
         """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
         
         super()._perform_active_recovery()
+
+    def _infer_worker_index(self, w_name: str, fallback_idx: int) -> int:
+        match = re.search(r"\d+", w_name)
+        if match:
+            return int(match.group())
+        print(f"[{self.orchestrator_name}] [WARN] Impossibile derivare un indice stabile dal nome "
+              f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}): lo shard assegnato "
+              f"potrebbe non corrispondere a quello reale del worker.")
+        return fallback_idx
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
@@ -118,8 +173,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment == "aws":
-            pass
-            
+            self._ensure_aws_bootstrap(payload)
         else:
             self._ensure_local_bootstrap(payload)
             os.makedirs("./.local_storage", exist_ok=True)
@@ -289,7 +343,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 pass
             threads = []
             for i, worker_name in enumerate(worker_names, start=1):
-                t = threading.Thread(target=contact_worker, args=(worker_name, i))
+                stable_idx = self._infer_worker_index(worker_name, i)
+                t = threading.Thread(target=contact_worker, args=(worker_name, stable_idx))
                 threads.append(t)
                 t.start()
  
@@ -420,7 +475,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names, start=1):
-            t = threading.Thread(target=validate_worker, args=(name, idx))
+            stable_idx = self._infer_worker_index(name,idx)
+            t = threading.Thread(target=validate_worker, args=(name, stable_idx))
             t.start()
             threads.append(t)
  

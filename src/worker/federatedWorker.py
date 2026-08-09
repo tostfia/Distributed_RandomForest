@@ -253,7 +253,7 @@ class FederatedWorker(BaseWorker):
         hyperparameters = obtain(hyperparameters)
 
         if self.environment == "aws":
-            bucket_name = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+            bucket_name = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
             s3_train_key = f"federated_shards/worker_{worker_index}/{train_filename}"
             s3_test_key = f"federated_shards/worker_{worker_index}/{test_filename}"
             
