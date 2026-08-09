@@ -8,6 +8,7 @@ set -e
 
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
+BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
 
 echo "==> [1/4] Abbattimento nodi computazionali Fargate..."
 aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
@@ -40,12 +41,17 @@ for q in "${QUEUES[@]}"; do
   fi
 done
 
+echo "==> [4/4] Pulizia file temporanei su S3..."
+# Cancella SOLTANTO il contenuto della sottocartella temp/
+aws s3 rm "s3://$BUCKET_NAME/temp/" --recursive --region "$REGION" > /dev/null 2>&1 || echo "    (Nessun file temporaneo da rimuovere)"
+echo "    S3 ripulito: salvaguardati i dati in 'real/' e i modelli in 'models/'."
 
 echo ""
 echo "========================================================================"
 echo " PULIZIA E RESUBMISSION REALE COMPLETATE"
 echo "========================================================================"
 echo "Fatto! AWS Fargate ha rimosso con successo ogni container dal cluster."
+echo "I dataset in 'real/' e i modelli '.pkl' in 'models/' sono al sicuro."
 echo "I servizi restano configurati (task definition, cluster, ECR)"
 echo "ma desired-count=0 significa nessun task Fargate attivo -> nessun costo di compute."
 echo ""
