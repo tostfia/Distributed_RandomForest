@@ -7,8 +7,11 @@ import socket
 import threading
 import time
 import traceback
+from aiohttp import ClientError
+import boto3
 import rpyc
 import numpy as np
+import re
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -143,6 +146,15 @@ class FederatedOrchestrator(BaseOrchestrator):
         """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
         
         super()._perform_active_recovery()
+
+    def _infer_worker_index(self, w_name: str, fallback_idx: int) -> int:
+        match = re.search(r"\d+", w_name)
+        if match:
+            return int(match.group())
+        print(f"[{self.orchestrator_name}] [WARN] Impossibile derivare un indice stabile dal nome "
+              f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}): lo shard assegnato "
+              f"potrebbe non corrispondere a quello reale del worker.")
+        return fallback_idx
 
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
@@ -331,7 +343,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 pass
             threads = []
             for i, worker_name in enumerate(worker_names, start=1):
-                t = threading.Thread(target=contact_worker, args=(worker_name, i))
+                stable_idx = self._infer_worker_index(worker_name, i)
+                t = threading.Thread(target=contact_worker, args=(worker_name, stable_idx))
                 threads.append(t)
                 t.start()
  
@@ -462,7 +475,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names, start=1):
-            t = threading.Thread(target=validate_worker, args=(name, idx))
+            stable_idx = self._infer_worker_index(name,idx)
+            t = threading.Thread(target=validate_worker, args=(name, stable_idx))
             t.start()
             threads.append(t)
  
