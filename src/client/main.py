@@ -575,7 +575,7 @@ def handle_training():
         dataset_type = "real"
         
         bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
-        default_s3_url = f"s3://{bucket_name}/real/WorldDataset.csv"
+        default_s3_url = f"s3://{bucket_name}/real/"
         
         # 2. CONTROLLO DINAMICO: Determiniamo il valore di default in base all'ambiente
         if environment.lower() == "aws":
