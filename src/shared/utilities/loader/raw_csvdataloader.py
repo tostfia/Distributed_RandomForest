@@ -19,7 +19,7 @@ class RawCSVDataLoader(DatasetLoader):
         data_url: Union[str, Sequence[str]],
         sample_fraction: float = 1.0,
         dataset_seed: int = 123,
-        s3_anon: bool = True,
+        s3_anon: bool = False,
     ):
         if isinstance(data_url, str):
             self.data_url = data_url.strip().strip("'\"")
