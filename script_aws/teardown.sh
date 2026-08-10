@@ -6,12 +6,6 @@ set -e
 # Usalo ogni volta che vuoi resettare il cluster o terminare i test.
 # =====================================================================
 
-if ! command -v jq > /dev/null 2>&1; then
-  echo "ERRORE: 'jq' non è installato. Necessario per la pulizia delle tabelle DynamoDB."
-  echo "Installa con: pip install jq"
-  exit 1
-fi
-
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
 BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
