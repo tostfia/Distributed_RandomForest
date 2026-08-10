@@ -401,22 +401,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA FAULT-TOLERANT ===")
         inference_start_time = time.perf_counter()
         model_path = self._resolve_model_path(job_id)
+
         # 1. RISOLUZIONE DINAMICA FILE MODELLO (.pkl) E TESTING SET (.csv) IN BASE ALL'AMBIENTE
         if self.environment == "aws":
             self.test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{job_id}.csv"
         else:
             self.test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
 
-        print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Risoluzione asset logici per il Job ID: {job_id}")
-        print(f"[{self.orchestrator_name}] Path Modello calcolato: {model_path}")
-        print(f"[{self.orchestrator_name}] Path Dataset calcolato: {self.test_data_path}")
+        print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Modello: {model_path} | Test Data: {self.test_data_path}")
 
         # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
         if not self.checkpoint_dao.exists(model_path):
             raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
         print(f"[{self.orchestrator_name}] Caricamento della foresta globale da {model_path}...")
         global_model = self.checkpoint_dao.load(model_path)
-
         all_trees = global_model.estimators_
         total_trees = len(all_trees)
         print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
@@ -427,6 +425,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         test_df = dao.load_dataset(self.test_data_path)
 
         print(f"[{self.orchestrator_name}] Preparazione della matrice di test (Shape: {test_df.shape})...")
+        actual_target = target_col if target_col in test_df.columns else ("Target" if "Target" in test_df.columns else "Label")
         X_test = test_df.drop(columns=[target_col]).to_numpy(dtype=np.float64)
         y_test = test_df[target_col].to_numpy()
         serialized_X_test = pickle.dumps(X_test)
