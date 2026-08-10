@@ -61,6 +61,15 @@ RPC_PORT=18861
 WORKER_DESIRED_COUNT=2
 ORCHESTRATOR_DESIRED_COUNT=2
 
+# Forziamo ECS a spegnere i task vecchi PRIMA di avviare quelli nuovi
+# durante un deployment (niente overlap temporaneo vecchi+nuovi).
+# Di default ECS userebbe minimumHealthyPercent=100/maximumPercent=200,
+# che con desired-count=2 può far coesistere transitoriamente 4 task
+# (2 vecchi + 2 nuovi) mentre partecipano entrambi alla leader election.
+# Con 0/100 si accetta un breve downtime a favore di non avere mai più
+# del desired-count di orchestrator/worker attivi in contemporanea.
+DEPLOYMENT_CONFIG="minimumHealthyPercent=0,maximumPercent=100"
+
 WORKER_CPU=1024
 WORKER_MEMORY=2048
 ORCH_CPU=2048

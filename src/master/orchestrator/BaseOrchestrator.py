@@ -473,6 +473,18 @@ class BaseOrchestrator(ABC):
                     self.state_manager.release_job_lease(job_id, self.orchestrator_name)
                 except Exception as e:
                     print(f"[{self.orchestrator_name}] [WARN] Impossibile rilasciare la job lease per {job_id[:8]}: {e}")
+        except KeyboardInterrupt:
+            # SIGTERM (es. durante un deploy/scale-down) o Ctrl+C: KeyboardInterrupt
+            # eredita da BaseException, quindi NON viene mai intercettato dagli
+            # `except Exception` sopra. Senza questo blocco la lease su JobLocks
+            # resterebbe intestata a questo orchestrator fino a scadenza del TTL,
+            # bloccando il recovery del prossimo leader (CLAIM FAILED / ABORT).
+            print(f"[{self.orchestrator_name}] [INTERRUPTED] Interruzione durante l'elaborazione del Job {job_id[:8]}: rilascio la lease prima di terminare.")
+            try:
+                self.state_manager.release_job_lease(job_id, self.orchestrator_name)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile rilasciare la job lease per {job_id[:8]}: {e}")
+            raise  # ri-solleva per permettere allo shutdown esterno (in start()) di procedere normalmente
         finally:
             # Segnaliamo al thread di heartbeat di terminare
             stop_visibility.set()
