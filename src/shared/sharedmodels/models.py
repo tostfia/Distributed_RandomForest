@@ -47,9 +47,6 @@ class Hyperparameters(BaseModel):
 
     @model_validator(mode="after")
     def clear_class_weight_for_regressor(self) -> "Hyperparameters":
-        # class_weight ha senso solo per la classificazione: lo azzeriamo qui
-        # cosi' la regola vale per qualsiasi punto del codice crei l'oggetto,
-        # non solo per il ramo di main.py che se ne ricorda di farlo.
         if self.tree_type == "regressor":
             self.class_weight = None
         return self

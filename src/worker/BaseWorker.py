@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-import base64
 from multiprocessing.pool import Pool
 import os
 import socket
