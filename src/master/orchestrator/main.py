@@ -1,6 +1,10 @@
 import sys
 import os
 import socket
+from scipy import signal
+import signal as os_signal
+
+from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
@@ -13,6 +17,13 @@ def main():
     ec2_id = os.environ.get("EC2_ID", "Locale")
     hostname = socket.gethostname()
     orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
+
+    def _graceful_shutdown(signum, frame):
+        print(f"[SHUTDOWN] Ricevuto segnale {signum}, deregistro {orchestrator_name}...")
+        ServiceRegistry.deregister_orchestrator(orchestrator_name)
+        sys.exit(0)
+
+        os_signal.signal(os_signal.SIGTERM, _graceful_shutdown)
 
     print("=====================================================")
     print(f"       INIZIALIZZAZIONE NODO MASTER CLUSTER          ")

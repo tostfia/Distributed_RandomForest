@@ -290,6 +290,8 @@ if [ "$WORKER_SVC_EXISTS" == "ACTIVE" ]; then
   echo "    Service worker-service esistente: forzo il rimpiazzo dei container..."
   aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
     --task-definition rf-worker-task --desired-count "$WORKER_DESIRED_COUNT" \
+    --deployment-configuration "$DEPLOYMENT_CONFIG" \
+    --availability-zone-rebalancing DISABLED \
     --force-new-deployment --region "$REGION" > /dev/null
 else
   echo "    Creazione Service worker-service (desired-count=$WORKER_DESIRED_COUNT)..."
@@ -299,6 +301,8 @@ else
     --task-definition rf-worker-task \
     --desired-count "$WORKER_DESIRED_COUNT" \
     --launch-type FARGATE \
+    --deployment-configuration "$DEPLOYMENT_CONFIG" \
+    --availability-zone-rebalancing DISABLED \
     --network-configuration "$NETWORK_CONFIG" \
     --region "$REGION" > /dev/null
 fi
@@ -311,6 +315,8 @@ if [ "$ORCH_SVC_EXISTS" == "ACTIVE" ]; then
   echo "    Service orchestrator-service esistente: forzo il rimpiazzo dei container..."
   aws ecs update-service --cluster "$CLUSTER_NAME" --service orchestrator-service \
     --task-definition rf-orchestrator-task --desired-count "$ORCHESTRATOR_DESIRED_COUNT" \
+    --deployment-configuration "$DEPLOYMENT_CONFIG" \
+    --availability-zone-rebalancing DISABLED \
     --force-new-deployment --region "$REGION" > /dev/null
 else
   echo "    Creazione Service orchestrator-service (desired-count=$ORCHESTRATOR_DESIRED_COUNT)..."
@@ -320,6 +326,8 @@ else
     --task-definition rf-orchestrator-task \
     --desired-count "$ORCHESTRATOR_DESIRED_COUNT" \
     --launch-type FARGATE \
+    --deployment-configuration "$DEPLOYMENT_CONFIG" \
+    --availability-zone-rebalancing DISABLED \
     --network-configuration "$NETWORK_CONFIG" \
     --region "$REGION" > /dev/null
 fi

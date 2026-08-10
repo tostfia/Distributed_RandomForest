@@ -10,7 +10,7 @@ cfg = SystemConfig()
 class ServiceRegistry:
     WORKERS_TABLE = 'workers_registry'
     ORCHESTRATORS_TABLE = 'orchestrators_registry'
-    TIME_OUT_SECONDS = int(os.environ.get("WORKER_TIMEOUT_SECONDS", 120))  # Timeout per considerare un worker non disponibile
+    TIME_OUT_SECONDS = int(os.environ.get("WORKER_HEARTBEAT_TIMEOUT", 120))
 
     @classmethod
     def _get_db_client(cls):
