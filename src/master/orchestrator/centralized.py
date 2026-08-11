@@ -36,6 +36,16 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.train_data_path = None
         self.test_data_path = None
         self.chunk_sent_event = threading.Event()
+
+        # Cache in-memoria (solo per QUESTA istanza di processo) degli alberi
+        # già addestrati per un dato job. Serve esclusivamente a evitare una
+        # GET S3 ridondante quando il round successivo viene gestito dalla
+        # STESSA istanza orchestratore. NON sostituisce mai il checkpoint
+        # fisico su S3, che resta l'unica fonte di verità condivisa: se
+        # un'altra istanza (nuovo leader dopo un fault) subentra, questa
+        # cache sarà vuota/non coerente e si procederà comunque con un
+        # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
+        self._trees_cache = {}
         
         super().__init__(
             orchestrator_name=name,
@@ -150,23 +160,46 @@ class CentralizedOrchestrator(BaseOrchestrator):
             os.makedirs("./.local_storage", exist_ok=True)
         all_trained_trees = []
 
-        # ─── FASE DI RESUME: SE ABBIAMO SUBITO UN FAILOVER E ABBIAMO GIÀ ALBERI PRONTI ───
+        # Pulizia preventiva: se ripartiamo da zero per QUESTO job_id ma esiste
+        # già un checkpoint fisico residuo (es. retry manuale con lo stesso id,
+        # o rerun dopo una pulizia incompleta), lo scartiamo per evitare che
+        # venga riletto per errore da un round successivo (parità con FederatedOrchestrator).
+        if start_alberi == 0 and self.checkpoint_dao.exists(checkpoint_trees_path):
+            self.checkpoint_dao.delete(checkpoint_trees_path)
+        self._trees_cache.pop(self.current_job_id, None) if start_alberi == 0 else None
+
+        # ─── SINCRONIZZAZIONE STATO: SE ABBIAMO GIÀ ALBERI DA UN ROUND PRECEDENTE ───
         if start_alberi > 0:
-            print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Rilevato start_alberi = {start_alberi}. Ripristino checkpoint fisico...")
-            if self.checkpoint_dao.exists(checkpoint_trees_path):
-                try:
-                    all_trained_trees = self.checkpoint_dao.load(checkpoint_trees_path)
-                    
-                    print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
-                    # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
-                    start_alberi = len(all_trained_trees)
-                except Exception as e_load:
-                    print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
-                    start_alberi = 0
-                    all_trained_trees = []
+            cached = self._trees_cache.get(self.current_job_id)
+            if cached is not None and len(cached) == start_alberi:
+                # Stessa istanza, stesso job: nessun fault, è solo il round successivo
+                # nello stesso processo. Riusiamo la lista già in memoria, niente GET S3.
+                print(f"\n[{self.orchestrator_name}] [STATE-SYNC] Continuazione round nella stessa istanza "
+                      f"({start_alberi} alberi già in memoria). Nessun reload da storage necessario.")
+                all_trained_trees = cached
             else:
-                print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
-                start_alberi = 0
+                # Cache assente o non coerente con start_alberi: questa istanza non ha
+                # memoria diretta del progresso richiesto. Può essere un riavvio dopo
+                # crash, oppure un nuovo leader subentrato dopo un fault di un'altra
+                # istanza. In entrambi i casi il checkpoint fisico su S3 (fonte di
+                # verità condivisa) è l'unico modo sicuro per recuperare lo stato:
+                # qui avviene il vero, garantito, recovery cross-istanza.
+                print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Nessuna cache locale valida per "
+                      f"start_alberi = {start_alberi}. Ripristino checkpoint fisico da storage condiviso...")
+                if self.checkpoint_dao.exists(checkpoint_trees_path):
+                    try:
+                        all_trained_trees = self.checkpoint_dao.load(checkpoint_trees_path)
+
+                        print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
+                        # Allineiamo lo start effettivo alla dimensione dell'array caricato per robustezza
+                        start_alberi = len(all_trained_trees)
+                    except Exception as e_load:
+                        print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
+                        start_alberi = 0
+                        all_trained_trees = []
+                else:
+                    print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
+                    start_alberi = 0
                 
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
@@ -272,6 +305,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 # SALVATAGGIO FISICO ATOMICO PROGRESSIVO
                                 try:
                                     self.checkpoint_dao.save(checkpoint_trees_path, all_trained_trees)
+                                    # Manteniamo la cache di istanza allineata SOLO dopo che il
+                                    # salvataggio fisico su storage condiviso è andato a buon fine:
+                                    # così la cache non è mai "più avanti" della fonte di verità
+                                    # persistita, che resta ciò che un'altra istanza rileggerebbe in caso di failover.
+                                    self._trees_cache[self.current_job_id] = list(all_trained_trees)
                                     print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
                                 except Exception as e_fs:
                                     print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
@@ -710,6 +748,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Override del metodo di pulizia per rimuovere il file pickle parziale.
         """
         super()._clean_checkpoint(job_id)
+        self._trees_cache.pop(job_id, None)
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
         try:
             self.checkpoint_dao.delete(checkpoint_trees_path)

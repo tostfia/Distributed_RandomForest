@@ -4,6 +4,14 @@
 # =====================================================================
 FROM python:3.10-slim AS builder
 
+# Forziamo apt a usare HTTPS verso i mirror Debian: su reti con proxy/firewall
+# che ispezionano o alterano il traffico HTTP in chiaro, il file InRelease può
+# arrivare corrotto ("Bad header line Bad header data"), causando il fallimento
+# di apt-get update. Copre sia il vecchio formato (sources.list) sia il nuovo
+# formato deb822 (sources.list.d/*.sources) usato dalle immagini basate su trixie.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -24,6 +32,9 @@ RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 # STAGE 2: immagine finale — solo runtime, niente compilatori
 # =====================================================================
 FROM python:3.10-slim
+
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 
 # Solo le librerie RUNTIME (non i -dev/headers usati per compilare):
 # - libpq5: libreria runtime di postgres (non libpq-dev, che sono solo header)

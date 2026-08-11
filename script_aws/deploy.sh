@@ -25,22 +25,14 @@ if [ -f "$ENV_FILE" ]; then
     grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE" | cut -d '=' -f 2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
   }
 
-  # 1. Caricamento Credenziali AWS
-  ENV_AWS_KEY=$(get_env_var "AWS_ACCESS_KEY_ID")
-  ENV_AWS_SECRET=$(get_env_var "AWS_SECRET_ACCESS_KEY")
-  ENV_AWS_TOKEN=$(get_env_var "AWS_SESSION_TOKEN")
   ENV_AWS_REGION=$(get_env_var "AWS_DEFAULT_REGION")
-
-  if [ -n "$ENV_AWS_KEY" ]; then export AWS_ACCESS_KEY_ID="$ENV_AWS_KEY"; fi
-  if [ -n "$ENV_AWS_SECRET" ]; then export AWS_SECRET_ACCESS_KEY="$ENV_AWS_SECRET"; fi
-  if [ -n "$ENV_AWS_TOKEN" ]; then export AWS_SESSION_TOKEN="$ENV_AWS_TOKEN"; fi
   if [ -n "$ENV_AWS_REGION" ]; then export AWS_DEFAULT_REGION="$ENV_AWS_REGION"; fi
-
+ 
   # 2. Caricamento Modalità di Training e Bucket S3
   ENV_SYS_MODE=$(get_env_var "SYS_MODE")
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
-
+ 
   # Priorità per la modalità: parametro $1 > SYS_MODE > TRAINING_MODE > default "centralized"
   DETECTED_MODE="${1:-${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}}"
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -78,11 +70,6 @@ ORCH_MEMORY=8192
 BUCKET_NAME="$DETECTED_BUCKET"
 TRAINING_MODE="$DETECTED_MODE"
 
-# TRAINING_MODE: parametrizzabile.
-# Uso: ./deploy.sh                -> usa il default sotto (centralized)
-#      ./deploy.sh federated      -> deploya in modalità federated
-#      ./deploy.sh centralized    -> deploya in modalità centralized
-TRAINING_MODE="${1:-centralized}"
 
 if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; then
   echo "ERRORE: TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
@@ -101,6 +88,17 @@ if [ -f ".env" ] && [ ! -f ".dockerignore" ] || ( [ -f ".env" ] && ! grep -qxF "
   echo ".env" >> .dockerignore
 fi
 echo "    OK."
+
+echo "==> [0b/10] Verifica credenziali AWS in ~/.aws/credentials..."
+AWS_CREDENTIALS_FILE="$HOME/.aws/credentials"
+if [ ! -f "$AWS_CREDENTIALS_FILE" ]; then
+  echo "    [ERRORE] $AWS_CREDENTIALS_FILE non trovato."
+  echo "    Le credenziali AWS non vengono più lette da .env: genera il file eseguendo:"
+  echo "      bash aws_creds.sh"
+  echo "    e rilancia questo script."
+  exit 1
+fi
+echo "    OK: $AWS_CREDENTIALS_FILE trovato (verrà usato il profilo [default])."
 
 echo "==> [1/10] Verifica identità AWS..."
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$REGION")

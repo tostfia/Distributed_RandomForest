@@ -47,7 +47,7 @@ class LocalFileSystemDAO(DatasetDAO):
         if sample_fraction is not None and 0.0 < sample_fraction < 1.0:
             print(f"[DAO-LOCAL] Campionamento in streaming (frac={sample_fraction}) durante la lettura...")
             chunks = []
-            for i, chunk in enumerate(pd.read_csv(path, chunksize=self.CHUNK_SIZE)):
+            for i, chunk in enumerate(pd.read_csv(path, chunksize=self.CHUNK_SIZE, dtype=str, low_memory=False)):
                 # Seed variato per chunk: evita che blocchi consecutivi vengano
                 # campionati con lo stesso pattern di indici relativi.
                 chunk_seed = (dataset_seed + i) if dataset_seed is not None else None
@@ -120,7 +120,7 @@ class AwsS3DAO(DatasetDAO):
             chunks = []
             # response['Body'] è uno StreamingBody: pandas lo consuma progressivamente,
             # senza mai materializzare l'intero oggetto S3 in memoria.
-            reader = pd.read_csv(response['Body'], chunksize=self.CHUNK_SIZE)
+            reader = pd.read_csv(response['Body'], chunksize=self.CHUNK_SIZE, dtype=str, low_memory=False)
             for i, chunk in enumerate(reader):
                 chunk_seed = (dataset_seed + i) if dataset_seed is not None else None
                 chunks.append(chunk.sample(frac=sample_fraction, random_state=chunk_seed))
