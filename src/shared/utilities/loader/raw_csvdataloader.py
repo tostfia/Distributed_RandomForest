@@ -144,10 +144,17 @@ class RawCSVDataLoader(DatasetLoader):
 
     def _read_single_csv(self, source: str) -> pd.DataFrame:
         try:
-            # 1. Lettura delegata al DAO corretto in base al tipo di sorgente
+            # 1. Lettura delegata al DAO corretto in base al tipo di sorgente.
+            # Il campionamento (se richiesto) avviene DENTRO il DAO, in streaming
+            # chunk-per-chunk, così non si carica mai l'intero file in RAM prima
+            # di scartarne il 99%.
             is_s3_source = self._is_s3_path(source)
             dao = self._s3_dao if is_s3_source else self._local_dao
-            df_temp = dao.load_dataset(source)
+            df_temp = dao.load_dataset(
+                source,
+                sample_fraction=self.sample_fraction,
+                dataset_seed=self.dataset_seed,
+            )
 
             # 2. Standardizzazione colonne
             df_temp.columns = [c.strip() for c in df_temp.columns]
@@ -156,10 +163,8 @@ class RawCSVDataLoader(DatasetLoader):
             if "label" in df_temp.columns:
                 df_temp = df_temp.rename(columns={"label": "Label"})
 
-            # 4. Campionamento in memoria
-            if self.sample_fraction < 1.0:
-                df_temp = df_temp.sample(frac=self.sample_fraction, random_state=self.dataset_seed)   
-
+            # 4. Conversione numerica: ora opera solo sul campione già ridotto
+            #    (es. 1% del file), non più sull'intero dataset.
             cols_to_convert = df_temp.columns.difference(["Label"])
             df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors="coerce")
 
