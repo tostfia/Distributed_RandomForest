@@ -58,7 +58,4 @@ saved_models/*
 synthetic/*
 !.synthetic/.gitkeep
 !synthetic/*.json
-
-.env
-
 aws_creds.sh
