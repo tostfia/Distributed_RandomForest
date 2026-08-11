@@ -10,27 +10,18 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
-import requests
 import shutil
 
 
-
-
-# 1. Inizializziamo la configurazione leggendo dal file .env
 cfg = SystemConfig()
 
-# CENTRALIZZAZIONE: Definiamo il percorso unico per config.json nella cartella mock condivisa
+
 CONFIG_PATH = os.path.join("./.local_storage", "config.json")
-
-# Storico locale di TUTTE le richieste inviate (training + inferenza), a differenza
-# di CONFIG_PATH che tiene traccia solo dell'ultima richiesta di training.
 HISTORY_PATH = os.path.join("./.local_storage", "requests_history.json")
-
 BASELINE_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
 
-# 2. Inizializziamo i servizi globali UNA volta sola all'avvio dello script
 try:
-    sqs_queue, state_manager = get_aws_services(cfg.env, role="client" )
+    sqs_queue, state_manager = get_aws_services(cfg.env, role="client")
 except Exception as e:
     print(f"\n[ERRORE] Impossibile inizializzare i servizi per l'ambiente '{cfg.env}': {e}")
     sys.exit(1)
@@ -63,6 +54,7 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
         hp_data["max_samples"] = 1.0
     hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
     return Hyperparameters(**hp_data)
+
 
 def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> Hyperparameters:
     """Chiede all'utente di inserire manualmente gli iperparametri per l'addestramento."""
@@ -107,10 +99,6 @@ def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> 
         print(f"  [ATTENZIONE] Valore non valido ('{max_samples_raw}'), uso il default 1.0.")
         max_samples = 1.0
 
-    # bootstrap non è una scelta libera: è una caratteristica strutturale del
-    # Random Forest (bagging). In federated è forzato a False per il protocollo
-    # (ogni worker addestra sull'intera partizione locale), in centralized resta
-    # True, il comportamento standard di Random Forest.
     if mode == "federated":
         print("  [INFO] Modalità FEDERATED: forzo bootstrap=False e max_samples=1.0 per coerenza col protocollo.")
         bootstrap = False
@@ -161,14 +149,19 @@ def append_history_entry(entry: dict) -> None:
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     
-    # 1. Acquisizione del Job ID
-    job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ")
+    # 1. Acquisizione del Job ID e del path dei dati
+    job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ").strip()
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
         
-    # L'orchestratore risolverà il path autonomamente in base all'ambiente.
-    data_url = "" 
+    if cfg.env == "aws":
+        bucket_name = cfg.s3_bucket_name
+        default_data_url = f"s3://{bucket_name}/real/"
+    else:
+        default_data_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
+
+    data_url = get_input(f"Inserisci il path/URL dei dati per l'inferenza [Default: {default_data_url}]: ", default_data_url).strip()
 
     # 2. Tentativo di recupero degli iperparametri dal file locale centralizzato
     hp_obj = None
@@ -177,13 +170,11 @@ def handle_inference():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved_config = json.load(f)
                 
-            # Logica corretta senza chiamate rotte a get_input(...)
             if saved_config.get("job_id") == job_id:
                 hp_data = saved_config.get("hyperparameters", {})
                 hp_obj = Hyperparameters(**hp_data)
                 print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
             else:
-                # Se l'ID non corrisponde, chiediamo esplicitamente se forzare il caricamento
                 forza_caricamento = get_input(
                     "Il Job ID locale non corrisponde a quello inserito. Forzare comunque l'uso degli iperparametri locali? (S/N): ", 
                     "N"
@@ -194,10 +185,9 @@ def handle_inference():
                     print(f"[INFO] Iperparametri forzati dal file locale (Task rilevato: {hp_obj.tree_type.upper()}).")
                     
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            # Fallback silenzioso o avviso leggero, passiamo poi alla configurazione manuale
             print(f"[INFO] Errore di lettura o file corrotto in '{CONFIG_PATH}': {e}")
 
-    # 3. Configurazione manuale di ripiego (se il file non esiste o l'utente ha rifiutato/riscontrato errori)
+    # 3. Configurazione manuale di ripiego
     if not hp_obj:
         print("\n[INFO] Impossibile recuperare gli iperparametri in automatico per questo Job ID.")
         tree_type_raw = get_input("Inserisci il tipo di task originale (1 per Classificazione, 2 per Regressione) [Default: 1]: ", "1")
@@ -220,13 +210,10 @@ def handle_inference():
     target_queue = "federated_queue.fifo" if cfg.mode == "federated" else "centralized_queue.fifo"
 
     try:
-        # Inviamo il model_dump() serializzato sulla coda corretta
         sqs_queue.send_message(queue_name=target_queue, message_dict=inference_request.model_dump())
         print(f"\n[OK] Richiesta di inferenza {inference_request.inference_id[:8]} inviata con successo alla coda '{target_queue}'!")
         print(f"[INFO] L'orchestratore riceverà il messaggio e coordinerà i worker via RPC.")
 
-        # Salviamo nello storico. Il dataset_type non è un campo di InferenceRequest:
-        # proviamo a recuperarlo dal training corrispondente già presente nello storico.
         matched_training = next(
             (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
             None,
@@ -251,7 +238,6 @@ def handle_inference():
 def download_model(job_id: str) -> None:
     """
     Esporta localmente il modello addestrato associato al Job ID.
-
     In ambiente locale copia il modello dalla cartella saved_models.
     In ambiente AWS scarica il modello dal bucket S3 configurato.
     """
@@ -273,19 +259,12 @@ def download_model(job_id: str) -> None:
         else cfg.mode
     )
 
-    print(
-        f"[INFO] Modalità del modello utilizzata per il download: "
-        f"{training_mode.upper()}"
-    )
+    print(f"[INFO] Modalità del modello utilizzata per il download: {training_mode.upper()}")
 
-    default_destination = os.path.join(
-        "./downloads",
-        model_filename,
-    )
+    default_destination = os.path.join("./downloads", model_filename)
 
     destination_path = get_input(
-        f"Percorso di destinazione "
-        f"[Default: {default_destination}]: ",
+        f"Percorso di destinazione [Default: {default_destination}]: ",
         default_destination,
     ).strip()
 
@@ -294,15 +273,8 @@ def download_model(job_id: str) -> None:
     os.makedirs(destination_directory, exist_ok=True)
 
     if cfg.env == "local":
-        saved_models_path = os.path.join(
-            "./saved_models",
-            model_filename,
-        )
-
-        root_path = os.path.join(
-            ".",
-            model_filename,
-        )
+        saved_models_path = os.path.join("./saved_models", model_filename)
+        root_path = os.path.join(".", model_filename)
 
         if os.path.exists(saved_models_path):
             source_path = saved_models_path
@@ -310,243 +282,126 @@ def download_model(job_id: str) -> None:
             source_path = root_path
         else:
             raise FileNotFoundError(
-                f"Il modello locale non è stato trovato né in "
-                f"'{saved_models_path}' né in '{root_path}'."
+                f"Il modello locale non è stato trovato né in '{saved_models_path}' né in '{root_path}'."
             )
 
-        if os.path.abspath(source_path) == os.path.abspath(
-            destination_path
-        ):
-            print(
-                f"\n[INFO] Il modello si trova già nel percorso "
-                f"richiesto: '{destination_path}'"
-            )
+        if os.path.abspath(source_path) == os.path.abspath(destination_path):
+            print(f"\n[INFO] Il modello si trova già nel percorso richiesto: '{destination_path}'")
             return
 
         shutil.copy2(source_path, destination_path)
 
     elif cfg.env == "aws":
-
         bucket_name = cfg.s3_bucket_name
-
         if not bucket_name:
-            raise ValueError(
-                "DATASETS_BUCKET_NAME non è configurato "
-                "per l'ambiente AWS."
-            )
+            raise ValueError("DATASETS_BUCKET_NAME non è configurato per l'ambiente AWS.")
 
-        model_key = (
-            f"saved_models/{training_mode}/"
-            f"{model_filename}"
-        )
+        model_key = f"saved_models/{training_mode}/{model_filename}"
 
-
-        s3_client = boto3.client(
-            "s3",
-            region_name=cfg.aws_region,
-        )
+        s3_client = boto3.client("s3", region_name=cfg.aws_region)
 
         try:
             presigned_url = s3_client.generate_presigned_url(
                 ClientMethod='get_object',
                 Params={'Bucket': bucket_name, 'Key': model_key},
-                ExpiresIn=3600  # Valido per 1 ora (3600 secondi)
+                ExpiresIn=3600
             )
             print(f"\n[OK] LINK S3 PER DOWNLOAD DIRETTO VIA BROWSER (valido 1 ora):\n{presigned_url}\n")
         except ClientError as e:
             print(f"[ATTENZIONE] Impossibile generare il Presigned URL: {e}")
 
-        print(
-            f"[INFO] Download da "
-            f"s3://{bucket_name}/{model_key}"
-        )
+        print(f"[INFO] Download da s3://{bucket_name}/{model_key}")
 
         try:
-            s3_client.download_file(
-                bucket_name,
-                model_key,
-                destination_path,
-            )
+            s3_client.download_file(bucket_name, model_key, destination_path)
         except ClientError as exc:
-            error_code = (
-                exc.response
-                .get("Error", {})
-                .get("Code", "")
-            )
-
-            if error_code in (
-                "404",
-                "NoSuchKey",
-                "NotFound",
-            ):
-                raise FileNotFoundError(
-                    f"Il modello non è presente in "
-                    f"s3://{bucket_name}/{model_key}"
-                ) from exc
-
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in ("404", "NoSuchKey", "NotFound"):
+                raise FileNotFoundError(f"Il modello non è presente in s3://{bucket_name}/{model_key}") from exc
             raise
 
     else:
-        raise ValueError(
-            f"Ambiente '{cfg.env}' non supportato."
-        )
+        raise ValueError(f"Ambiente '{cfg.env}' non supportato.")
 
-    file_size = os.path.getsize(destination_path)
+    if os.path.exists(destination_path):
+        file_size = os.path.getsize(destination_path)
+        print(f"\n[OK] Modello scaricato correttamente in: '{destination_path}'")
+        print(f"[INFO] Dimensione del file: {file_size} byte")
+        print("[ATTENZIONE] I file Pickle devono essere caricati esclusivamente se provengono da fonti attendibili.")
+    else:
+        print(f"\n[ATTENZIONE] Download terminato ma il file non è stato trovato in '{destination_path}'.")
 
-    print(
-        f"\n[OK] Modello scaricato correttamente in: "
-        f"'{destination_path}'"
-    )
-    print(f"[INFO] Dimensione del file: {file_size} byte")
-    print(
-        "[ATTENZIONE] I file Pickle devono essere caricati "
-        "esclusivamente se provengono da fonti attendibili."
-    )
 
 def handle_model_request():
     print("\n=== RICHIESTA E VERIFICA STATO MODELLO ===")
 
-    job_id = get_input(
-        "Inserisci il Job ID del modello da verificare: "
-    ).strip()
+    job_id = get_input("Inserisci il Job ID del modello da verificare: ").strip()
 
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
 
-    print(
-        f"[INFO] Interrogazione dello Stato per il Job "
-        f"{job_id} in corso..."
-    )
+    print(f"[INFO] Interrogazione dello Stato per il Job {job_id} in corso...")
 
     try:
-        # 1. Interroghiamo lo StateManager per capire lo stato nel cluster locale
         job_status = state_manager.get_job_status(job_id)
 
         if not job_status:
-            print(
-                f"\n[ATTENZIONE] Nessun record trovato nel "
-                f"database per il Job ID '{job_id}'."
-            )
-            print(
-                "[INFO] Verifica che l'ID sia corretto o che "
-                "l'addestramento sia effettivamente partito."
-            )
+            print(f"\n[ATTENZIONE] Nessun record trovato nel database per il Job ID '{job_id}'.")
+            print("[INFO] Verifica che l'ID sia corretto o che l'addestramento sia effettivamente partito.")
             return
 
-        print(
-            f"  • Stato attuale nel Cluster: "
-            f"{job_status.upper()}"
-        )
+        print(f"  • Stato attuale nel Cluster: {job_status.upper()}")
         
-        # 2. Gestione basata sullo stato del ciclo di vita del job
         if job_status.upper() == "QUEUED":
-            print(
-                f"\n[IN CODA] Il Job {job_id} è attualmente "
-                "in coda su SQS."
-            )
-            print(
-                "[INFO] Il messaggio è in attesa che "
-                "l'Orchestratore lo prenda in carico."
-            )
+            print(f"\n[IN CODA] Il Job {job_id} è attualmente in coda su SQS.")
+            print("[INFO] Il messaggio è in attesa che l'Orchestratore lo prenda in carico.")
             return
 
         elif job_status.upper() == "PROCESSING":
-            print(
-                f"\n[IN CORSO] Il modello {job_id} è in fase "
-                "di addestramento distribuito."
-            )
-            print(
-                "[INFO] L'Orchestratore sta coordinando i "
-                "calcoli paralleli sui nodi Worker via RPC."
-            )
+            print(f"\n[IN CORSO] Il modello {job_id} è in fase di addestramento distribuito.")
+            print("[INFO] L'Orchestratore sta coordinando i calcoli paralleli sui nodi Worker via RPC.")
             return
 
         elif job_status.upper() == "FAILED":
-            print(
-                f"\n[FALLITO] L'addestramento per il Job "
-                f"{job_id} è fallito."
-            )
-            print(
-                "[INFO] Il sistema di failover ha intercettato "
-                "un errore infrastrutturale o applicativo."
-            )
+            print(f"\n[FALLITO] L'addestramento per il Job {job_id} è fallito.")
+            print("[INFO] Il sistema di failover ha intercettato un errore infrastrutturale o applicativo.")
             return
 
         elif job_status.upper() == "COMPLETED":
-            print(
-                f"\n[COMPLETATO] L'addestramento per il Job "
-                f"{job_id} è terminato con successo!"
-            )
+            print(f"\n[COMPLETATO] L'addestramento per il Job {job_id} è terminato con successo!")
 
             model_filename = f"model_{job_id}.pkl"
-            model_path = os.path.join(
-                "./saved_models",
-                model_filename,
-            )
+            model_path = os.path.join("./saved_models", model_filename)
             
-            # 3. Controllo di persistenza fisica (Solo per ambiente LOCAL)
             if cfg.env == "local":
                 if os.path.exists(model_path):
-                    print(
-                        f"[OK] File binario del modello rilevato "
-                        f"in: '{model_path}'"
-                    )
-                    print(
-                        "[INFO] Il modello è pronto per ricevere "
-                        "richieste di inferenza."
-                    )
-
+                    print(f"[OK] File binario del modello rilevato in: '{model_path}'")
+                    print("[INFO] Il modello è pronto per ricevere richieste di inferenza.")
                 elif os.path.exists(model_filename):
-                    print(
-                        f"[OK] File binario del modello rilevato "
-                        f"nella root: '{model_filename}'"
-                    )
-
+                    print(f"[OK] File binario del modello rilevato nella root: '{model_filename}'")
                 else:
-                    print(
-                        f"\n[ATTENZIONE] Il DB dichiara "
-                        f"'COMPLETED', ma il file binario "
-                        f"'{model_filename}' non è stato trovato "
-                        f"in '{model_path}'."
-                    )
+                    print(f"\n[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato in '{model_path}'.")
                     return
 
             elif cfg.env == "aws":
-                print(
-                    "[INFO] Il modello risulta completato. "
-                    "La presenza su S3 sarà verificata durante "
-                    "il download."
-                )
+                print("[INFO] Il modello risulta completato. La presenza su S3 sarà verificata durante il download.")
 
-            download_choice = get_input(
-                "\nVuoi scaricare/esportare il modello? "
-                "(S/N) [Default: N]: ",
-                "N",
-            ).strip()
+            download_choice = get_input("\nVuoi scaricare/esportare il modello? (S/N) [Default: N]: ", "N").strip()
 
             if download_choice.upper() == "S":
                 try:
                     download_model(job_id)
                 except Exception as download_error:
-                    print(
-                        f"\n[ERRORE DOWNLOAD] Impossibile "
-                        f"scaricare il modello: {download_error}"
-                    )
+                    print(f"\n[ERRORE DOWNLOAD] Impossibile scaricare il modello: {download_error}")
 
             return
 
         else:
-            print(
-                f"\n[ATTENZIONE] Stato del job non riconosciuto: "
-                f"'{job_status}'."
-            )
+            print(f"\n[ATTENZIONE] Stato del job non riconosciuto: '{job_status}'.")
 
     except Exception as e:
-        print(
-            f"\n[ERRORE] Impossibile recuperare lo stato "
-            f"dal database: {e}"
-        )
+        print(f"\n[ERRORE] Impossibile recuperare lo stato dal database: {e}")
 
     return
 
@@ -558,9 +413,9 @@ def handle_training():
     environment = cfg.env
     mode = cfg.mode
 
-    # 3. SELEZIONE INDIPENDENTE DELLA SORGENTE DATI (Reale vs Sintetico per entrambe le modalità)
+    # 3. SELEZIONE INDIPENDENTE DELLA SORGENTE DATI
     print("\n[3] Selezione della Sorgente Dati:")
-    print("  [1] Usa il Dataset REALE (URL S3 pubblico ca-central-1)")
+    print("  [1] Usa il Dataset REALE")
     print("  [2] Genera un dataset SINTETICO per questa esecuzione")
     dataset_choice = get_input("  Scegli l'opzione: ", "1")
     
@@ -573,20 +428,15 @@ def handle_training():
         print(f"  [INFO] Configurato Dataset SINTETICO: {dataset_path}")
     else:
         dataset_type = "real"
-        
         bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
         default_s3_url = f"s3://{bucket_name}/real/"
         
-        # 2. CONTROLLO DINAMICO: Determiniamo il valore di default in base all'ambiente
         if environment.lower() == "aws":
-            # Se siamo su AWS, proponiamo l'URL S3 direttamente come default preimpostato
             prompt_message = f"    Inserisci l'URL S3.\n [Default: {default_s3_url}]: \n    --> "
         else:
-            # Se siamo in locale, puoi lasciare il comportamento classico o un default locale
             default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"  
             prompt_message = f"     Inserisci il path locale del dataset reale.\n (Premi INVIO per il default): \n    --> "
         
-        # 3. Mostriamo sempre la domanda all'utente
         print("  • Configurazione percorso sorgente dati:")
         dataset_path = get_input(prompt_message, default_s3_url).strip()
         print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
@@ -594,8 +444,7 @@ def handle_training():
     # 4. Configurazione Iperparametri
     print(f"\n[4] Configurazione Iperparametri:")
     
-    # LOGICA: Chiedi il tipo di task SOLO se il dataset è sintetico
-    selected_tree_type = "classifier" # Default
+    selected_tree_type = "classifier"
     if dataset_type == "synthetic":
         print("  [INFO] Dataset SINTETICO rilevato.")
         print("  Scegli il tipo di esperimento:")
@@ -616,11 +465,7 @@ def handle_training():
             hp_obj = ask_custom_hyperparameters(mode, dataset_type, selected_tree_type)
         else:
             hp_obj = load_hyperparameters_from_config(mode, dataset_type)
-
-            # Sovrascriviamo il tipo di task nell'oggetto HP
             hp_obj.tree_type = selected_tree_type
-
-            # Pulizia opzionale: se è regressione, togliamo i pesi di classe
             if selected_tree_type == "regressor":
                 hp_obj.class_weight = None
 
@@ -633,7 +478,6 @@ def handle_training():
             
     # 5. Validazione Pydantic
     try:
-        
         request = TrainingRequest(
             environment=environment,
             mode=mode,
@@ -657,16 +501,16 @@ def handle_training():
     # 6. Invio del pacchetto e gestione dello stato
     target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
     
-    # 6. Invio del pacchetto e gestione dello stato
-    target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
-    
     try:
-        # In locale il client scrive direttamente su DB. 
-        # Su AWS deleghiamo la scrittura alla Lambda tramite API Gateway!
-        if cfg.env == "local":
-            state_manager.initiate_request(job_id=request.job_id, dataset_path=request.dataset_path, seed=request.seed)
+        # In locale scrive direttamente su DB. 
+        # In AWS passa per ApiGatewayStateManager (no-op client-side; la scrittura avviene su Lambda)
+        state_manager.initiate_request(
+            job_id=request.job_id, 
+            dataset_path=request.dataset_path, 
+            seed=request.seed
+        )
         
-        # In AWS questo usa LambdaGatewaySQSQueue che fa una POST HTTP ad API Gateway
+        # Invia messaggio (Direct SQS in Local / HTTP POST ad API Gateway in AWS)
         sqs_queue.send_message(queue_name=target_queue, message_dict=request.model_dump())
         
         if cfg.env == "aws":
@@ -708,7 +552,6 @@ def handle_baseline_selection():
         task_choice = get_input("  Scelta [Default: 1]: ", "1")
         selected_tree_type = "classifier" if task_choice == "1" else "regressor"
 
-    # Prepariamo la configurazione di boot da condividere con run_baseline()
     boot_config = {
         "dataset_type": dtype,
         "tree_type": selected_tree_type
@@ -719,8 +562,8 @@ def handle_baseline_selection():
         json.dump(boot_config, f, indent=2)
     print(f"[OK] Boot configuration registrata: {dtype.upper()} | TASK: {selected_tree_type.upper()}")
         
-    # Avviamo il processo analitico isolato
     run_baseline()
+
 
 def handle_history_view():
     """Elenca tutte le richieste (training + inferenza) inviate finora, con dataset e stato."""
@@ -756,6 +599,7 @@ def handle_history_view():
             if job_id:
                 print(f"    Job addestrato usato: {job_id}")
             print(f"    Stato: INVIATA (nessun tracciamento di stato disponibile per l'inferenza)")
+
 
 def main():
     while True:
