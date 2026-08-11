@@ -156,10 +156,14 @@ class RawCSVDataLoader(DatasetLoader):
             if "label" in df_temp.columns:
                 df_temp = df_temp.rename(columns={"label": "Label"})
 
+            # 4. Campionamento in memoria
+            if self.sample_fraction < 1.0:
+                df_temp = df_temp.sample(frac=self.sample_fraction, random_state=self.dataset_seed)   
+
             cols_to_convert = df_temp.columns.difference(["Label"])
             df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors="coerce")
 
-            # 4. Cache locale: solo se attiva (ambiente locale) e sorgente S3
+            # 5. Cache locale: solo se attiva (ambiente locale) e sorgente S3
             if is_s3_source and self._cache_enabled:
                 filename = os.path.basename(source)
                 local_cache_path = os.path.join(self.cache_dir, filename)
@@ -167,10 +171,6 @@ class RawCSVDataLoader(DatasetLoader):
                     print(f"     [CACHE] Salvo una copia locale di {filename} per i prossimi test...")
                     os.makedirs(self.cache_dir, exist_ok=True)
                     df_temp.to_csv(local_cache_path, index=False)
-
-            # 5. Campionamento in memoria
-            if self.sample_fraction < 1.0:
-                df_temp = df_temp.sample(frac=self.sample_fraction, random_state=self.dataset_seed)
 
             return df_temp
 

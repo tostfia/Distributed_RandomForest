@@ -82,9 +82,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
             preprocessor = CICIDSPreprocessor(target_column=target_col)
             # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO ───
             df_binarized = preprocessor.binarize_target(df_raw)
+            del df_raw
             # ─── FASE 2: SPLIT STRATIFICATO ADESSO SICURO ───
             print(f"[{self.orchestrator_name}] Esecuzione Split Stratificato...")
             train_df, test_df = splitter.split(df_binarized)
+            del df_binarized
 
             # ─── FASE 3 & 4: PREPROCESAMENTO INDIPENDENTE (Metadata + NaN/inf) ───
             print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TRAIN SET ===")
