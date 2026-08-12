@@ -1,6 +1,7 @@
 from multiprocessing.pool import Pool
 import os
 import pickle
+import threading
 import time as time_module
 from botocore.exceptions import ClientError
 import boto3
@@ -10,17 +11,18 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from Distributed_RandomForest.src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
-from src.shared.factory import DatasetDAOFactory 
+from src.shared.factory import DatasetDAOFactory
+
 
 _fed_child_X = None
 _fed_child_y = None
 
 def _init_fed_child_process(X, y):
     """Inizializza il processo figlio del pool federato isolando i thread della CPU."""
-    import os
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -113,18 +115,17 @@ class FederatedWorker(BaseWorker):
 
         # --- GESTIONE COERENTE DEL REGISTRO DEI WORKER (FAULT-TOLERANT) ---
         if self.environment == "aws":
-            self.worker_index = 1
-            for char in worker_name.split("-"):
-                if char.isdigit():
-                    self.worker_index = int(char)
-                    break
-            self.local_cache_dir = f"/tmp/{worker_name}_cache"
+            num_workers_conf = int(os.environ.get("NUM_WORKERS", 3))
+            self.worker_index = ServiceRegistry.claim_worker_index(num_workers=num_workers_conf, owner=worker_name)
+            self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
+            self.local_cache_dir = f"/tmp/{self.worker_name}_cache"
+            self._stop_index_refresh = threading.Event()
+            threading.Thread(target=self._index_lock_refresh_loop, daemon=True).start()
         else:
             # Siamo in ambiente "local" (Docker Compose Replicas)
             # Acquisiamo un indice atomico non-bloccante tramite fcntl
             num_workers = int(os.environ.get("NUM_WORKERS", 2))
             self.worker_index = self._claim_worker_index(num_workers)
-            
             # Generiamo il nome uniforme corrispondente alle directory generate dallo splitter dell'orchestratore
             worker_id_uniforme = f"Worker-Locale-{self.worker_index:02d}"
             self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
@@ -402,3 +403,20 @@ class FederatedWorker(BaseWorker):
     
     def exposed_get_local_sample_count(self) -> int:
         return self.local_sample_count
+
+    def _index_lock_refresh_loop(self, interval: int = 60):
+        while not self._stop_index_refresh.is_set():
+            for _ in range(interval):
+                if self._stop_index_refresh.is_set():
+                    return
+                time_module.sleep(1)
+            try:
+                if not ServiceRegistry.refresh_worker_index_lock(self.worker_index, owner=self.worker_name):
+                    print(f"[{self.worker_name}] [WARN] Refresh del lock indice fallito: potrebbe essere stato reclamato da un altro nodo.")
+            except Exception as e:
+                print(f"[{self.worker_name}] [ERRORE] Refresh lock indice: {e}")
+
+    def release_index_claim(self):
+        if self.environment == "aws" and hasattr(self, "worker_index"):
+            self._stop_index_refresh.set()
+            ServiceRegistry.release_worker_index(self.worker_index, owner=self.worker_name)

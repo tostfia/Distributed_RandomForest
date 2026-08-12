@@ -158,12 +158,14 @@ class FederatedOrchestrator(BaseOrchestrator):
         super()._perform_active_recovery()
 
     def _infer_worker_index(self, w_name: str, fallback_idx: int) -> int:
+        marker = re.search(r"WIDX(\d+)", w_name)
+        if marker:
+            return int(marker.group(1))
         match = re.search(r"\d+", w_name)
         if match:
             return int(match.group())
         print(f"[{self.orchestrator_name}] [WARN] Impossibile derivare un indice stabile dal nome "
-              f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}): lo shard assegnato "
-              f"potrebbe non corrispondere a quello reale del worker.")
+            f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}).")
         return fallback_idx
 
     def _resolve_dataset_type(self, payload: dict) -> str:

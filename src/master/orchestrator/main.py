@@ -1,7 +1,6 @@
 import sys
 import os
 import socket
-from scipy import signal
 import signal as os_signal
 
 from src.shared.binding.serviceregistry import ServiceRegistry
@@ -12,7 +11,7 @@ from src.master.orchestrator.federated import FederatedOrchestrator
 def main(): 
     cfg = SystemConfig()
     mode = getattr(cfg, "mode", "centralized").strip().lower()
-    environment = cfg.env  # "local" oppure "aws"
+    environment = cfg.env
 
     ec2_id = os.environ.get("EC2_ID", "Locale")
     hostname = socket.gethostname()
@@ -23,7 +22,7 @@ def main():
         ServiceRegistry.deregister_orchestrator(orchestrator_name)
         sys.exit(0)
 
-        os_signal.signal(os_signal.SIGTERM, _graceful_shutdown)
+    os_signal.signal(os_signal.SIGTERM, _graceful_shutdown)
 
     print("=====================================================")
     print(f"       INIZIALIZZAZIONE NODO MASTER CLUSTER          ")

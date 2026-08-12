@@ -76,7 +76,8 @@ DYNAMO_TABLES=(
   "JobLocks"
   "ModelStatus"
   "OrchestratorLocks"
-  "WorkerTasks"
+  "WorkerTasks",
+  "WorkerIndexLocks"
 )
 
 for t in "${DYNAMO_TABLES[@]}"; do

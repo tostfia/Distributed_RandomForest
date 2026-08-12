@@ -26,9 +26,6 @@ from boto3.dynamodb.conditions import Key
 
 class AwsDynamoDB:
 
-    # Stessa mappa tabella -> nome della chiave primaria usata nel mock,
-    # deve coincidere con la Partition Key impostata quando create la
-    # tabella su AWS (vedi guida).
     _PK_MAPPING = {
         'workers_registry': 'worker_name',
         'orchestrators_registry': 'orchestrator_name',
@@ -36,6 +33,7 @@ class AwsDynamoDB:
         'WorkerTasks': 'task_id',
         'OrchestratorLocks': 'lock_key',
         'JobLocks': 'lock_key',
+        'WorkerIndexLocks': 'lock_key'
     }
 
     def __init__(self, region_name: Optional[str] = None):
