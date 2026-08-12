@@ -70,7 +70,6 @@ ORCH_MEMORY=8192
 BUCKET_NAME="$DETECTED_BUCKET"
 TRAINING_MODE="$DETECTED_MODE"
 
-
 if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; then
   echo "ERRORE: TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
   exit 1

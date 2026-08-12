@@ -116,9 +116,13 @@ class FederatedWorker(BaseWorker):
         # --- GESTIONE COERENTE DEL REGISTRO DEI WORKER (FAULT-TOLERANT) ---
         if self.environment == "aws":
             num_workers_conf = int(os.environ.get("NUM_WORKERS", 3))
-            self.worker_index = ServiceRegistry.claim_worker_index(num_workers=num_workers_conf, owner=worker_name)
+            self._index_claim_owner = worker_name
+            self.worker_index = ServiceRegistry.claim_worker_index(
+                num_workers=num_workers_conf, owner=self._index_claim_owner
+            )
             self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
             self.local_cache_dir = f"/tmp/{self.worker_name}_cache"
+
             self._stop_index_refresh = threading.Event()
             threading.Thread(target=self._index_lock_refresh_loop, daemon=True).start()
         else:
@@ -411,7 +415,7 @@ class FederatedWorker(BaseWorker):
                     return
                 time_module.sleep(1)
             try:
-                if not ServiceRegistry.refresh_worker_index_lock(self.worker_index, owner=self.worker_name):
+                if not ServiceRegistry.refresh_worker_index_lock(self.worker_index, owner=self._index_claim_owner):
                     print(f"[{self.worker_name}] [WARN] Refresh del lock indice fallito: potrebbe essere stato reclamato da un altro nodo.")
             except Exception as e:
                 print(f"[{self.worker_name}] [ERRORE] Refresh lock indice: {e}")
@@ -419,4 +423,4 @@ class FederatedWorker(BaseWorker):
     def release_index_claim(self):
         if self.environment == "aws" and hasattr(self, "worker_index"):
             self._stop_index_refresh.set()
-            ServiceRegistry.release_worker_index(self.worker_index, owner=self.worker_name)
+            ServiceRegistry.release_worker_index(self.worker_index, owner=self._index_claim_owner)
