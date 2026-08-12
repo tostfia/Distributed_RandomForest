@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from multiprocessing.pool import Pool
 import os
+import signal
 import socket
 import numpy as np
 from rpyc import Service, ThreadedServer
@@ -84,6 +85,12 @@ class BaseWorker(Service, ABC):
     def is_regression(self):
         pass
 
+    def release_index_claim(self):
+        """Hook per sottoclassi che gestiscono claim di risorse condivise
+        (es. FederatedWorker con l'indice shard su AWS). Implementazione di
+        base: nessuna azione (usata da CentralizedWorker)."""
+        pass
+
     def _get_my_private_ip(self) -> str:
         """Determina l'IP corretto per il binding di rete in base all'ambiente.
             Funziona sia in locale (con/senza Docker) sia su AWS.
@@ -98,6 +105,10 @@ class BaseWorker(Service, ABC):
 
     def start_server(self, port: int, explicit_host: str = None):
         print(f"\n[{self.worker_name}] Inizializzazione Server RPC in ambiente {self.environment.upper()}...")
+
+        def _handle_sigterm(signum, frame):
+            raise KeyboardInterrupt()
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
         advertise_host = os.environ.get("RPC_ADVERTISE_HOST", None)
         is_docker = os.environ.get("RUNNING_IN_DOCKER", "false") == "true"
@@ -147,6 +158,8 @@ class BaseWorker(Service, ABC):
             print(f"\n[+] [{self.worker_name}] Arresto del server in corso...")
             self._stop_heartbeat.set()
             heartbeat_thread.join(timeout=2)
+
+            self.release_index_claim()
             
             if self._cached_pool is not None:
                 self._cached_pool.close()
