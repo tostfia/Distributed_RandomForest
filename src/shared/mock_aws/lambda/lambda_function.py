@@ -59,6 +59,8 @@ def handle_submit(event: dict, path_params: dict) -> dict:
     else:
         mode = 'centralized'
 
+    print(f"[DEBUG] path_params={path_params} | path_mode='{path_mode}' | body_mode='{body_mode}' | raw_path='{raw_path}' | mode_scelto='{mode}'")
+
     job_id = body.get('job_id') or str(uuid.uuid4())
     body['job_id'] = job_id
 

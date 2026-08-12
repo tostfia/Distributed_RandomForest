@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 import traceback
-from aiohttp import ClientError
+from botocore.exceptions import ClientError
 import boto3
 import rpyc
 import numpy as np

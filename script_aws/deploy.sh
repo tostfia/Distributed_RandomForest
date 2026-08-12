@@ -32,16 +32,19 @@ if [ -f "$ENV_FILE" ]; then
   ENV_SYS_MODE=$(get_env_var "SYS_MODE")
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
+  ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
  
   # Priorità per la modalità: parametro $1 > SYS_MODE > TRAINING_MODE > default "centralized"
   DETECTED_MODE="${1:-${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}}"
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
   DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
+  DETECTED_WORKERS="${ENV_NUM_WORKERS:-2}"
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato. Uso parametri di fallback."
   DETECTED_MODE="${1:-centralized}"
   DETECTED_REGION="us-east-1"
   DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
+  DETECTED_WORKERS="2"
 fi
 
 REGION="$DETECTED_REGION"
@@ -50,7 +53,7 @@ REPO_NAME="rf-distributed"
 SG_NAME="rf-distributed-sg"
 RPC_PORT=18861
 
-WORKER_DESIRED_COUNT=2
+WORKER_DESIRED_COUNT="$DETECTED_WORKERS"
 ORCHESTRATOR_DESIRED_COUNT=2
 
 # Forziamo ECS a spegnere i task vecchi PRIMA di avviare quelli nuovi
@@ -78,6 +81,7 @@ fi
 echo "    [ENV CONFIG] REGION        : $REGION"
 echo "    [ENV CONFIG] TRAINING_MODE : $TRAINING_MODE"
 echo "    [ENV CONFIG] BUCKET_NAME   : $BUCKET_NAME"
+echo "    [ENV CONFIG] NUM_WORKERS   : $WORKER_DESIRED_COUNT"
 echo "-----------------------------------------------------------------------"
 
 echo "==> [0/10] Controllo di sicurezza: .env non deve finire nell'immagine..."
