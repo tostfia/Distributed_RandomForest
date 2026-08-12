@@ -11,7 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from Distributed_RandomForest.src.shared.binding.serviceregistry import ServiceRegistry
+from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
