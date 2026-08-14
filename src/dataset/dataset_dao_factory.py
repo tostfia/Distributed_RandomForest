@@ -6,7 +6,6 @@ class DatasetDAOFactory:
     
     @staticmethod
     def get_dao() -> DatasetDAO:
-        # Legge l'ambiente direttamente dalla config globale
         cfg = SystemConfig()
         env = cfg.env.strip().lower()
         

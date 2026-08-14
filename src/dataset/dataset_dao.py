@@ -3,6 +3,8 @@ import os
 
 import pandas as pd
 import io
+import boto3
+from botocore.config import Config
 
 
 class DatasetDAO(ABC):
@@ -48,8 +50,6 @@ class LocalFileSystemDAO(DatasetDAO):
             print(f"[DAO-LOCAL] Campionamento in streaming (frac={sample_fraction}) durante la lettura...")
             chunks = []
             for i, chunk in enumerate(pd.read_csv(path, chunksize=self.CHUNK_SIZE, dtype=str, low_memory=False)):
-                # Seed variato per chunk: evita che blocchi consecutivi vengano
-                # campionati con lo stesso pattern di indici relativi.
                 chunk_seed = (dataset_seed + i) if dataset_seed is not None else None
                 chunks.append(chunk.sample(frac=sample_fraction, random_state=chunk_seed))
             df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
@@ -83,8 +83,6 @@ class AwsS3DAO(DatasetDAO):
 
     def _get_isolated_client(self):
         """Genera un client S3 isolato e specifico per il thread corrente, con timeout configurati."""
-        import boto3
-        from botocore.config import Config
 
         local_session = boto3.Session()
         config_timeout = Config(
