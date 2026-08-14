@@ -20,7 +20,6 @@ di registrarsi come disponibile nel ServiceRegistry.
 Uso tipico:
     python -m script_aws.provision_federated_shards --num-workers 3 --data-folder ./dataset_cache
     
-
 NOTA: questo script assume che tu abbia già eseguito (se ti interessa quel
 dataset_type) src/baseline/run_baseline.py in locale, così che
 outputs_baseline/config_real.json e/o config_synthetic.json esistano già sul
@@ -28,7 +27,6 @@ tuo filesystem prima del provisioning. Non rilancia la baseline da solo.
 """
 import argparse
 import os
-
 import boto3
 from botocore.exceptions import ClientError
 
@@ -39,7 +37,6 @@ DEFAULT_BUCKET = os.environ.get(
     "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
 )
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
-
 
 def _shards_already_present(s3_client, bucket: str, num_workers: int) -> bool:
     for i in range(1, num_workers + 1):

@@ -7,14 +7,6 @@ modello globale RandomForest, chunk di inferenza) in modo che il codice
 degli Orchestratori non debba mai sapere se sta scrivendo su disco locale
 o su S3.
 
-Perché esiste
--------------
-Prima di questo modulo, `centralized.py` e `federated.py` costruivano
-path come "s3://bucket/key.pkl" ma li passavano a `open()`, `os.path.exists()`
-e `os.remove()`: funzioni che non capiscono lo schema "s3://" e quindi
-o sollevano un'eccezione, o restituiscono silenziosamente `False`/no-op,
-disabilitando di fatto il checkpointing su AWS.
-
 Con questo DAO, chi chiama scrive semplicemente:
 
     dao = CheckpointDAOFactory.get_dao(self.environment)
@@ -25,18 +17,6 @@ Con questo DAO, chi chiama scrive semplicemente:
 
 e il path (locale o "s3://...") viene risolto correttamente in entrambi
 i casi.
-
-Nota sul formato di salvataggio
---------------------------------
-`save()` fa sempre un OVERWRITE completo dell'oggetto (mai append).
-Questo è intenzionale: S3 non supporta l'append nativo su un oggetto
-(ogni PUT riscrive l'intero object), quindi il pattern "scrivo l'intera
-lista aggiornata ad ogni checkpoint" è l'unico che funziona in modo
-identico su entrambi i backend. È anche il fix al bug di duplicazione
-che avevamo in `federated.py`, dove si usava `open(path, "ab")` per
-appendere ripetutamente l'intera lista cumulativa: al restore, ogni
-pickle letto veniva "extend"-ato sopra il precedente, moltiplicando gli
-alberi invece di ripristinarli correttamente.
 """
 
 import os
