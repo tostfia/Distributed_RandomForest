@@ -96,8 +96,6 @@ class BaseOrchestrator(ABC):
             try:
                 return self.state_manager.acquire_global_lock(lock_key, self.orchestrator_name, ttl=ttl)
             except Exception as e:
-                # QUALSIASI errore nell'acquisizione del lock = NON sei leader.
-                # Mai assumere leadership per default in caso di dubbio.
                 print(f"[{self.orchestrator_name}] [ERRORE] Acquisizione lock fallita: {e}")
                 return False
     
@@ -114,7 +112,6 @@ class BaseOrchestrator(ABC):
             with open(mutex_path, "a") as mutex:
                 fcntl.flock(mutex, fcntl.LOCK_EX)
                 try:
-                    # Verifica che siamo ancora noi i leader prima di aggiornare
                     if os.path.exists(lock_path):
                         try:
                             with open(lock_path, "r", encoding="utf-8") as f:
@@ -331,7 +328,6 @@ class BaseOrchestrator(ABC):
         """Logica di instradamento del lavoro in base al tipo di richiesta."""
         job_id = payload.get("job_id")
         request_type = payload.get("request_type", "TRAINING").upper()
-        # 1. Prepariamo e avviamo il thread di Heartbeat per la visibilità SQS
         stop_visibility = threading.Event()
         ownership_lost_event = threading.Event()
         stop_job_lease = threading.Event()
@@ -358,9 +354,7 @@ class BaseOrchestrator(ABC):
             if request_type == "INFERENCE":
                 print(f"\n[{self.orchestrator_name}] Ricevuta richiesta di INFERENZA per il Job ID: {job_id[:8]}...")
                 try:
-                    # Eseguiamo la predizione distribuita (implementata dalle classi figlie)
                     self._execute_inference_step(payload)
-                    # Eliminiamo il messaggio solo a successo ottenuto
                     if receipt_handle:
                         self.sqs_queue.delete_message(receipt_handle)
                     print(f"[{self.orchestrator_name}] Inferenza per Job {job_id[:8]} completata con successo.")
@@ -370,7 +364,6 @@ class BaseOrchestrator(ABC):
                     traceback.print_exc()
                 return
 
-            # --- SE NON È INFERENZA, GESTIAMO IL CORRETTO FLUSSO DI TRAINING (VECCHIA LOGICA) ---
             status = self.state_manager.get_job_status(job_id)
             if status == "COMPLETED":
                 print(f"[INFO] Job {job_id[:8]} già completato. Ignoro messaggio duplicato.")
