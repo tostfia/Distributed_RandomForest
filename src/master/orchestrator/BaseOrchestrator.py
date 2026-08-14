@@ -391,12 +391,12 @@ class BaseOrchestrator(ABC):
                 if current_status == "PROCESSING":
                     print(f"[{self.orchestrator_name}] [FAILOVER DETECTED] Riprendo il lavoro del nodo fallito.")
                     alberi_gia_fatti = self._load_checkpoint(job_id, item_data)
+                    retries += 1
                 elif current_status == "COMPLETED":
                     print(f"[{self.orchestrator_name}] Job già completato. Scarto.")
                     if receipt_handle:
                         self.sqs_queue.delete_message(receipt_handle)
                     return
-            
             
             if not self.state_manager.try_claim_job(job_id, self.orchestrator_name, lease_seconds=300):
                 print(f"[{self.orchestrator_name}] [ABORT] Job {job_id[:8]} già in possesso di un altro Orchestrator.")
