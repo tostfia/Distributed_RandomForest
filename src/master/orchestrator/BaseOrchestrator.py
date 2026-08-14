@@ -4,15 +4,19 @@ import json
 import os
 import sys
 import time
+import numpy as np
 import signal
 import threading
+from src.dataset.metrics_dao import MetricsDAOFactory
+from sklearn.utils.extmath import weighted_mode
+from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
-
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "distributed-random-forest")
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
     pass
@@ -638,3 +642,77 @@ class BaseOrchestrator(ABC):
             if os.path.exists(path):
                 os.remove(path)
         self._clean_job_meta(job_id)
+
+    def _save_metrics(self, job_id: str, phase: str, metrics_payload: dict):
+        try:
+            dao = MetricsDAOFactory.get_dao(self.environment)
+            path = self._resolve_metrics_path(job_id, phase)
+            dao.save(path, metrics_payload)
+            print(f"[{self.orchestrator_name}] [METRICS] Salvate in {path}")
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [METRICS-WARN] Salvataggio fallito: {e}")
+
+    def _resolve_metrics_path(self, job_id: str, phase: str) -> str:
+        fname = f"{phase}_{job_id}.json"          # phase = "training" | "inference"
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/metrics/{self.__class__.__name__.lower()}/{fname}"
+        return os.path.join("./.local_storage/metrics", fname)
+
+    def calculate_metrics(
+            self, 
+            predictions_matrix: np.ndarray, 
+            y_test: np.ndarray, 
+            tree_type: str
+        ):
+            """
+            Metodo helper per il calcolo, la validazione statistica e la stampa 
+            delle metriche di performance del modello globale.
+            """
+           
+    
+            if tree_type == "classifier":
+                # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)
+                uniform_weights = np.ones_like(predictions_matrix)
+                final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
+                final_predictions = final_predictions.ravel().astype(int)
+                y_test = y_test.astype(int)
+    
+                y_probs = np.mean(predictions_matrix, axis=0)
+                n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
+                avg_method = "binary" if n_classes <= 2 else "weighted"
+                
+                # Calcolo delle metriche di classificazione standard
+                accuracy = np.mean(final_predictions == y_test)
+                precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
+                recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
+                f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
+                auc = roc_auc_score(y_test, y_probs) if n_classes == 2 else None
+                cm = confusion_matrix(y_test, final_predictions)
+                
+               
+                metrics = {
+                    "accuracy": accuracy,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1_score": f1,
+                    "auc": auc,
+                    "confusion_matrix": cm.tolist(),
+                    "classification_report": classification_report(y_test, final_predictions, output_dict=True, zero_division=0)
+                }
+                
+            else:
+                final_predictions = np.mean(predictions_matrix, axis=0)
+                mse = mean_squared_error(y_test, final_predictions)
+                rmse = np.sqrt(mse)
+                mae = mean_absolute_error(y_test, final_predictions)
+                r2 = r2_score(y_test, final_predictions)
+                
+                metrics = {
+                    "mse": mse,
+                    "rmse": rmse,
+                    "mae": mae,
+                    "r2": r2
+                }
+    
+
+            return metrics

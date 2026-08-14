@@ -10,8 +10,6 @@ from rpyc.utils.classic import obtain
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.utils.extmath import weighted_mode
-from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
@@ -636,15 +634,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
         total_inference_time = time.perf_counter() - inference_start_time
 
         # 8. DELEGA AL METODO MODULARE PER IL CALCOLO E LA STAMPA DELLE METRICHE
-        self._print_and_validate_metrics(
+        metrics = self.calculate_metrics(
             predictions_matrix=predictions_matrix,
             y_test=y_test,
-            tree_type=tree_type,
-            testing_set_size=X_test.shape[0],
-            job_id=job_id,
-            total_inference_time=total_inference_time,
-            rpc_inference_time=rpc_inference_time
+            tree_type=tree_type
         )
+        self._save_metrics(job_id, "inference", {
+            "job_id": job_id, "mode": "centralized", "phase": "inference",
+            "tree_type": tree_type, "testing_set_size": X_test.shape[0],
+            "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
+            "metrics": metrics
+        })
         if hasattr(self, 'state_manager') and self.state_manager:
             try:
                 self.state_manager.update_request_status(
@@ -656,75 +656,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
-    def _print_and_validate_metrics(
-        self, 
-        predictions_matrix: np.ndarray, 
-        y_test: np.ndarray, 
-        tree_type: str, 
-        testing_set_size: int,
-        job_id: str,
-        total_inference_time: float,
-        rpc_inference_time: float
-    ):
-        """
-        Metodo helper per il calcolo, la validazione statistica e la stampa 
-        delle metriche di performance del modello globale.
-        """
-        print("\n" + "═" * 75)
-        print(f"  VALUTAZIONE PRESTAZIONI MODELLO DISTRIBUITO FAULT-TOLERANT (JOB: {job_id[:8]})")
-        print("═" * 75)
-        print(f"  TEMPO TOTALE DI INFERENZA:              {total_inference_time:.4f} secondi")
-        print("═" * 75 + "\n")
-        print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
-
-        if tree_type == "classifier":
-            # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)
-            uniform_weights = np.ones_like(predictions_matrix)
-            final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
-            final_predictions = final_predictions.ravel().astype(int)
-            y_test = y_test.astype(int)
-
-            y_probs = np.mean(predictions_matrix, axis=0)
-            n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
-            avg_method = "binary" if n_classes <= 2 else "weighted"
-            
-            # Calcolo delle metriche di classificazione standard
-            accuracy = np.mean(final_predictions == y_test)
-            precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
-            recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
-            f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
-            auc = roc_auc_score(y_test, y_probs) if n_classes == 2 else None
-            cm = confusion_matrix(y_test, final_predictions)
-            
-            print(f"  Tipo di Modello:                        CLASSIFICATORE")
-            print(f"  Testing Set size:                       {testing_set_size} campioni")
-            print("-" * 75)
-            print(f"  ACCURACY FINALE DISTRIBUITA:            {accuracy * 100:.2f} %")
-            print(f"  PRECISION DISTRIBUITA:                  {precision * 100:.2f} %")
-            print(f"  RECALL DISTRIBUITA:                     {recall * 100:.2f} %")
-            print(f"  F1-SCORE DISTRIBUITO:                   {f1 * 100:.2f} %")
-            print(f"  AUC DISTRIBUITO:                         {auc:.4f}" if auc is not None else "  AUC DISTRIBUITO:                         N/A (multi-classe)")
-            print("-" * 75)
-            print("  Matrice di Confusione:")
-            print(cm)
-            print("\n  Classification Report Completo:")
-            print(classification_report(y_test, final_predictions, zero_division=0))
-            
-        else:
-            final_predictions = np.mean(predictions_matrix, axis=0)
-            mse = mean_squared_error(y_test, final_predictions)
-            rmse = np.sqrt(mse)
-            mae = mean_absolute_error(y_test, final_predictions)
-            r2 = r2_score(y_test, final_predictions)
-            print(f"  Tipo di Modello:                        REGRESSORE")
-            print(f"  Testing Set size:                       {testing_set_size} campioni")
-            print("-" * 75)
-            print(f"  MSE FINALE DISTRIBUITO:                 {mse:.4f}")
-            print(f"  RMSE FINALE DISTRIBUITO:                {rmse:.4f}")
-            print(f"  MAE FINALE DISTRIBUITO:                 {mae:.4f}")
-            print(f"  R² FINALE DISTRIBUITO:                  {r2:.4f}")
-
-        print("═" * 75 + "\n")
+   
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         """

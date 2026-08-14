@@ -529,15 +529,17 @@ class FederatedOrchestrator(BaseOrchestrator):
  
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
  
-        metrics = self._print_and_validate_metrics_federated(
+        metrics = self.calculate_metrics(
             y_pred=np.array(y_pred_global, dtype=np.float64),
             y_true=np.array(y_true_global, dtype=y_true_dtype),
-            tree_type=tree_type,
-            testing_set_size=total_samples_ref[0],
-            job_id=job_id,
-            total_inference_time=total_inference_time,
-            rpc_inference_time=rpc_inference_time
+            tree_type=tree_type
         )
+        self._save_metrics(job_id, "inference", {
+            "job_id": job_id, "mode": "federated", "phase": "inference",
+            "tree_type": tree_type, "testing_set_size": X_test.shape[0],
+            "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
+            "metrics": metrics
+        })
         if hasattr(self, 'state_manager') and self.state_manager:
             try:
                 self.state_manager.update_request_status(
@@ -599,68 +601,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
             traceback.print_exc()
             return len(all_trained_trees)
-        
-    def _print_and_validate_metrics_federated(self, y_pred: np.ndarray, y_true: np.ndarray, tree_type: str, testing_set_size: int, job_id: str, total_inference_time: float, rpc_inference_time: float):
-        print("\n" + "═" * 75)
-        print(f"  VALUTAZIONE PRESTAZIONI MODELLO FEDERATO (JOB: {job_id[:8]})")
-        print("═" * 75)
-        print(f"  TEMPO TOTALE DI INFERENZA:              {total_inference_time:.4f} secondi")
-        print(f"  TEMPO INFERENZA DISTRIBUITA RPC:        {rpc_inference_time:.4f} secondi")
-        print("═" * 75 + "\n")
-
-        if tree_type == "classifier":
-            final_predictions = (np.array(y_pred) >= 0.5).astype(int) 
-            y_true = np.array(y_true).astype(int)
-
-            accuracy  = np.mean(final_predictions == y_true)
-            precision = precision_score(y_true, final_predictions, zero_division=0)
-            recall    = recall_score(y_true, final_predictions, zero_division=0)
-            f1        = f1_score(y_true, final_predictions, zero_division=0)
-            auc       = roc_auc_score(y_true, y_pred) if len(np.unique(y_true)) > 1 else float('nan')
-            cm        = confusion_matrix(y_true, final_predictions)
-            
-
-            print(f"  Tipo di Modello:                        CLASSIFICATORE FEDERATO")
-            print(f"  Testing Set size (aggregato):           {testing_set_size} campioni")
-            print("-" * 75)
-            print(f"  ACCURACY FINALE FEDERATA:               {accuracy * 100:.2f} %")
-            print(f"  PRECISION FEDERATA:                     {precision * 100:.2f} %")
-            print(f"  RECALL FEDERATA:                        {recall * 100:.2f} %")
-            print(f"  F1-SCORE FEDERATO:                      {f1 * 100:.2f} %")
-            print(f"  AUC FEDERATO:                           {auc:.4f}")
-            print("-" * 75)
-            print("  Matrice di Confusione:")
-            print(cm)
-            print("\n  Classification Report Completo:")
-            print(classification_report(y_true, final_predictions, zero_division=0))
-            metrics = {
-                "accuracy": float(accuracy),
-                "precision": float(precision),
-                "recall": float(recall),
-                "f1_score": float(f1)
-            }
-        else:
-            final_predictions = y_pred.astype(float)
-            y_true_f = y_true.astype(float)
-            mse = mean_squared_error(y_true_f, final_predictions)
-            rmse = np.sqrt(mse)
-            mae = mean_absolute_error(y_true_f, final_predictions)
-            r2 = r2_score(y_true_f, final_predictions)
-            print(f"  Tipo di Modello:                        REGRESSORE FEDERATO")
-            print(f"  Testing Set size (aggregato):           {testing_set_size} campioni")
-            print("-" * 75)
-            print(f"  MSE FINALE FEDERATO:                    {mse:.4f}")
-            print(f"  RMSE FINALE FEDERATO:                   {rmse:.4f}")
-            print(f"  MAE FINALE FEDERATO:                    {mae:.4f}")
-            print(f"  R² FINALE FEDERATO:                     {r2:.4f}")
-            metrics = {
-                "mean_squared_error": float(mse),
-                "rmse": float(rmse),
-                "mae": float(mae),
-                "r2_score": float(r2)
-            }
-        print("═" * 75 + "\n")
-        return metrics
+    
         
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
