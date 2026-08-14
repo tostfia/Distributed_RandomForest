@@ -13,7 +13,6 @@ class DatasetDAO(ABC):
     @abstractmethod
     def load_dataset(self, path: str, sample_fraction: float = None, dataset_seed: int = None) -> pd.DataFrame:
         """Carica un dataset e restituisce un DataFrame Pandas.
-
         Se sample_fraction è specificato (0 < f < 1), il campionamento avviene
         IN STREAMING durante la lettura, chunk-per-chunk, evitando di caricare
         l'intero file in RAM prima di sottocampionare. Fondamentale per dataset
