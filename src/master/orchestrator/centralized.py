@@ -36,15 +36,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.train_data_path = None
         self.test_data_path = None
         self.chunk_sent_event = threading.Event()
-
-        # Cache in-memoria (solo per QUESTA istanza di processo) degli alberi
-        # già addestrati per un dato job. Serve esclusivamente a evitare una
-        # GET S3 ridondante quando il round successivo viene gestito dalla
-        # STESSA istanza orchestratore. NON sostituisce mai il checkpoint
-        # fisico su S3, che resta l'unica fonte di verità condivisa: se
-        # un'altra istanza (nuovo leader dopo un fault) subentra, questa
-        # cache sarà vuota/non coerente e si procederà comunque con un
-        # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
         self._trees_cache = {}
         
         super().__init__(
