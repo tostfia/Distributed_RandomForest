@@ -15,7 +15,6 @@ import re
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import (classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score)
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
@@ -530,13 +529,13 @@ class FederatedOrchestrator(BaseOrchestrator):
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
  
         metrics = self.calculate_metrics(
-            y_pred=np.array(y_pred_global, dtype=np.float64),
-            y_true=np.array(y_true_global, dtype=y_true_dtype),
+            predictions_matrix=np.array(y_pred_global, dtype=np.float64),
+            y_test=np.array(y_true_global, dtype=y_true_dtype),
             tree_type=tree_type
         )
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "federated", "phase": "inference",
-            "tree_type": tree_type, "testing_set_size": X_test.shape[0],
+            "tree_type": tree_type, "testing_set_size": total_samples_ref[0],
             "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
             "metrics": metrics
         })
@@ -684,7 +683,6 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato in nessuno dei percorsi:")
             print(f"  • {config_path}")
         return None
-
 
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Federato...")

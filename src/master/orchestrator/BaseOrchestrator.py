@@ -17,6 +17,7 @@ from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "distributed-random-forest")
+
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
     pass
@@ -449,7 +450,7 @@ class BaseOrchestrator(ABC):
                     self.sqs_queue.delete_message(receipt_handle)
                 self._clean_checkpoint(job_id)
 
-                self._generate_performance_report(job_id, t_dist)
+                self._generate_performance_report(job_id, t_dist, current_alberi)
                 print(f"[{self.orchestrator_name}] Job {job_id[:8]} completato con successo.")
             except MessageOwnershipLostError as ownership_error:
                 print(f"[{self.orchestrator_name}] [ABORT] {ownership_error}")
@@ -563,13 +564,29 @@ class BaseOrchestrator(ABC):
             return db_val
         return db_val
     
-    def _generate_performance_report(self, job_id: str, t_dist: float):
+    def _generate_performance_report(self, job_id: str, t_dist: float, alberi_addestrati: int = None):
+        num_workers = self._get_active_worker_count()
         print("\n" + "═" * 75)
         print(f"  REPORT PRESTAZIONALE DISTRIBUITO - JOB {job_id[:8]}")
         print("═" * 75)
         print(f"  Tempo totale addestramento (T_dist):   {t_dist:.4f} s")
-        print(f"  Worker utilizzati:                     {self._get_active_worker_count()}")
+        print(f"  Worker utilizzati:                     {num_workers}")
+        if alberi_addestrati is not None:
+            print(f"  Alberi addestrati:                     {alberi_addestrati}")
         print("═" * 75 + "\n")
+
+        # Persistenza delle metriche di training: stesso meccanismo gia usato per
+        # l'inferenza, quindi finisce automaticamente in ./.local_storage/metrics
+        # se environment == "local", o su s3://BUCKET_NAME/metrics/... se == "aws".
+        mode = self.__class__.__name__.replace("Orchestrator", "").lower()
+        self._save_metrics(job_id, "training", {
+            "job_id": job_id,
+            "mode": mode,
+            "phase": "training",
+            "timings": {"total_training_time": t_dist},
+            "worker_count": num_workers,
+            "alberi_addestrati": alberi_addestrati,
+        })
     
     def _get_active_worker_count(self):
         workers = ServiceRegistry.get_available_workers(self.environment)
@@ -714,5 +731,4 @@ class BaseOrchestrator(ABC):
                     "r2": r2
                 }
     
-
             return metrics
