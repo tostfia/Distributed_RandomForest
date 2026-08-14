@@ -42,6 +42,8 @@ alberi invece di ripristinarli correttamente.
 import os
 import pickle
 from abc import ABC, abstractmethod
+import boto3
+from botocore.exceptions import ClientError
 
 
 class CheckpointDAO(ABC):
@@ -105,11 +107,6 @@ class S3CheckpointDAO(CheckpointDAO):
     """Backend per ambiente 'aws'. Path atteso: 's3://bucket-name/prefix/key.pkl'."""
 
     def __init__(self):
-        # Import volutamente locale: boto3 viene richiesto solo quando si opera
-        # davvero in ambiente 'aws'. Chi sviluppa/testa solo in locale non deve
-        # avere boto3 installato per usare il resto del sistema.
-        import boto3
-        from botocore.exceptions import ClientError
         self._client = boto3.client("s3")
         self._ClientError = ClientError
 

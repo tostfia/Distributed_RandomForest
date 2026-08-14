@@ -51,8 +51,6 @@ class FederatedDataSplitter:
             end_te = min(start_te + chunk_size_test, len(test_df))
             test_shards.append(test_df.iloc[start_te:end_te])
 
-        
-
         if environment == "local":
             base_cache_dir = "./workers_cache"
             # --- SCENARIO LOCALE / DOCKER (File System Condiviso) ---
