@@ -248,7 +248,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             assigned_tasks = {}
             sub_start = start_alberi
-            task_id_counter = 1
+            task_id_counter = start_alberi + 1
             # riceve UN SOLO chunk, di sua esclusiva proprietà. Se il worker muore mentre
             # lo sta processando, il chunk NON viene ripreso da nessun altro worker:
             # il thread dedicato smette di ritentare la RPC e resta in attesa che quello

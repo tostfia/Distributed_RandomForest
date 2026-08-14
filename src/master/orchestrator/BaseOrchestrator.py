@@ -429,7 +429,7 @@ class BaseOrchestrator(ABC):
                             f"[{self.orchestrator_name}] Lease del job persa: un altro Orchestrator l'ha reclamata."
                         )
                     prossimo_target = min(current_alberi + step_alberi, alberi_totali)
-                    
+                    payload["retries"] = retries
                     alberi_ottenuti = self._execute_training_step(payload, current_alberi, prossimo_target, base_random_state)
 
                     if alberi_ottenuti <= current_alberi:
@@ -685,7 +685,6 @@ class BaseOrchestrator(ABC):
             Metodo helper per il calcolo, la validazione statistica e la stampa 
             delle metriche di performance del modello globale.
             """
-           
     
             if tree_type == "classifier":
                 # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)

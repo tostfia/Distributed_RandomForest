@@ -222,7 +222,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             # 4. Configurazione della Coda di Sotto-Task locale
             task_queue = queue.Queue()
             sub_start = start_alberi
-            task_id_counter = 1
+            task_id_counter = start_alberi + 1
             
             while sub_start < target_alberi:
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
@@ -455,8 +455,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         print(f"[{self.orchestrator_name}] Preparazione della matrice di test (Shape: {test_df.shape})...")
         actual_target = target_col if target_col in test_df.columns else ("Target" if "Target" in test_df.columns else "Label")
-        X_test = test_df.drop(columns=[target_col]).to_numpy(dtype=np.float64)
-        y_test = test_df[target_col].to_numpy()
+        if actual_target != target_col:
+            print(f"[{self.orchestrator_name}] [WARN] Colonna target attesa '{target_col}' non trovata nel test set. "
+            f"Uso '{actual_target}' come fallback.")
+        X_test = test_df.drop(columns=[actual_target]).to_numpy(dtype=np.float64)
+        y_test = test_df[actual_target].to_numpy()
         serialized_X_test = pickle.dumps(X_test)
 
         # 4. SCOPERTA WORKER E INIZIALIZZAZIONE STRUTTURE FAULT-TOLERANT
