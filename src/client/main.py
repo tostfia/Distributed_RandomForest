@@ -12,9 +12,7 @@ from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, Tr
 from src.baseline.run_baseline import run_baseline
 import shutil
 
-
 cfg = SystemConfig()
-
 
 CONFIG_PATH = os.path.join("./.local_storage", "config.json")
 HISTORY_PATH = os.path.join("./.local_storage", "requests_history.json")

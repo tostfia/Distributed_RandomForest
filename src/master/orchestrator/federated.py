@@ -111,46 +111,40 @@ class FederatedOrchestrator(BaseOrchestrator):
 
     def _ensure_aws_bootstrap(self, payload: dict):
         """
-        Esegue il bootstrap degli shard su S3 se siamo in ambiente 'aws'.
-        Simmetrico a _ensure_local_bootstrap: usa FederatedDataSplitter con
-        environment="aws", che carica direttamente gli shard in RAM su S3
-        (nessun file temporaneo su disco), nel path che federatedWorker.py
-        si aspetta di trovare in _load_and_preprocess_real_shard:
-            s3://{BUCKET_NAME}/federated_shards/worker_{i}/{train,test}_shard.csv
-        Idempotente: se gli shard sono già su S3, salta la rigenerazione.
+        Verifica (senza generarli) che gli shard siano già stati provisionati
+        su S3 per l'ambiente AWS. La generazione/upload NON avviene più qui:
+        è responsabilità di uno script di provisioning standalone
+        (scripts/provision_federated_shards.py), eseguito UNA VOLTA, PRIMA di
+        avviare master e worker — coerente con l'idea che, in un vero
+        scenario federato, i dati risiedono già sui nodi quando il sistema
+        parte, non vengono generati/distribuiti reattivamente durante un job.
         """
         datasetype = self._resolve_dataset_type(payload)
         if datasetype == "synthetic":
-            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Bootstrap S3 saltato "
-                  f"(delegato ai singoli worker).")
+            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Nessun controllo shard necessario "
+                  f"(generato autonomamente da ogni worker).")
             return
- 
+
         num_workers = self.num_workers
         s3_client = boto3.client("s3")
- 
-        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Verifica shard su S3 per {num_workers} worker...")
-        shards_esistenti = True
+
+        print(f"[{self.orchestrator_name}] [CHECK AWS] Verifica provisioning shard su S3 per {num_workers} worker...")
+        mancanti = []
         for i in range(1, num_workers + 1):
             for fname in ("train_shard.csv", "test_shard.csv"):
                 key = f"federated_shards/worker_{i}/{fname}"
                 try:
                     s3_client.head_object(Bucket=BUCKET_NAME, Key=key)
                 except ClientError:
-                    shards_esistenti = False
-                    break
-            if not shards_esistenti:
-                break
- 
-        if shards_esistenti:
-            print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Shard già presenti su S3. Salto il ricalcolo.")
-            return
- 
-        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS] Shard incompleti o assenti. Avvio Generazione...")
-        data_folder = getattr(self.cfg, "dataset_path", None) or "./data"
-        data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
-        splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
-        splitter.split_and_shard(data_loader, num_workers=num_workers, environment="aws", bucket_name=BUCKET_NAME)
-        print(f"[{self.orchestrator_name}] [BOOTSTRAP AWS OK] Shard reali distribuiti su S3.")
+                    mancanti.append(key)
+
+        if mancanti:
+            raise RuntimeError(
+                f"[{self.orchestrator_name}] Provisioning AWS incompleto: mancano {len(mancanti)} shard su S3 "
+                f"(bucket '{BUCKET_NAME}'), es. {mancanti[:3]}. Esegui "
+                f"'python -m scripts.provision_federated_shards' prima di avviare il cluster."
+            )
+        print(f"[{self.orchestrator_name}] [CHECK AWS OK] Tutti gli shard richiesti sono presenti su S3.")
         
     def _perform_active_recovery(self):
         """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
@@ -268,9 +262,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                 assigned_tasks[w_name] = (task_id_counter, sub_start, sub_end, task_seed)
                 task_id_counter += 1
                 sub_start = sub_end
-            
                 
-            feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
+            feature_selezionate = (None if self.environment == "aws" else self.select_from_config(self._resolve_dataset_type(payload)))
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
             RETRY_WAIT_SECONDS = 10
@@ -424,7 +417,10 @@ class FederatedOrchestrator(BaseOrchestrator):
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
         forest_bytes = pickle.dumps(all_trees)
-        feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
+        feature_selezionate = (
+            None if self.environment == "aws"
+            else self.select_from_config(self._resolve_dataset_type(payload))
+        )
 
         y_pred_global = []
         y_true_global = []

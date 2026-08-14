@@ -182,10 +182,25 @@ else
   echo "    Cluster già attivo: $CLUSTER_NAME"
 fi
 
-echo "==> [8/10] Registrazione Task Definition WORKER..."
-cat <<EOF > /tmp/worker-task-def.json
+if [ "$TRAINING_MODE" == "federated" ]; then
+  echo "==> [7b/10] Verifica provisioning shard federati su S3..."
+  MISSING_SHARD=0
+  for i in $(seq 1 "$WORKER_DESIRED_COUNT"); do
+    aws s3api head-object --bucket "$BUCKET_NAME" --key "federated_shards/worker_${i}/train_shard.csv" --region "$REGION" > /dev/null 2>&1 || MISSING_SHARD=1
+  done
+  if [ "$MISSING_SHARD" -eq 1 ]; then
+    echo "    [ERRORE] Shard mancanti su S3 per uno o più worker (1..$WORKER_DESIRED_COUNT)."
+    echo "    Esegui prima: python -m scripts.provision_federated_shards --num-workers $WORKER_DESIRED_COUNT"
+    exit 1
+  fi
+  echo "    OK: shard presenti per tutti i $WORKER_DESIRED_COUNT worker."
+fi
+
+echo "==> [8/10] Registrazione Task Definition WORKER (una per ciascun indice fisso 1..$WORKER_DESIRED_COUNT)..."
+for i in $(seq 1 "$WORKER_DESIRED_COUNT"); do
+  cat <<EOF > /tmp/worker-task-def-${i}.json
 {
-  "family": "rf-worker-task",
+  "family": "rf-worker-task-${i}",
   "requiresCompatibilities": ["FARGATE"],
   "networkMode": "awsvpc",
   "cpu": "${WORKER_CPU}",
@@ -202,6 +217,7 @@ cat <<EOF > /tmp/worker-task-def.json
         {"name": "PYTHONUNBUFFERED", "value": "1"},
         {"name": "WORKER_HEARTBEAT_TIMEOUT", "value": "120"},
         {"name": "NUM_WORKERS", "value": "${WORKER_DESIRED_COUNT}"},
+        {"name": "WORKER_INDEX", "value": "${i}"},
         {"name": "RPC_PORT", "value": "${RPC_PORT}"},
         {"name": "ENV_MODE", "value": "aws"},
         {"name": "SYS_ENV", "value": "aws"},
@@ -214,14 +230,14 @@ cat <<EOF > /tmp/worker-task-def.json
       ],
       "command": [
         "sh", "-c",
-        "export RPC_ADVERTISE_HOST=\$(curl -s \"\$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: \$RPC_ADVERTISE_HOST\"; exec python -m src.worker.main Worker-\${EC2_ID}-\${TRAINING_MODE}-\$(hostname) ${RPC_PORT} ${TRAINING_MODE} aws"
+        "export RPC_ADVERTISE_HOST=\$(curl -s \"\$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: \$RPC_ADVERTISE_HOST (WORKER_INDEX=${i})\"; exec python -m src.worker.main Worker-\${EC2_ID}-\${TRAINING_MODE}-WIDX${i}-\$(hostname) ${RPC_PORT} ${TRAINING_MODE} aws"
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
           "awslogs-group": "/ecs/rf-worker",
           "awslogs-region": "${REGION}",
-          "awslogs-stream-prefix": "worker",
+          "awslogs-stream-prefix": "worker-${i}",
           "awslogs-create-group": "true"
         }
       }
@@ -229,8 +245,9 @@ cat <<EOF > /tmp/worker-task-def.json
   ]
 }
 EOF
-aws ecs register-task-definition --cli-input-json file:///tmp/worker-task-def.json --region "$REGION" > /dev/null
-echo "    Task Definition worker registrata."
+  aws ecs register-task-definition --cli-input-json file:///tmp/worker-task-def-${i}.json --region "$REGION" > /dev/null
+  echo "    Task Definition worker #$i registrata (rf-worker-task-${i}, WORKER_INDEX=${i})."
+done
 
 echo "==> [9/10] Registrazione Task Definition ORCHESTRATOR..."
 cat <<EOF > /tmp/orchestrator-task-def.json
@@ -285,30 +302,33 @@ echo "==> [10/10] Creazione/aggiornamento Services..."
 
 NETWORK_CONFIG="awsvpcConfiguration={subnets=[$SUBNET_1,$SUBNET_2],securityGroups=[$SG_ID],assignPublicIp=ENABLED}"
 
-# --- Worker service ---
-WORKER_SVC_EXISTS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services worker-service \
-  --query "services[0].status" --output text --region "$REGION" 2>/dev/null || echo "MISSING")
+# --- Worker services: uno per ciascun indice fisso, desired-count=1 ciascuno ---
+for i in $(seq 1 "$WORKER_DESIRED_COUNT"); do
+  SVC_NAME="worker-service-${i}"
+  SVC_EXISTS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SVC_NAME" \
+    --query "services[0].status" --output text --region "$REGION" 2>/dev/null || echo "MISSING")
 
-if [ "$WORKER_SVC_EXISTS" == "ACTIVE" ]; then
-  echo "    Service worker-service esistente: forzo il rimpiazzo dei container..."
-  aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
-    --task-definition rf-worker-task --desired-count "$WORKER_DESIRED_COUNT" \
-    --deployment-configuration "$DEPLOYMENT_CONFIG" \
-    --availability-zone-rebalancing DISABLED \
-    --force-new-deployment --region "$REGION" > /dev/null
-else
-  echo "    Creazione Service worker-service (desired-count=$WORKER_DESIRED_COUNT)..."
-  aws ecs create-service \
-    --cluster "$CLUSTER_NAME" \
-    --service-name worker-service \
-    --task-definition rf-worker-task \
-    --desired-count "$WORKER_DESIRED_COUNT" \
-    --launch-type FARGATE \
-    --deployment-configuration "$DEPLOYMENT_CONFIG" \
-    --availability-zone-rebalancing DISABLED \
-    --network-configuration "$NETWORK_CONFIG" \
-    --region "$REGION" > /dev/null
-fi
+  if [ "$SVC_EXISTS" == "ACTIVE" ]; then
+    echo "    Service $SVC_NAME esistente: forzo il rimpiazzo del container (WORKER_INDEX=${i})..."
+    aws ecs update-service --cluster "$CLUSTER_NAME" --service "$SVC_NAME" \
+      --task-definition "rf-worker-task-${i}" --desired-count 1 \
+      --deployment-configuration "$DEPLOYMENT_CONFIG" \
+      --availability-zone-rebalancing DISABLED \
+      --force-new-deployment --region "$REGION" > /dev/null
+  else
+    echo "    Creazione Service $SVC_NAME (WORKER_INDEX=${i}, desired-count=1)..."
+    aws ecs create-service \
+      --cluster "$CLUSTER_NAME" \
+      --service-name "$SVC_NAME" \
+      --task-definition "rf-worker-task-${i}" \
+      --desired-count 1 \
+      --launch-type FARGATE \
+      --deployment-configuration "$DEPLOYMENT_CONFIG" \
+      --availability-zone-rebalancing DISABLED \
+      --network-configuration "$NETWORK_CONFIG" \
+      --region "$REGION" > /dev/null
+  fi
+done
 
 # --- Orchestrator service ---
 ORCH_SVC_EXISTS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services orchestrator-service \
@@ -348,8 +368,8 @@ echo " Subnet usate:   $SUBNET_1, $SUBNET_2"
 echo " Log worker:      /ecs/rf-worker (CloudWatch)"
 echo " Log orchestrator:/ecs/rf-orchestrator (CloudWatch)"
 echo ""
-echo " Per scalare i worker:"
-echo "   aws ecs update-service --cluster $CLUSTER_NAME --service worker-service --desired-count N --region $REGION"
+echo " Per scalare i worker: aggiorna NUM_WORKERS in .env, ri-esegui"
+echo "   'python -m scripts.provision_federated_shards --num-workers N' e poi questo deploy.sh"
 echo ""
 echo " Per vedere i task attivi:"
 echo "   aws ecs list-tasks --cluster $CLUSTER_NAME --region $REGION"

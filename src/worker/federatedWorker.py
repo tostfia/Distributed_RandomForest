@@ -1,7 +1,7 @@
 from multiprocessing.pool import Pool
+import json
 import os
 import pickle
-import threading
 import time as time_module
 from botocore.exceptions import ClientError
 import boto3
@@ -11,7 +11,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
@@ -78,8 +77,17 @@ def _train_single_fed_tree(args):
 class FederatedWorker(BaseWorker):
     """Worker per la gestione dell'addestramento in modalità federata.
 
-    Interpreta le stringhe sintetiche oppure scarica lo shard reale assegnato
-    dall'Orchestratore salvandolo nella cache del disco rigido locale.
+    In ambiente AWS, il worker possiede GIÀ i propri dati (shard reale +
+    manifesti di feature selection) prima ancora di registrarsi come
+    disponibile: li scarica una volta sola nel proprio __init__, da un bucket
+    S3 seminato in precedenza da uno script di provisioning standalone
+    (scripts/provision_federated_shards.py). Nessun download o generazione di
+    dati avviene più reattivamente durante un job — questo simula un vero
+    scenario federato, dove il nodo nasce già con il proprio dataset locale.
+
+    In ambiente locale (single machine) resta invece il comportamento
+    precedente: il vincolo tecnico della macchina unica rende necessario un
+    passaggio intermedio gestito dall'Orchestratore.
     """
 
     def __init__(
@@ -111,20 +119,39 @@ class FederatedWorker(BaseWorker):
         self.local_sample_count = 0
         
         # Manteniamo aperto il file di lock come variabile d'istanza per impedire al Garbage Collector di distruggerlo
+        # (usato solo dal branch locale, vedi _claim_worker_index)
         self._index_lock_file = None
 
-        # --- GESTIONE COERENTE DEL REGISTRO DEI WORKER (FAULT-TOLERANT) ---
+        # --- ASSEGNAZIONE DELL'INDICE WORKER (= "quale shard mi appartiene") ---
         if self.environment == "aws":
-            num_workers_conf = int(os.environ.get("NUM_WORKERS", 3))
-            self._index_claim_owner = worker_name
-            self.worker_index = ServiceRegistry.claim_worker_index(
-                num_workers=num_workers_conf, owner=self._index_claim_owner
-            )
+            # Binding FISSO, deciso a priori in fase di provisioning/deploy
+            # (es. user-data / launch template dell'istanza EC2), non più
+            # reclamato dinamicamente a runtime: in un ambiente federato reale
+            # un nodo non "sorteggia" il proprio dataset, lo possiede già.
+            worker_index_env = os.environ.get("WORKER_INDEX")
+            if not worker_index_env:
+                raise RuntimeError(
+                    f"[{worker_name}] Variabile d'ambiente WORKER_INDEX non impostata. "
+                    f"In ambiente AWS ogni istanza worker deve ricevere un indice di shard "
+                    f"fisso (1..N), assegnato in fase di provisioning/deploy — non è più "
+                    f"reclamato dinamicamente via ServiceRegistry."
+                )
+            try:
+                self.worker_index = int(worker_index_env)
+            except ValueError:
+                raise RuntimeError(
+                    f"[{worker_name}] WORKER_INDEX='{worker_index_env}' non è un intero valido."
+                )
+
             self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
             self.local_cache_dir = f"/tmp/{self.worker_name}_cache"
+            os.makedirs(self.local_cache_dir, exist_ok=True)
 
-            self._stop_index_refresh = threading.Event()
-            threading.Thread(target=self._index_lock_refresh_loop, daemon=True).start()
+            # Download SINCRONO e bloccante, PRIMA che il worker si registri
+            # come disponibile (la registrazione avviene dopo, in
+            # BaseWorker.start_server): quando comincia a servire richieste
+            # ha già tutto in locale.
+            self._bootstrap_local_data_from_s3()
         else:
             # Siamo in ambiente "local" (Docker Compose Replicas)
             # Acquisiamo un indice atomico non-bloccante tramite fcntl
@@ -133,13 +160,68 @@ class FederatedWorker(BaseWorker):
             # Generiamo il nome uniforme corrispondente alle directory generate dallo splitter dell'orchestratore
             worker_id_uniforme = f"Worker-Locale-{self.worker_index:02d}"
             self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
-            
-        os.makedirs(self.local_cache_dir, exist_ok=True)
+            os.makedirs(self.local_cache_dir, exist_ok=True)
 
         print(
             f"[{self.worker_name}] Inizializzato con successo. "
             f"Indice Worker: {self.worker_index} — Cache Dir: {self.local_cache_dir}"
         )
+
+    def _bootstrap_local_data_from_s3(self):
+        """
+        Scarica in modo sincrono, PRIMA che il worker si registri come
+        disponibile, tutto ciò che gli serve per essere autonomo: il proprio
+        shard del dataset reale e i manifesti di feature selection
+        (config_real.json / config_synthetic.json), se presenti.
+
+        Questi artefatti sono generati offline da uno script di provisioning
+        dedicato (scripts/provision_federated_shards.py), MAI durante un job
+        di training.
+        """
+        bucket_name = os.environ.get(
+            "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+        )
+        s3_client = boto3.client("s3")
+
+        print(f"[{self.worker_name}] [PROVISIONING] Download shard e manifesti da S3 (bucket: {bucket_name})...")
+
+        # 1. Shard del dataset reale: OBBLIGATORIO. Se manca, il worker non
+        #    può considerarsi operativo — meglio fallire subito ed
+        #    esplicitamente che scoprirlo al primo job.
+        shard_keys = {
+            "train_shard.csv": f"federated_shards/worker_{self.worker_index}/train_shard.csv",
+            "test_shard.csv": f"federated_shards/worker_{self.worker_index}/test_shard.csv",
+        }
+        for local_filename, s3_key in shard_keys.items():
+            local_path = os.path.join(self.local_cache_dir, local_filename)
+            try:
+                s3_client.download_file(bucket_name, s3_key, local_path)
+                print(f"[{self.worker_name}] [PROVISIONING] Scaricato {s3_key} -> {local_path}")
+            except ClientError as e:
+                raise IOError(
+                    f"[{self.worker_name}] Impossibile scaricare lo shard '{s3_key}' dal bucket "
+                    f"'{bucket_name}'. Hai eseguito lo script di provisioning "
+                    f"(scripts/provision_federated_shards.py) prima di avviare i worker? Dettaglio: {e}"
+                )
+
+        # 2. Manifesti di feature selection: best-effort, possono non esistere
+        #    entrambi (es. se la baseline è stata eseguita solo sul reale o
+        #    solo sul sintetico). Il worker li terrà entrambi in cache e
+        #    sceglierà quello giusto al momento del job, in base al
+        #    dataset_type richiesto — senza bisogno che il master glieli
+        #    inietti via RPC.
+        for dataset_type in ("real", "synthetic"):
+            config_filename = f"config_{dataset_type}.json"
+            s3_key = f"federated_config/{config_filename}"
+            local_path = os.path.join(self.local_cache_dir, config_filename)
+            try:
+                s3_client.download_file(bucket_name, s3_key, local_path)
+                print(f"[{self.worker_name}] [PROVISIONING] Scaricato manifesto '{config_filename}'.")
+            except ClientError:
+                print(
+                    f"[{self.worker_name}] [PROVISIONING] Manifesto '{config_filename}' non trovato su S3 "
+                    f"(ok se non esegui job con dataset_type='{dataset_type}')."
+                )
 
     def _claim_worker_index(self, num_workers: int) -> int:
         import fcntl
@@ -215,7 +297,7 @@ class FederatedWorker(BaseWorker):
             if dataset_type == "synthetic":
                 self._load_synthetic_data(hyperparameters)
             else:
-                self._load_and_preprocess_real_shard(worker_index, hyperparameters)
+                self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
             self._cached_job_id = job_id
 
         tree_type = hyperparameters.get("tree_type", "classifier")
@@ -248,8 +330,41 @@ class FederatedWorker(BaseWorker):
 
         print(f"[+] [{self.worker_name}] Addestramento completato. Serializzazione in corso...")
         return pickle.dumps(local_trees)
-    
-    def _load_and_preprocess_real_shard(self, worker_index: int, hyperparameters: dict):
+
+    def _resolve_selected_features(self, dataset_type: str, hyperparameters: dict):
+        """
+        Determina quale spazio di feature usare per il preprocessing dello shard.
+
+        - In AWS: il worker le risolve in AUTONOMIA leggendo il manifesto
+          già scaricato in cache al boot (config_{dataset_type}.json). Non
+          dipende più da ciò che il master inietta via RPC.
+        - In locale: comportamento invariato, la lista arriva ancora nel
+          payload hyperparameters (iniettata dal master via select_from_config).
+        """
+        if self.environment == "aws":
+            config_path = os.path.join(self.local_cache_dir, f"config_{dataset_type}.json")
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    feature_selezionate = config_data.get("feature_selezionate")
+                    if feature_selezionate:
+                        print(
+                            f"[{self.worker_name}] Feature space risolto localmente da "
+                            f"'{config_path}' ({len(feature_selezionate)} colonne)."
+                        )
+                        return feature_selezionate
+                except Exception as e:
+                    print(f"[{self.worker_name}] [ATTENZIONE] Lettura manifesto locale fallita: {e}")
+            print(
+                f"[{self.worker_name}] [ATTENZIONE] Nessun manifesto locale trovato per "
+                f"dataset_type='{dataset_type}'. Uso il set di feature completo."
+            )
+            return None
+
+        return hyperparameters.get("feature_selezionate", None)
+
+    def _load_and_preprocess_real_shard(self, worker_index: int, hyperparameters: dict, dataset_type: str = "real"):
         train_filename = "train_shard.csv"
         test_filename = "test_shard.csv"
         local_train_path = os.path.join(self.local_cache_dir, train_filename)
@@ -257,20 +372,17 @@ class FederatedWorker(BaseWorker):
 
         hyperparameters = obtain(hyperparameters)
 
-        if self.environment == "aws":
-            bucket_name = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
-            s3_train_key = f"federated_shards/worker_{worker_index}/{train_filename}"
-            s3_test_key = f"federated_shards/worker_{worker_index}/{test_filename}"
-            
-            s3_client = boto3.client("s3")
-            try:
-                s3_client.download_file(bucket_name, s3_train_key, local_train_path)
-                s3_client.download_file(bucket_name, s3_test_key, local_test_path)
-            except ClientError as e:
-                raise IOError(f"[{self.worker_name}] Errore download shard da S3: {e}")
-
+        # In AWS lo shard è già stato scaricato in fase di provisioning/boot
+        # (_bootstrap_local_data_from_s3, chiamato da __init__): qui leggiamo
+        # solo dal disco locale, nessuna chiamata di rete durante il job.
         if not os.path.exists(local_train_path):
-            raise FileNotFoundError(f"Shard non trovato in {local_train_path}")
+            hint = (
+                " Il provisioning AWS non è stato eseguito o è fallito: lancia "
+                "'python -m scripts.provision_federated_shards' prima di avviare i worker."
+                if self.environment == "aws"
+                else ""
+            )
+            raise FileNotFoundError(f"Shard non trovato in {local_train_path}.{hint}")
             
         df_train_raw = pd.read_csv(local_train_path, low_memory=False)
         df_test_raw = pd.read_csv(local_test_path, low_memory=False)
@@ -283,15 +395,15 @@ class FederatedWorker(BaseWorker):
         df_train_clean = preprocessor.process(df_train_bin)
         df_test_clean = preprocessor.process(df_test_bin)
 
-        selected_features = hyperparameters.get("feature_selezionate", None)
+        selected_features = self._resolve_selected_features(dataset_type, hyperparameters)
         
         if selected_features is not None:
-            print(f"[{self.worker_name}] Applicazione spazio feature sincronizzato dal Master ({len(selected_features)} colonne).")
+            print(f"[{self.worker_name}] Applicazione spazio feature sincronizzato ({len(selected_features)} colonne).")
             features_to_keep = [col for col in selected_features if col != self.target_column]
             X_train_df = df_train_clean[features_to_keep]
             X_test_df = df_test_clean[features_to_keep]
         else:
-            print(f"[{self.worker_name}] [ATTENZIONE] Nessuna lista feature passata. Uso il set completo.")
+            print(f"[{self.worker_name}] [ATTENZIONE] Nessuna lista feature disponibile. Uso il set completo.")
             X_train_df = df_train_clean.drop(columns=[self.target_column])
             X_test_df = df_test_clean.drop(columns=[self.target_column])
 
@@ -358,7 +470,7 @@ class FederatedWorker(BaseWorker):
             if dataset_type == "synthetic":
                 self._load_synthetic_data(hyperparameters)
             else:
-                self._load_and_preprocess_real_shard(worker_index, hyperparameters)
+                self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
         self._cached_job_id = job_id
 
         unpacked_model = pickle.loads(forest)
@@ -407,20 +519,3 @@ class FederatedWorker(BaseWorker):
     
     def exposed_get_local_sample_count(self) -> int:
         return self.local_sample_count
-
-    def _index_lock_refresh_loop(self, interval: int = 60):
-        while not self._stop_index_refresh.is_set():
-            for _ in range(interval):
-                if self._stop_index_refresh.is_set():
-                    return
-                time_module.sleep(1)
-            try:
-                if not ServiceRegistry.refresh_worker_index_lock(self.worker_index, owner=self._index_claim_owner):
-                    print(f"[{self.worker_name}] [WARN] Refresh del lock indice fallito: potrebbe essere stato reclamato da un altro nodo.")
-            except Exception as e:
-                print(f"[{self.worker_name}] [ERRORE] Refresh lock indice: {e}")
-
-    def release_index_claim(self):
-        if self.environment == "aws" and hasattr(self, "worker_index"):
-            self._stop_index_refresh.set()
-            ServiceRegistry.release_worker_index(self.worker_index, owner=self._index_claim_owner)
