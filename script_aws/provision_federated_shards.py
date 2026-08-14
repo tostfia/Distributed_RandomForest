@@ -18,8 +18,8 @@ VOLTA lo shard di propria competenza e i manifesti disponibili — prima ancora
 di registrarsi come disponibile nel ServiceRegistry.
 
 Uso tipico:
-    python -m scripts.provision_federated_shards --num-workers 3
-    python -m scripts.provision_federated_shards --num-workers 5 --data-folder ./data --force
+    python -m script_aws.provision_federated_shards --num-workers 3 --data-folder ./dataset_cache
+    
 
 NOTA: questo script assume che tu abbia già eseguito (se ti interessa quel
 dataset_type) src/baseline/run_baseline.py in locale, così che
@@ -116,7 +116,7 @@ def main() -> None:
         description="Provisioning offline degli shard federati e dei manifesti feature su S3."
     )
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("NUM_WORKERS", 3)))
-    parser.add_argument("--data-folder", type=str, default=os.environ.get("DATASET_PATH", "./data"))
+    parser.add_argument("--data-folder", type=str, default=os.environ.get("DATASET_PATH", "./dataset_cache"))
     parser.add_argument("--bucket", type=str, default=DEFAULT_BUCKET)
     parser.add_argument(
         "--force",

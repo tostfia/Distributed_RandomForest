@@ -18,8 +18,10 @@ fi
 # Legge SYS_ENV/SYS_MODE dal .env solo per la verifica di coerenza qui sotto,
 # SENZA esportarli: sarà config.py (via load_dotenv) a farlo al posto nostro,
 # leggendo esattamente questi valori senza rischio di override dalla shell.
-ENV_SYS_ENV=$(grep -E "^SYS_ENV=" .env | cut -d= -f2 | tr -d ' "')
-ENV_SYS_MODE=$(grep -E "^SYS_MODE=" .env | cut -d= -f2 | tr -d ' "')
+# tr -d rimuove anche gli apici singoli oltre a quelli doppi, per coerenza
+# con get_env_var() in deploy.sh (che gestisce entrambi i tipi di quoting).
+ENV_SYS_ENV=$(grep -E "^SYS_ENV=" .env | cut -d= -f2 | tr -d " \"'")
+ENV_SYS_MODE=$(grep -E "^SYS_MODE=" .env | cut -d= -f2 | tr -d " \"'")
 
 if [ "$ENV_SYS_ENV" != "aws" ]; then
   echo "[ERRORE] SYS_ENV nel .env è '$ENV_SYS_ENV', non 'aws'."
@@ -27,10 +29,11 @@ if [ "$ENV_SYS_ENV" != "aws" ]; then
   exit 1
 fi
 
-REGION=$(grep -E "^AWS_DEFAULT_REGION=" .env | cut -d= -f2 | tr -d ' "')
+REGION=$(grep -E "^AWS_DEFAULT_REGION=" .env | cut -d= -f2 | tr -d " \"'")
 REGION="${REGION:-us-east-1}"
+CLUSTER_NAME="forest-cluster"
 
-echo "==> [1/2] Verifica credenziali AWS (Learner Lab, scadono ogni ~4h)..."
+echo "==> [1/3] Verifica credenziali AWS (Learner Lab, scadono ogni ~4h)..."
 if ! aws sts get-caller-identity --region "$REGION" > /dev/null 2>&1; then
   echo "[ERRORE] Credenziali AWS non valide o scadute."
   echo "         Aggiorna le AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN nel .env"
@@ -39,7 +42,36 @@ if ! aws sts get-caller-identity --region "$REGION" > /dev/null 2>&1; then
 fi
 echo "    OK, credenziali valide."
 
-echo "==> [2/2] Avvio Client (modalità dal .env: SYS_MODE=$ENV_SYS_MODE)..."
+echo "==> [2/3] Attendo che i Service ECS (worker + orchestrator) siano stabili..."
+echo "    (deploy.sh è asincrono: create/update-service ritorna subito, non quando i"
+echo "     task sono RUNNING e i worker si sono registrati. Aspettiamo qui per evitare"
+echo "     di sottomettere il job mentre l'infrastruttura sta ancora avviandosi.)"
+
+ALL_SERVICE_ARNS=$(aws ecs list-services --cluster "$CLUSTER_NAME" --region "$REGION" \
+  --query "serviceArns[]" --output text 2>/dev/null || echo "")
+
+TARGET_SERVICES=()
+for arn in $ALL_SERVICE_ARNS; do
+  svc_name="${arn##*/}"
+  if [[ "$svc_name" == worker-service* || "$svc_name" == "orchestrator-service" ]]; then
+    TARGET_SERVICES+=("$svc_name")
+  fi
+done
+
+if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
+  echo "[ERRORE] Nessun Service worker/orchestrator trovato sul cluster '$CLUSTER_NAME'."
+  echo "         Hai lanciato deploy.sh prima di questo script?"
+  exit 1
+fi
+
+echo "    Service trovati: ${TARGET_SERVICES[*]}"
+aws ecs wait services-stable \
+  --cluster "$CLUSTER_NAME" \
+  --services "${TARGET_SERVICES[@]}" \
+  --region "$REGION"
+echo "    OK, infrastruttura pronta (tutti i Service sono stabili)."
+
+echo "==> [3/3] Avvio Client (modalità dal .env: SYS_MODE=$ENV_SYS_MODE)..."
 echo "    (Il client parla con l'infrastruttura solo via SQS/DynamoDB:"
 echo "     nessun bisogno di conoscere IP o porte di orchestratori/worker su Fargate.)"
 echo ""

@@ -9,7 +9,21 @@ set -e
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
 BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
-
+# ---------------------------------------------------------------------
+# Flag opzionali da riga di comando.
+# --purge-shards: elimina anche gli shard federati su S3
+#   (s3://$BUCKET_NAME/federated_shards/). NON attivo di default, perché
+#   generarli richiede ricaricare e ri-splittare il dataset da zero
+#   (RawCSVDataLoader + FederatedDataSplitter): sono pensati per
+#   sopravvivere a più cicli di teardown/deploy. Usa questo flag solo se
+#   vuoi forzare un re-provisioning completo (es. dataset locale cambiato).
+# ---------------------------------------------------------------------
+PURGE_SHARDS=0
+for arg in "$@"; do
+  case "$arg" in
+    --purge-shards) PURGE_SHARDS=1 ;;
+  esac
+done
 # ---------------------------------------------------------------------
 # Svuota TUTTI gli item di una tabella DynamoDB, senza cancellare la
 # tabella stessa (schema, throughput, ecc. restano intatti).
@@ -45,25 +59,43 @@ purge_dynamodb_table() {
   echo "    Tabella '$table' svuotata: $removed elementi rimossi."
 }
 
-echo "==> [1/5] Abbattimento nodi computazionali Fargate..."
-aws ecs update-service --cluster "$CLUSTER_NAME" --service worker-service \
-  --desired-count 0 --region "$REGION" > /dev/null 2>&1 || echo "    (worker-service non trovato, salto)"
+echo "==> [1/5] Scoperta dei Service attivi sul cluster (worker-service, worker-service-N, orchestrator-service)..."
+# Non hardcodiamo i nomi: con TRAINING_MODE=centralized esiste 'worker-service',
+# con TRAINING_MODE=federated esistono 'worker-service-1'..'worker-service-N'.
+# Scopriamo dinamicamente cosa c'è davvero sul cluster, così funziona in entrambi
+# i casi e anche se la modalità è cambiata tra un deploy e l'altro.
+ALL_SERVICE_ARNS=$(aws ecs list-services --cluster "$CLUSTER_NAME" --region "$REGION" \
+  --query "serviceArns[]" --output text 2>/dev/null || echo "")
 
-echo "==> Richiedo l'azzeramento del Service orchestrator-service..."
-aws ecs update-service --cluster "$CLUSTER_NAME" --service orchestrator-service \
-  --desired-count 0 --region "$REGION" > /dev/null 2>&1 || echo "    (orchestrator-service non trovato, salto)"
+TARGET_SERVICES=()
+for arn in $ALL_SERVICE_ARNS; do
+  svc_name="${arn##*/}"
+  if [[ "$svc_name" == worker-service* || "$svc_name" == "orchestrator-service" ]]; then
+    TARGET_SERVICES+=("$svc_name")
+  fi
+done
 
-echo ""
-echo "==> SINCRONIZZAZIONE AWS: Attendo la distruzione di TUTTI i container attivi..."
-echo "    (Fargate sta spegnendo i vecchi nodi zombie. Il terminale si sbloccherà automaticamente, attendi...)"
+if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
+  echo "    Nessun service worker/orchestrator trovato sul cluster, salto abbattimento."
+else
+  echo "    Service trovati: ${TARGET_SERVICES[*]}"
+  for svc in "${TARGET_SERVICES[@]}"; do
+    aws ecs update-service --cluster "$CLUSTER_NAME" --service "$svc" \
+      --desired-count 0 --region "$REGION" > /dev/null 2>&1 || echo "    ($svc: update fallito, salto)"
+  done
 
-# Questo comando blocca l'esecuzione finché i nodi in esecuzione (running-count) non scendono a 0 (pari al desired-count)
-echo "==> [2/5] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
-aws ecs wait services-stable \
-  --cluster "$CLUSTER_NAME" \
-  --services worker-service orchestrator-service \
-  --region "$REGION"
-echo "    Fargate ha spento tutti i container."
+  echo ""
+  echo "==> SINCRONIZZAZIONE AWS: Attendo la distruzione di TUTTI i container attivi..."
+  echo "    (Fargate sta spegnendo i vecchi nodi zombie. Il terminale si sbloccherà automaticamente, attendi...)"
+
+  # Questo comando blocca l'esecuzione finché i nodi in esecuzione (running-count) non scendono a 0 (pari al desired-count)
+  echo "==> [2/5] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
+  aws ecs wait services-stable \
+    --cluster "$CLUSTER_NAME" \
+    --services "${TARGET_SERVICES[@]}" \
+    --region "$REGION"
+  echo "    Fargate ha spento tutti i container."
+fi
 
 echo "==> [3/5] Svuotamento stato applicativo su DynamoDB..."
 echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks"
@@ -76,7 +108,7 @@ DYNAMO_TABLES=(
   "JobLocks"
   "ModelStatus"
   "OrchestratorLocks"
-  "WorkerTasks",
+  "WorkerTasks"
   "WorkerIndexLocks"
 )
 
@@ -112,5 +144,18 @@ echo "I servizi restano configurati (task definition, cluster, ECR)"
 echo "ma desired-count=0 significa nessun task Fargate attivo -> nessun costo di compute."
 echo ""
 echo "Per far ripartire tutto senza rifare il deploy da capo:"
-echo "  aws ecs update-service --cluster $CLUSTER_NAME --service worker-service --desired-count 2 --region $REGION"
-echo "  aws ecs update-service --cluster $CLUSTER_NAME --service orchestrator-service --desired-count 2 --region $REGION"
+if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
+  echo "  (nessun service trovato in fase di teardown: verifica il nome dei service col deploy usato)"
+else
+  for svc in "${TARGET_SERVICES[@]}"; do
+    if [ "$svc" == "orchestrator-service" ]; then
+      echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count 2 --region $REGION"
+    elif [ "$svc" == "worker-service" ]; then
+      # centralized: unico service, il desired-count va al NUM_WORKERS originale (non 1)
+      echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count \$NUM_WORKERS --region $REGION"
+    else
+      # federated: ogni worker-service-N è fisso a 1 (un solo task per indice)
+      echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count 1 --region $REGION"
+    fi
+  done
+fi
