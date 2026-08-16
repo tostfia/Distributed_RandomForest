@@ -154,7 +154,7 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             orch.state_manager.try_claim_job = _denied
 
         def kill_system_leader_target():
-            kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds",120)
+            kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 270)
             print(f"[TEST KILLER] Lascio lavorare il leader per {kill_after_seconds} secondi prima del crash...")
             time.sleep(kill_after_seconds)
             
@@ -169,6 +169,17 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             # Il lavoro già in corso (se presente) smette di essere "silenzioso":
             # al prossimo controllo di lease lo rileverà e abortirà da solo.
             _simulate_backend_unreachable(orch_leader)
+
+            # Il patch sopra impedisce solo AL LEADER di riconquistare la lease,
+            # ma il lock reale su JobLocks resta valido fino al suo TTL naturale
+            # (300s, più lungo dell'intero timeout di monitoraggio del test): senza
+            # rilasciarlo esplicitamente qui, lo standby otterrebbe sempre
+            # CLAIM FAILED finché quel TTL non scade da solo.
+            try:
+                orch_leader.state_manager.release_job_lease(job_id, orch_leader.orchestrator_name)
+                print(f"[TEST TRIGGER] Job lease di '{job_id[:8]}' rilasciata forzatamente.")
+            except Exception:
+                pass
             
             # Forziamo la rimozione del suo lock per svegliare immediatamente lo standby
             lock_key = orch_leader._get_lock_key()

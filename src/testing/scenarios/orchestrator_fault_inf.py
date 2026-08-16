@@ -166,6 +166,16 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             # controllo di lease lo rileverà e abortirà da solo.
             _simulate_backend_unreachable(orch_leader)
 
+            # Il patch sopra impedisce solo AL LEADER di riconquistare la lease,
+            # ma il lock reale su JobLocks resta valido fino al suo TTL naturale
+            # (300s): senza rilasciarlo esplicitamente qui, lo standby otterrebbe
+            # sempre CLAIM FAILED finché quel TTL non scade da solo.
+            try:
+                orch_leader.state_manager.release_job_lease(job_id, orch_leader.orchestrator_name)
+                print(f"[TEST TRIGGER] Job lease di '{job_id[:8]}' rilasciata forzatamente.")
+            except Exception:
+                pass
+
             lock_key = orch_leader._get_lock_key()
             if orch_leader.environment == "local":
                 lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
@@ -225,7 +235,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                 except Exception:
                     pass
 
-        kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 120)
+        kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 270)
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
         max_timeout = ft_cfg.get("max_monitor_timeout_seconds", kill_after_seconds + failover_detection_margin + 60)
         job_completed = False
