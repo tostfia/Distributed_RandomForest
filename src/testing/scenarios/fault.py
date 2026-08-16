@@ -20,13 +20,24 @@ class FaultToleranceScenario(BaseTestScenario):
         else:
             target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
         def kill_worker_local():
+            # Rispettiamo entrambi gli intenti: il guasto non scatta MAI prima che
+            # sia stato inviato almeno un chunk reale (altrimenti staremmo testando
+            # il recupero di zero lavoro fatto), ma nemmeno prima che siano passati
+            # almeno kill_delay secondi (il config vuole dare modo a un po' di
+            # lavoro reale di essere completato prima di simulare il crash).
             kill_delay = ft_cfg.get("kill_worker_after_seconds")
-            if mode == "federated":
-                kill_delay = kill_delay + 50
 
+            wait_start = time.perf_counter()
             signaled = self.orchestrator.chunk_sent_event.wait(timeout=kill_delay)
             if not signaled:
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
+            else:
+                elapsed = time.perf_counter() - wait_start
+                remaining = kill_delay - elapsed
+                if remaining > 0:
+                    print(f"[TEST] Primo chunk inviato dopo {elapsed:.1f}s. Attendo altri {remaining:.1f}s "
+                          f"(fino a {kill_delay}s totali) per dare modo a un po' di lavoro reale di completarsi...")
+                    time.sleep(remaining)
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker (Locale)...")
             try:
@@ -59,6 +70,7 @@ class FaultToleranceScenario(BaseTestScenario):
         payload = self._build_payload()
         num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
         duration = time.perf_counter() - start_time
+        self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
         
         return {
             "scenario_description": "Crash improvviso Worker su thread/processi Python locali.",

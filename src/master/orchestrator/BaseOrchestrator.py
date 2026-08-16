@@ -268,7 +268,19 @@ class BaseOrchestrator(ABC):
         def _handle_sigterm(signum, frame):
             raise KeyboardInterrupt()
 
-        signal.signal(signal.SIGTERM, _handle_sigterm)
+        # signal.signal() è permesso SOLO nel thread principale dell'interprete:
+        # in un vero deployment start() gira sempre lì, quindi qui non cambia
+        # nulla. Se invece start() viene lanciato su un thread secondario (es.
+        # da un test harness che simula un secondo orchestratore in-process),
+        # registrare l'handler solleverebbe ValueError e farebbe morire il
+        # thread all'istante — saltiamo la registrazione in quel caso, dato
+        # che comunque un thread non-main non riceverebbe mai un vero SIGTERM
+        # del sistema operativo.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+        else:
+            print(f"[{self.orchestrator_name}] [WARN] start() eseguito fuori dal main thread: "
+                  f"gestione di SIGTERM disabilitata per questa istanza.")
         is_leader = False
         
         self.hb_thread = None
@@ -670,7 +682,7 @@ class BaseOrchestrator(ABC):
             print(f"[{self.orchestrator_name}] [METRICS-WARN] Salvataggio fallito: {e}")
 
     def _resolve_metrics_path(self, job_id: str, phase: str) -> str:
-        fname = f"{phase}_{job_id}.json"
+        fname = f"{phase}_{job_id}.json"          # phase = "training" | "inference"
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/metrics/{self.__class__.__name__.lower()}/{fname}"
         return os.path.join("./.local_storage/metrics", fname)

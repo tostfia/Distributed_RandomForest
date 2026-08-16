@@ -2,10 +2,47 @@ import subprocess
 import time
 import threading
 import os
+import json
 from src.testing.scenarios.base import BaseTestScenario
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
 import docker
+
+
+def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
+    """
+    Attende (con timeout) che 'orch' risulti effettivamente leader, prima di
+    procedere: senza questo controllo il test può inviare il job e simulare
+    il crash mentre 'orch' non ha ancora davvero acquisito la leadership (o
+    non l'acquisisce affatto), rendendo il "kill del leader" un'operazione
+    su un processo che di fatto non stava facendo nulla.
+    """
+    lock_key = orch._get_lock_key()
+    waited = 0.0
+    while waited < timeout:
+        if orch.environment == "local":
+            lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
+            if os.path.exists(lock_path):
+                try:
+                    with open(lock_path, "r", encoding="utf-8") as f:
+                        lock_data = json.load(f)
+                    if lock_data.get("leader") == orch.orchestrator_name:
+                        return True
+                except (json.JSONDecodeError, KeyError, OSError):
+                    pass
+        else:
+            # Nessun getter dedicato esposto dallo state_manager per leggere il
+            # leader corrente: un tentativo di acquisizione è idempotente se
+            # 'orch' è già lui stesso il leader, quindi è un modo sicuro per
+            # verificarlo senza scavalcare un altro leader legittimo.
+            try:
+                if orch._try_acquire_leadership():
+                    return True
+            except Exception:
+                pass
+        time.sleep(interval)
+        waited += interval
+    return False
 
 
 class OrchestratorFailoverScenario(BaseTestScenario):
@@ -46,6 +83,23 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                 print("[TEST] Istanzio l'Orchestratore CENTRALIZZATI di Standby (Master-2)...")
                 orch_standby = CentralizedOrchestrator(orchestrator_name="Master-2-Standby")
                 orch_standby.queue_name = target_queue
+
+            # In locale (non-Docker) 'orch_leader' non è un processo esterno già
+            # attivo: senza avviare qui il suo loop (.start()) non acquisirebbe
+            # mai la leadership, e "uccidere il leader" più sotto agirebbe su un
+            # orchestratore che di fatto non stava processando nulla. Lo avviamo
+            # PRIMA dello standby e attendiamo che diventi davvero leader.
+            leader_thread = threading.Thread(target=orch_leader.start, name="LeaderThread")
+            leader_thread.daemon = True
+            leader_thread.start()
+
+            if not _wait_for_leadership(orch_leader, timeout=15):
+                print(f"[TEST ERRORE] '{orch_leader.orchestrator_name}' non ha acquisito la leadership entro il timeout: "
+                      f"il test non può simulare un failover credibile.")
+                return {"status": "FAILED", "trees_built": 0, "duration_seconds": 0,
+                        "error": "Il leader designato non ha acquisito la leadership entro il timeout."}
+            print(f"[TEST] '{orch_leader.orchestrator_name}' ha acquisito la leadership. Avvio dello Standby...")
+
             standby_thread = threading.Thread(target=orch_standby.start, name="StandbyThread")
             standby_thread.daemon = True
             standby_thread.start()
@@ -83,6 +137,22 @@ class OrchestratorFailoverScenario(BaseTestScenario):
         start_time = time.perf_counter()
 
         # 5. Thread Killer
+        def _simulate_backend_unreachable(orch):
+            """
+            Simula la perdita di accesso al coordination backend (DynamoDB/mock)
+            da parte di 'orch', come avverrebbe in un vero crash o in una
+            partizione di rete: la sua prossima chiamata a try_claim_job() —
+            fatta periodicamente dal ciclo di _process_job già in corso, ad ogni
+            round di alberi — fallirà, facendo scattare l'abort già previsto dal
+            codice (MessageOwnershipLostError). Senza questo, il thread che sta
+            elaborando il job continuerebbe a lavorare indisturbato in background
+            nonostante il "crash" simulato, mantenendo la lease e impedendo allo
+            standby di subentrare per davvero.
+            """
+            def _denied(*args, **kwargs):
+                return False
+            orch.state_manager.try_claim_job = _denied
+
         def kill_system_leader_target():
             kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds",120)
             print(f"[TEST KILLER] Lascio lavorare il leader per {kill_after_seconds} secondi prima del crash...")
@@ -90,8 +160,15 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO DI {orch_leader.orchestrator_name.upper()} !!!")
             
-            # Blocchiamo l'heartbeat loop del leader di sistema
+            # Blocchiamo l'heartbeat loop PRIMA di toccare il lock: se lo
+            # rimuovessimo con l'heartbeat ancora vivo, quest'ultimo lo
+            # ricreerebbe da solo entro ~10s (_refresh_leadership_lock non
+            # distingue "l'ho perso io" da "il file manca, lo riscrivo").
             orch_leader._stop_heartbeat.set()
+
+            # Il lavoro già in corso (se presente) smette di essere "silenzioso":
+            # al prossimo controllo di lease lo rileverà e abortirà da solo.
+            _simulate_backend_unreachable(orch_leader)
             
             # Forziamo la rimozione del suo lock per svegliare immediatamente lo standby
             lock_key = orch_leader._get_lock_key()
@@ -135,23 +212,25 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                     break
             if not found:
                 print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
-        lock_key = orch_leader._get_lock_key()
-        if orch_leader.environment == "local":
-            lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
-            if os.path.exists(lock_path):
+            # Il container è morto per davvero (kill fisico): a differenza del
+            # ramo non-Docker, qui non c'è un heartbeat in-process da fermare
+            # prima — resta solo da ripulire il lock, che il container appena
+            # ucciso non ha potuto rilasciare da sé.
+            lock_key = orch_leader._get_lock_key()
+            if orch_leader.environment == "local":
+                lock_path = os.path.join("./.local_storage", f"{lock_key}.json")
+                if os.path.exists(lock_path):
+                    try:
+                        os.remove(lock_path)
+                        print(f"[TEST TRIGGER] Lock '{lock_key}' rimosso dal File System.")
+                    except Exception:
+                        pass
+            else:
                 try:
-                    os.remove(lock_path)
-                    print(f"[TEST TRIGGER] Lock '{lock_key}' rimosso dal File System.")
+                    orch_leader.state_manager.release_global_lock(lock_key, orch_leader.orchestrator_name)
+                    print(f"[TEST TRIGGER] Lock '{lock_key}' rilasciato da DynamoDB.")
                 except Exception:
                     pass
-        else:
-            try:
-                orch_leader.state_manager.release_global_lock(lock_key, orch_leader.orchestrator_name)
-                print(f"[TEST TRIGGER] Lock '{lock_key}' rilasciato da DynamoDB.")
-            except Exception:
-                pass
-    
-        
 
         kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 120)
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
@@ -190,19 +269,13 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             trees_built = max_trees_built_seen
 
         duration = time.perf_counter() - start_time
-        job_id = orch_leader.current_job_id
-        if os.environ.get("SYS_MODE") == "federated":
-            path_modello_dinamico = f"./saved_models/fed_model_{job_id}.pkl"
-        else:
-            path_modello_dinamico = f"./saved_models/model_{job_id}.pkl"
-
-        if not job_completed:
-            import glob
-            if os.environ.get("SYS_MODE") == "federated":
-                list_of_files = glob.glob('./saved_models/fed_model_*.pkl')
-            else:
-                list_of_files = glob.glob('./saved_models/model_*.pkl')
-            path_modello_dinamico = max(list_of_files, key=os.path.getctime) if list_of_files else None
+        # Il modello viene sempre salvato come "model_{job_id}.pkl" in entrambe le
+        # modalità (vedi _resolve_model_path in centralized.py e federated.py).
+        # NIENTE fallback glob "file più recente in ./saved_models/": in una
+        # sessione di test con più job può facilmente esistere un modello
+        # PIÙ RECENTE ma di un job completamente estraneo, che farebbe
+        # dichiarare SUCCESS un failover che in realtà non è mai avvenuto.
+        path_modello_dinamico = f"./saved_models/model_{job_id}.pkl"
 
         if job_completed or (trees_built == 0 and path_modello_dinamico and os.path.exists(path_modello_dinamico)):
             test_status = "SUCCESS"

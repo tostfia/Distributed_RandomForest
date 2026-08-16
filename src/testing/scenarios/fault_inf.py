@@ -21,7 +21,8 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         try:
             # Generiamo pochi alberi (es. 10 o 20) solo per creare legalmente il file .pkl su disco
             # Eseguiamo questa fase senza killare nessuno, in totale stabilità
-            self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
+            num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
+            self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
             print("[TEST] Modello globale generato con successo su disco. Pronto per il test di inferenza.")
         except Exception as e:
             print(f"[TEST ERRORE] Impossibile completare l'addestramento preliminare: {e}")
@@ -70,7 +71,8 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         try:
             print("[TEST] Avvio dell'inferenza distribuita federata (il modello esiste, ora simulo il guasto)...")
             # Adesso l'orchestratore troverà il file .pkl e inizierà a inviare i chunk di test ai worker
-            accuracy_metrics = self.orchestrator._execute_inference_step(payload)
+            result = self.orchestrator._execute_inference_step(payload) or {}
+            accuracy_metrics = result.get("metrics", {})
             
             # Se l'orchestratore gestisce l'eccezione di rete del worker deceduto redistribuendo i chunk,
             # arriverà a fine metodo restituendo le metriche corrette.

@@ -41,7 +41,54 @@ class TestEngine:
     def _initialize_infrastructure(self):
      
         self.orchestrator = CentralizedOrchestrator(orchestrator_name= "orchestrator-centralizzato-testing") if self.mode == "centralized" else FederatedOrchestrator(orchestrator_name= "orchestrator-federato-testing")   
+        self._cleanup_stale_processing_jobs()
         self._start_local_workers()
+
+    def _cleanup_stale_processing_jobs(self):
+        """
+        Gli scenario di test che chiamano _execute_training_step/_execute_inference_step
+        DIRETTAMENTE (senza passare dalla coda SQS) non finalizzano mai il job a
+        "COMPLETED" — quella transizione avviene solo dentro _process_job, che questi
+        scenario bypassano di proposito per restare rapidi e isolati. Senza questa
+        pulizia, un job di una sessione di test PRECEDENTE resta per sempre in
+        "PROCESSING": al prossimo avvio, _perform_active_recovery() lo troverebbe e
+        lo "riprenderebbe" da capo con iperparametri di default (nessun sidecar di
+        metadati salvato, per lo stesso motivo), sprecando minuti di lavoro dei
+        worker su un job estraneo prima ancora che il test attuale possa iniziare.
+        """
+        state_manager = getattr(self.orchestrator, "state_manager", None)
+        if not state_manager or not hasattr(state_manager, "get_active_jobs"):
+            return
+        try:
+            stale_job_ids = state_manager.get_active_jobs()
+        except Exception as e:
+            print(f"[ENGINE] [WARN] Impossibile leggere i job attivi per la pulizia iniziale: {e}")
+            return
+
+        cleaned = 0
+        for job_id in stale_job_ids:
+            try:
+                existing_state = state_manager.obtain_request(job_id)
+                if not existing_state:
+                    continue
+                item_data = existing_state.get("Item", existing_state)
+                if item_data.get("status") != "PROCESSING":
+                    continue
+                state_manager.update_request_status(
+                    job_id=job_id,
+                    status="STALE_TEST_CLEANUP",
+                    orchestrator_id="TEST-ENGINE-CLEANUP",
+                    retries=0,
+                    base_random_state=0,
+                    alberi_addestrati=item_data.get("alberi_addestrati", 0),
+                )
+                cleaned += 1
+            except Exception as e:
+                print(f"[ENGINE] [WARN] Impossibile ripulire il job residuo {job_id[:8]}: {e}")
+
+        if cleaned:
+            print(f"[ENGINE] [CLEANUP] {cleaned} job residui da sessioni di test precedenti "
+                  f"marcati come non-attivi (evitato un recovery indesiderato).")
 
     def _start_local_workers(self):
         docker = os.environ.get("RUNNING_IN_DOCKER")

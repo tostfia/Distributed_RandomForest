@@ -266,6 +266,11 @@ class FederatedOrchestrator(BaseOrchestrator):
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
             RETRY_WAIT_SECONDS = 10
+            # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
+            # che i test di fault injection possano attendere in modo affidabile il
+            # momento in cui il PRIMO task di training viene davvero inviato a un
+            # worker, invece di limitarsi a un'attesa temporale fissa.
+            self.chunk_sent_event.clear()
             def contact_worker(w_name, idx):
                 task = assigned_tasks.get(w_name)
                 if task is None:
@@ -306,6 +311,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             self.connessioni_attive.append(worker_conn)
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
+                        self.chunk_sent_event.set()
                         result_raw = worker_conn.root.exposed_train_local_federated_forest(
                             job_id=self.current_job_id,
                             dataset_type=self._resolve_dataset_type(payload),

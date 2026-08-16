@@ -237,6 +237,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
             
             active_worker_names = list(worker_names)
 
+            # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
+            # che i test di fault injection possano attendere in modo affidabile il
+            # momento in cui il PRIMO task di training viene davvero inviato a un
+            # worker, invece di limitarsi a un'attesa temporale fissa.
+            self.chunk_sent_event.clear()
+
             # 5. Definizione della funzione consumatrice per i thread
             def worker_thread_consumer(w_name):
                 w_info = available_workers[w_name]
@@ -277,6 +283,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
                         try:
+                            self.chunk_sent_event.set()
+
                             result_raw = worker_conn.root.train_subset_forest(
                                 source_info=source_info,
                                 num_trees=quota_chunk,       
@@ -399,6 +407,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 global_model.n_features_in_ = n_features
                 global_model.n_outputs_ = 1
                 
+                
                 model_path = self._resolve_model_path(self.current_job_id)
                 self.checkpoint_dao.save(model_path, global_model)
                 
@@ -416,7 +425,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # ─── Ritorna 0 se non è stato possibile generare o caricare nulla ───
         return 0
     
-    def _execute_inference_step(self, payload: dict):
+    def _execute_inference_step(self, payload: dict) -> dict:
         """
         Esegue l'inferenza distribuita centralizzata in modalità Fault-Tolerant
         sfruttando una task queue concorrente per riallocare dinamicamente i blocchi in caso di crash.
@@ -655,7 +664,16 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
-   
+        # Esposto esplicitamente (prima mancava): chi chiama questo metodo — inclusa
+        # la suite di test locale — deve poter leggere le metriche reali dal valore di
+        # ritorno, invece di affidarsi a un monkey-patch interno fragile.
+        return {
+            "status": "SUCCESS" if not failed_tasks else "PARTIAL",
+            "testing_set_size": int(X_test.shape[0]),
+            "total_inference_time": total_inference_time,
+            "rpc_inference_time": rpc_inference_time,
+            "metrics": metrics
+        }
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         """
