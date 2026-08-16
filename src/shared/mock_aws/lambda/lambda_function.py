@@ -17,6 +17,9 @@ def lambda_handler(event, context):
         path_params = event.get('pathParameters') or {}
 
         if method == 'GET':
+            raw_path = (event.get('rawPath') or event.get('path') or '').lower()
+            if raw_path.endswith('/details'):
+                return handle_details(path_params)
             return handle_status(path_params)
         return handle_submit(event, path_params)
 
@@ -45,6 +48,35 @@ def handle_status(path_params: dict) -> dict:
         'status': item.get('status'),
         'timestamp': int(item.get('timestamp', 0)),
     })
+
+def handle_details(path_params: dict) -> dict:
+    """Gestisce GET /jobs/{job_id}/details: restituisce il record completo del job
+    (inclusi hyperparameters/mode/dataset_type), non solo lo status. Pensato per
+    permettere a un client diverso da quello che ha lanciato il training di
+    recuperare gli hyperparameters necessari per un'inferenza."""
+    job_id = path_params.get('job_id')
+    if not job_id:
+        return _response(400, {"error": "Parametro 'job_id' mancante nel path."})
+
+    table = dynamodb.Table(JOBS_TABLE)
+    result = table.get_item(Key={'job_id': job_id})
+    item = result.get('Item')
+
+    if not item:
+        return _response(404, {"error": f"Job con ID '{job_id}' non trovato."})
+
+    return _response(200, {
+        'job_id': job_id,
+        'status': item.get('status'),
+        'timestamp': int(item.get('timestamp', 0)),
+        'dataset_path': item.get('dataset_path'),
+        'hyperparameters': item.get('hyperparameters', {}),
+        'mode': item.get('mode'),
+        'dataset_type': item.get('dataset_type'),
+        'base_random_state': item.get('base_random_state'),
+        'alberi_addestrati': item.get('alberi_addestrati', 0),
+    })
+
 
 def handle_submit(event: dict, path_params: dict) -> dict:
     """Gestisce POST /jobs/{mode} (mode = centralized | federated)."""
@@ -79,6 +111,12 @@ def handle_submit(event: dict, path_params: dict) -> dict:
                 'last_orchestrator': None,
                 'alberi_addestrati': 0,
                 'base_random_state': body.get('seed', 123),
+                # Persistiti così un client DIVERSO da quello che ha lanciato il training
+                # può recuperarli in seguito (vedi handle_details) per lanciare un'inferenza
+                # senza dover conoscere a priori gli hyperparameters usati.
+                'hyperparameters': body.get('hyperparameters', {}),
+                'mode': mode,
+                'dataset_type': body.get('dataset_type'),
             }
         )
 

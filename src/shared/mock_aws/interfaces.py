@@ -21,8 +21,22 @@ class SQSQueueInterface(ABC):
 class StateManagerInterface(ABC):
    
     @abstractmethod
-    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
-        """Registra la richiesta iniziale nel sistema di tracciamento."""
+    def initiate_request(
+        self,
+        job_id: str,
+        dataset_path: str,
+        seed: int,
+        hyperparameters: Optional[dict] = None,
+        mode: Optional[str] = None,
+        dataset_type: Optional[str] = None,
+    ) -> None:
+        """Registra la richiesta iniziale nel sistema di tracciamento.
+
+        hyperparameters/mode/dataset_type sono persistiti insieme allo stato del job
+        così che QUALSIASI client (non solo quello che ha lanciato il training) possa
+        recuperarli in seguito tramite get_job_details, ad es. per lanciare un'inferenza
+        su un modello addestrato da un altro client.
+        """
         pass
 
     @abstractmethod
@@ -74,6 +88,19 @@ class StateManagerInterface(ABC):
     @abstractmethod
     def get_job_status(self, job_id: str) -> Optional[str]:
         """Recupera lo stato del job (es. QUEUED, PROCESSING, COMPLETED)."""
+        pass
+
+    @abstractmethod
+    def get_job_details(self, job_id: str) -> Optional[dict]:
+        """Recupera il record completo del job (status, hyperparameters, mode,
+        dataset_type, dataset_path, ecc.), non solo lo status.
+
+        Pensato per essere chiamato da un client diverso da quello che ha
+        originato il training (scenario multi-client): permette di ricostruire
+        gli hyperparameters necessari per lanciare un'inferenza senza dover
+        dipendere dallo storico locale di chi ha addestrato il modello.
+        Restituisce None se il job non esiste.
+        """
         pass
 
     # ------------------------------------------------------------------

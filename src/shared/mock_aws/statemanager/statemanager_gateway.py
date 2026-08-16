@@ -36,10 +36,38 @@ class ApiGatewayStateManager(StateManagerInterface):
             print(f"[ApiGatewayStateManager] Chiamata HTTP fallita: {e}")
             return None
 
+    def get_job_details(self, job_id: str) -> Optional[dict]:
+        """Invia una richiesta GET ad API Gateway per il record completo del job
+        (status + hyperparameters + mode + dataset_type), usato in fase di inferenza
+        per recuperare gli hyperparameters di un job addestrato da un altro client."""
+        url = f"{self.base_url}/jobs/{job_id}/details"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                return None
+            else:
+                print(f"[ApiGatewayStateManager] Errore API Gateway ({response.status_code}): {response.text}")
+                return None
+        except requests.RequestException as e:
+            print(f"[ApiGatewayStateManager] Chiamata HTTP fallita: {e}")
+            return None
+
     # I metodi sottostanti non sono usati dal Client ma devono essere presenti
     # per rispettare l'interfaccia StateManagerInterface
-    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
+    def initiate_request(
+        self,
+        job_id: str,
+        dataset_path: str,
+        seed: int,
+        hyperparameters: Optional[dict] = None,
+        mode: Optional[str] = None,
+        dataset_type: Optional[str] = None,
+    ) -> None:
         pass  # In AWS la registrazione della richiesta è gestita dalla POST inviata a LambdaGatewaySQSQueue
+        # (il body della POST contiene già hyperparameters/mode/dataset_type; è la Lambda
+        # handle_submit a persisterli su DynamoDB, vedi lambda_function.py)
 
     def obtain_request(self, job_id: str) -> Optional[dict]:
         raise NotImplementedError("Il client interroga lo stato solo tramite get_job_status.")

@@ -21,7 +21,15 @@ class AwsStateManager(StateManagerInterface):
             return {}
         return response.get("Item", response) if isinstance(response, dict) else {}
 
-    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
+    def initiate_request(
+        self,
+        job_id: str,
+        dataset_path: str,
+        seed: int,
+        hyperparameters: Optional[dict] = None,
+        mode: Optional[str] = None,
+        dataset_type: Optional[str] = None,
+    ) -> None:
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
@@ -30,6 +38,9 @@ class AwsStateManager(StateManagerInterface):
             "last_orchestrator": None,
             "alberi_addestrati": 0,
             "base_random_state": seed,
+            "hyperparameters": hyperparameters or {},
+            "mode": mode,
+            "dataset_type": dataset_type,
         }
         self._db.put_item(JOBS_TABLE, job_id, payload)
         print(f"[AWS StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
@@ -57,6 +68,12 @@ class AwsStateManager(StateManagerInterface):
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,
             "alberi_addestrati": alberi_addestrati,
+            # Riportati dal record esistente: put_item sovrascrive l'intero item,
+            # quindi senza questo passaggio esplicito questi campi andrebbero persi
+            # al primo aggiornamento di stato dopo la creazione del job.
+            "hyperparameters": current_item.get("hyperparameters", {}),
+            "mode": current_item.get("mode"),
+            "dataset_type": current_item.get("dataset_type"),
         }
         self._db.put_item(JOBS_TABLE, job_id, payload)
         print(f"[AWS StateManager] Job ID: {job_id[:8]}... aggiornato a stato: {status} da {orchestrator_id}")
@@ -71,6 +88,9 @@ class AwsStateManager(StateManagerInterface):
             "last_orchestrator": orchestrator_id,
             "base_random_state": current_item.get("base_random_state"),
             "alberi_addestrati": current_item.get("alberi_addestrati", 0),
+            "hyperparameters": current_item.get("hyperparameters", {}),
+            "mode": current_item.get("mode"),
+            "dataset_type": current_item.get("dataset_type"),
         }
         self._db.put_item(JOBS_TABLE, job_id, payload)
         print(f"[AWS StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id}")
@@ -110,6 +130,10 @@ class AwsStateManager(StateManagerInterface):
     def get_job_status(self, job_id: str) -> Optional[str]:
         item = self._unwrap(self._db.get_item(JOBS_TABLE, job_id))
         return item.get("status") if item else None
+
+    def get_job_details(self, job_id: str) -> Optional[dict]:
+        item = self._unwrap(self._db.get_item(JOBS_TABLE, job_id))
+        return item if item else None
 
     def acquire_global_lock(self, lock_key: str, owner: str, ttl: int = 30) -> bool:
         return self._db.try_acquire_lock(LOCKS_TABLE, lock_key, owner, ttl)

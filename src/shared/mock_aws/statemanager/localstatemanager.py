@@ -10,7 +10,15 @@ JOB_LOCKS_TABLE = "JobLocks"
 class MockStateManager(StateManagerInterface):
     _claim_lock = threading.Lock()  # Lock per la gestione della concorrenza nella simulazione
     
-    def initiate_request(self, job_id: str, dataset_path: str, seed: int) -> None:
+    def initiate_request(
+        self,
+        job_id: str,
+        dataset_path: str,
+        seed: int,
+        hyperparameters: Optional[dict] = None,
+        mode: Optional[str] = None,
+        dataset_type: Optional[str] = None,
+    ) -> None:
         payload = {
             "status": "QUEUED",
             "dataset_path": dataset_path,
@@ -19,7 +27,9 @@ class MockStateManager(StateManagerInterface):
             "last_orchestrator": None,
             "alberi_addestrati": 0,
             "base_random_state": seed,
-           
+            "hyperparameters": hyperparameters or {},
+            "mode": mode,
+            "dataset_type": dataset_type,
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         print(f"[StateManager] Richiesta registrata (QUEUED) per Job ID: {job_id[:8]}... con Seed: {seed}")
@@ -46,7 +56,13 @@ class MockStateManager(StateManagerInterface):
             "retries": retries,
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,   
-            "alberi_addestrati": alberi_addestrati     
+            "alberi_addestrati": alberi_addestrati,
+            # Riportati dal record esistente: put_item sovrascrive l'intero item,
+            # quindi senza questo passaggio esplicito questi campi andrebbero persi
+            # al primo aggiornamento di stato dopo la creazione del job.
+            "hyperparameters": current_job.get("hyperparameters", {}),
+            "mode": current_job.get("mode"),
+            "dataset_type": current_job.get("dataset_type"),
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         
@@ -62,7 +78,10 @@ class MockStateManager(StateManagerInterface):
             "retries": current_job.get("retries", 0),
             "last_orchestrator": orchestrator_id,
             "base_random_state": current_job.get("base_random_state"),
-            "alberi_addestrati": current_job.get("alberi_addestrati", 0) 
+            "alberi_addestrati": current_job.get("alberi_addestrati", 0),
+            "hyperparameters": current_job.get("hyperparameters", {}),
+            "mode": current_job.get("mode"),
+            "dataset_type": current_job.get("dataset_type"),
         }
         dynamo_db.put_item(TABLE_NAME, job_id, payload)
         print(f"[StateManager] Job ID: {job_id[:8]}... COMPLETATO con successo da {orchestrator_id} | Seed finale: {payload['base_random_state']}")
@@ -106,6 +125,13 @@ class MockStateManager(StateManagerInterface):
         item = response.get("Item") if isinstance(response, dict) and "Item" in response else response
         if item and isinstance(item, dict):
             return item.get("status")
+        return None
+
+    def get_job_details(self, job_id: str) -> Optional[dict]:
+        response = dynamo_db.get_item(TABLE_NAME, job_id)
+        item = response.get("Item") if isinstance(response, dict) and "Item" in response else response
+        if item and isinstance(item, dict):
+            return item
         return None
 
     # In MockStateManager:

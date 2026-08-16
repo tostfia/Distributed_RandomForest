@@ -161,26 +161,44 @@ def handle_inference():
 
     data_url = get_input(f"Inserisci il path/URL dei dati per l'inferenza [Default: {default_data_url}]: ", default_data_url).strip()
 
-    # 2. Tentativo di recupero degli iperparametri dallo storico locale (append-only),
-    # indicizzato per job_id: a differenza di config.json (che viene sovrascritto ad
-    # ogni nuovo training o baseline e riflette quindi solo l'ULTIMA esecuzione),
-    # lo storico conserva gli iperparametri corretti per ciascun job_id nel tempo.
+    # 2. Recupero degli iperparametri. Ordine di priorità:
+    #    a) server (state_manager.get_job_details) — fonte condivisa e sempre corretta,
+    #       funziona anche se il job è stato addestrato da UN ALTRO CLIENT;
+    #    b) storico locale (requests_history.json) — utile offline o come fallback
+    #       se il server non ha ancora il campo hyperparameters (job legacy);
+    #    c) inserimento manuale (punto 3 più sotto).
     hp_obj = None
-    matched_training = next(
-        (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
-        None,
-    )
-    if matched_training:
+
+    try:
+        job_details = state_manager.get_job_details(job_id)
+    except Exception as e:
+        job_details = None
+        print(f"[INFO] Impossibile interrogare il server per i dettagli del Job '{job_id}': {e}")
+
+    if job_details and job_details.get("hyperparameters"):
         try:
-            hp_data = matched_training.get("hyperparameters", {})
-            if not hp_data:
-                raise ValueError("Voce di storico priva del blocco 'hyperparameters' (job addestrato con una versione precedente del client).")
-            hp_obj = Hyperparameters(**hp_data)
-            print(f"[INFO] Iperparametri estratti automaticamente dallo storico (Task rilevato: {hp_obj.tree_type.upper()}).")
+            hp_obj = Hyperparameters(**job_details["hyperparameters"])
+            print(f"[INFO] Iperparametri recuperati dal server (Task rilevato: {hp_obj.tree_type.upper()}).")
         except (KeyError, TypeError, ValueError) as e:
-            print(f"[INFO] Impossibile ricostruire gli iperparametri dallo storico per il Job ID '{job_id}': {e}")
-    else:
-        print(f"[INFO] Nessuna voce di training trovata nello storico locale per il Job ID '{job_id}'.")
+            hp_obj = None
+            print(f"[INFO] Iperparametri presenti sul server ma non validi per il Job '{job_id}': {e}")
+
+    if not hp_obj:
+        matched_training = next(
+            (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
+            None,
+        )
+        if matched_training:
+            try:
+                hp_data = matched_training.get("hyperparameters", {})
+                if not hp_data:
+                    raise ValueError("Voce di storico priva del blocco 'hyperparameters' (job addestrato con una versione precedente del client).")
+                hp_obj = Hyperparameters(**hp_data)
+                print(f"[INFO] Iperparametri estratti dallo storico locale (Task rilevato: {hp_obj.tree_type.upper()}).")
+            except (KeyError, TypeError, ValueError) as e:
+                print(f"[INFO] Impossibile ricostruire gli iperparametri dallo storico per il Job ID '{job_id}': {e}")
+        else:
+            print(f"[INFO] Nessuna informazione trovata (né sul server né nello storico locale) per il Job ID '{job_id}'.")
 
     # 3. Configurazione manuale di ripiego
     if not hp_obj:
@@ -502,7 +520,10 @@ def handle_training():
         state_manager.initiate_request(
             job_id=request.job_id, 
             dataset_path=request.dataset_path, 
-            seed=request.seed
+            seed=request.seed,
+            hyperparameters=request.hyperparameters.model_dump(),
+            mode=request.mode,
+            dataset_type=request.dataset_type,
         )
         
         # Invia messaggio (Direct SQS in Local / HTTP POST ad API Gateway in AWS)

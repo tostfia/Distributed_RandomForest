@@ -399,7 +399,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 global_model.n_features_in_ = n_features
                 global_model.n_outputs_ = 1
                 
-                
                 model_path = self._resolve_model_path(self.current_job_id)
                 self.checkpoint_dao.save(model_path, global_model)
                 
