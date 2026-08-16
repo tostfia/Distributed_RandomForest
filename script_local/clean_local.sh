@@ -11,6 +11,7 @@ TARGET_DIRS=(
     "$PROJECT_ROOT/.local_storage/"
     "$PROJECT_ROOT/saved_models/"
     "$PROJECT_ROOT/workers_cache/"
+    "$PROJECT_ROOT/test_reports/local/"
 )
 
 echo "[CLEANUP] Avvio pulizia selettiva dei contenuti..."
