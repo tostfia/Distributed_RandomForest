@@ -423,6 +423,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         y_pred_global = []
         y_true_global = []
+        y_probs_global = []
         total_samples_ref = [0]
         failed_workers = set()
         self.chunk_sent_event.clear()   
@@ -481,6 +482,14 @@ class FederatedOrchestrator(BaseOrchestrator):
                         y_pred_global.extend(worker_data["y_pred"])
                         y_true_global.extend(worker_data["y_true"])
                         total_samples_ref[0] += worker_data["n_samples"]
+                        if tree_type == "classifier":
+                            # Chiave opzionale: worker meno recenti potrebbero non restituirla ancora.
+                            worker_probs = worker_data.get("y_probs")
+                            if worker_probs is not None:
+                                y_probs_global.extend(worker_probs)
+                            else:
+                                print(f"[{self.orchestrator_name}] [WARN] Worker '{w_name}' non ha restituito "
+                                      f"'y_probs': l'AUC finale sarà None (worker non aggiornato).")
                         print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' ({worker_data['n_samples']} record).")
                     return  # successo, il thread termina
  
@@ -527,11 +536,22 @@ class FederatedOrchestrator(BaseOrchestrator):
         total_inference_time = time.perf_counter() - inference_start_time
  
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
- 
+
+        # y_probs è allineato sample-per-sample con y_pred_global/y_true_global SOLO se
+        # ogni worker rispondente lo ha fornito (stesso ordine di extend()). In caso contrario
+        # l'array sarebbe disallineato: meglio non calcolare l'AUC piuttosto che calcolarlo male.
+        y_probs_array = None
+        if tree_type == "classifier" and len(y_probs_global) == len(y_pred_global):
+            y_probs_array = np.array(y_probs_global, dtype=np.float64)
+
+        # I worker restituiscono già la predizione finale del modello globale sul proprio
+        # shard locale (non i voti dei singoli alberi), quindi qui NON si passa da
+        # _aggregate_forest_predictions: si calcolano le metriche direttamente.
         metrics = self.calculate_metrics(
-            predictions_matrix=np.array(y_pred_global, dtype=np.float64),
+            final_predictions=np.array(y_pred_global, dtype=np.float64),
             y_test=np.array(y_true_global, dtype=y_true_dtype),
-            tree_type=tree_type
+            tree_type=tree_type,
+            y_probs=y_probs_array
         )
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "federated", "phase": "inference",

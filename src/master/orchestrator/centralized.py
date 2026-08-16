@@ -626,11 +626,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
         
         total_inference_time = time.perf_counter() - inference_start_time
 
-        # 8. DELEGA AL METODO MODULARE PER IL CALCOLO E LA STAMPA DELLE METRICHE
-        metrics = self.calculate_metrics(
+        # 8. AGGREGAZIONE DEL VOTO DI MAGGIORANZA (CLASSIFICAZIONE) / MEDIA (REGRESSIONE)
+        # FRA GLI ALBERI, seguita dal calcolo delle metriche sulla predizione finale.
+        final_predictions, y_probs = self._aggregate_forest_predictions(
             predictions_matrix=predictions_matrix,
-            y_test=y_test,
             tree_type=tree_type
+        )
+        metrics = self.calculate_metrics(
+            final_predictions=final_predictions,
+            y_test=y_test,
+            tree_type=tree_type,
+            y_probs=y_probs
         )
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "centralized", "phase": "inference",

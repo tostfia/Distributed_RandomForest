@@ -502,14 +502,46 @@ class FederatedWorker(BaseWorker):
             rf.n_features_in_ = self._cached_X_test.shape[1]
             rf.n_outputs_ = 1
             y_pred = rf.predict(self._cached_X_test)
+
+            y_probs = None
+            if not actual_is_regressor and len(rf.classes_) == 2:
+                # Probabilità della classe positiva, usata dall'Orchestratore per l'AUC.
+                # Usiamo rf.classes_ (impostate sopra dall'ordine GLOBALE ricevuto
+                # dall'Orchestratore, coerente su tutti i worker) per individuare la
+                # colonna corretta, invece di assumere ciecamente l'indice 1: se un
+                # worker vedesse solo una classe nel proprio shard locale, l'ordine
+                # delle colonne di predict_proba potrebbe altrimenti non coincidere.
+                proba_matrix = rf.predict_proba(self._cached_X_test)
+                positive_label = rf.classes_[-1]  # convenzione: classe con etichetta maggiore = positiva (es. 1 in 0/1)
+                positive_idx = int(np.where(rf.classes_ == positive_label)[0][0])
+                if proba_matrix.shape[1] == len(rf.classes_):
+                    y_probs = proba_matrix[:, positive_idx]
+                else:
+                    print(f"[{self.worker_name}] [WARN] predict_proba ha restituito "
+                          f"{proba_matrix.shape[1]} colonne, attese {len(rf.classes_)}: "
+                          f"AUC non calcolabile su questo worker.")
         else:
             y_pred = unpacked_model.predict(self._cached_X_test)
+            y_probs = None
+            if tree_type == "classifier" and hasattr(unpacked_model, "predict_proba"):
+                try:
+                    classes = getattr(unpacked_model, "classes_", None)
+                    if classes is not None and len(classes) == 2:
+                        proba_matrix = unpacked_model.predict_proba(self._cached_X_test)
+                        positive_idx = int(np.where(classes == classes[-1])[0][0])
+                        y_probs = proba_matrix[:, positive_idx]
+                except Exception as e:
+                    print(f"[{self.worker_name}] [WARN] predict_proba non disponibile su questo modello: {e}")
 
-        return pickle.dumps({
+        response = {
             "y_pred": y_pred.tolist() if isinstance(y_pred, np.ndarray) else list(y_pred),
             "y_true": self._cached_y_test.tolist() if isinstance(self._cached_y_test, np.ndarray) else list(self._cached_y_test),
             "n_samples": len(self._cached_X_test)
-        })
+        }
+        if y_probs is not None:
+            response["y_probs"] = y_probs.tolist() if isinstance(y_probs, np.ndarray) else list(y_probs)
+
+        return pickle.dumps(response)
     
 
     def exposed_get_local_y_test(self) -> bytes:

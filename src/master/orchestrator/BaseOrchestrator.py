@@ -675,37 +675,85 @@ class BaseOrchestrator(ABC):
             return f"s3://{BUCKET_NAME}/metrics/{self.__class__.__name__.lower()}/{fname}"
         return os.path.join("./.local_storage/metrics", fname)
 
-    def calculate_metrics(
-            self, 
-            predictions_matrix: np.ndarray, 
-            y_test: np.ndarray, 
+    def _aggregate_forest_predictions(
+            self,
+            predictions_matrix: np.ndarray,
             tree_type: str
         ):
             """
-            Metodo helper per il calcolo, la validazione statistica e la stampa 
-            delle metriche di performance del modello globale.
+            Aggrega una matrice di predizioni GREZZE per-albero, shape (n_alberi, n_campioni),
+            in un'unica predizione finale per campione.
+
+            Da usare SOLO quando si dispone davvero delle predizioni dei singoli alberi
+            (es. modalità centralizzata, dove ogni worker restituisce le predizioni del
+            proprio sottoinsieme di alberi). NON va usato quando le predizioni sono già
+            state aggregate a monte (es. modalità federata, dove ogni worker restituisce
+            direttamente la predizione finale del modello globale sul proprio shard locale):
+            in quel caso passare le predizioni finali direttamente a calculate_metrics().
             """
-    
+            if predictions_matrix.ndim != 2:
+                raise ValueError(
+                    f"_aggregate_forest_predictions richiede una matrice 2D (n_alberi, n_campioni), "
+                    f"ricevuta shape {predictions_matrix.shape}. Se le predizioni sono già aggregate "
+                    f"per campione, chiamare direttamente calculate_metrics()."
+                )
+
             if tree_type == "classifier":
                 # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)
                 uniform_weights = np.ones_like(predictions_matrix)
                 final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
                 final_predictions = final_predictions.ravel().astype(int)
-                y_test = y_test.astype(int)
-    
+                # Frazione di alberi che ha votato per la classe positiva, usata come proxy
+                # di probabilità per l'AUC (valida solo se le etichette sono codificate 0/1)
                 y_probs = np.mean(predictions_matrix, axis=0)
+            else:
+                final_predictions = np.mean(predictions_matrix, axis=0)
+                y_probs = None
+
+            return final_predictions, y_probs
+
+    def calculate_metrics(
+            self,
+            final_predictions: np.ndarray,
+            y_test: np.ndarray,
+            tree_type: str,
+            y_probs: np.ndarray = None
+        ):
+            """
+            Metodo helper per il calcolo, la validazione statistica e la stampa
+            delle metriche di performance del modello globale.
+
+            Si aspetta predizioni GIA' finali (una per campione, shape (n_campioni,)):
+            - modalità centralizzata: ottenute da _aggregate_forest_predictions()
+            - modalità federata: quelle restituite direttamente dai worker
+            """
+            final_predictions = np.asarray(final_predictions)
+            y_test = np.asarray(y_test)
+            if final_predictions.shape != y_test.shape:
+                raise ValueError(
+                    f"final_predictions {final_predictions.shape} e y_test {y_test.shape} devono avere "
+                    f"la stessa shape (una predizione per campione). Se si sta passando una matrice "
+                    f"grezza per-albero, aggregarla prima con _aggregate_forest_predictions()."
+                )
+
+            if tree_type == "classifier":
+                final_predictions = final_predictions.astype(int)
+                y_test = y_test.astype(int)
+
                 n_classes = len(np.unique(np.concatenate([y_test, final_predictions])))
                 avg_method = "binary" if n_classes <= 2 else "weighted"
-                
+
                 # Calcolo delle metriche di classificazione standard
                 accuracy = np.mean(final_predictions == y_test)
                 precision = precision_score(y_test, final_predictions, average=avg_method, zero_division=0)
                 recall = recall_score(y_test, final_predictions, average=avg_method, zero_division=0)
                 f1 = f1_score(y_test, final_predictions, average=avg_method, zero_division=0)
-                auc = roc_auc_score(y_test, y_probs) if n_classes == 2 else None
+                # L'AUC richiede degli score/probabilità continui: se il chiamante non ne dispone
+                # (es. federato, se i worker non restituiscono anche predict_proba) resta None.
+                auc = roc_auc_score(y_test, y_probs) if (n_classes == 2 and y_probs is not None) else None
                 cm = confusion_matrix(y_test, final_predictions)
-                
-               
+
+
                 metrics = {
                     "accuracy": accuracy,
                     "precision": precision,
@@ -715,19 +763,18 @@ class BaseOrchestrator(ABC):
                     "confusion_matrix": cm.tolist(),
                     "classification_report": classification_report(y_test, final_predictions, output_dict=True, zero_division=0)
                 }
-                
+
             else:
-                final_predictions = np.mean(predictions_matrix, axis=0)
                 mse = mean_squared_error(y_test, final_predictions)
                 rmse = np.sqrt(mse)
                 mae = mean_absolute_error(y_test, final_predictions)
                 r2 = r2_score(y_test, final_predictions)
-                
+
                 metrics = {
                     "mse": mse,
                     "rmse": rmse,
                     "mae": mae,
                     "r2": r2
                 }
-    
+
             return metrics
