@@ -161,29 +161,26 @@ def handle_inference():
 
     data_url = get_input(f"Inserisci il path/URL dei dati per l'inferenza [Default: {default_data_url}]: ", default_data_url).strip()
 
-    # 2. Tentativo di recupero degli iperparametri dal file locale centralizzato
+    # 2. Tentativo di recupero degli iperparametri dallo storico locale (append-only),
+    # indicizzato per job_id: a differenza di config.json (che viene sovrascritto ad
+    # ogni nuovo training o baseline e riflette quindi solo l'ULTIMA esecuzione),
+    # lo storico conserva gli iperparametri corretti per ciascun job_id nel tempo.
     hp_obj = None
-    if os.path.exists(CONFIG_PATH):
+    matched_training = next(
+        (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
+        None,
+    )
+    if matched_training:
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                saved_config = json.load(f)
-                
-            if saved_config.get("job_id") == job_id:
-                hp_data = saved_config.get("hyperparameters", {})
-                hp_obj = Hyperparameters(**hp_data)
-                print(f"[INFO] Iperparametri estratti automaticamente (Task rilevato: {hp_obj.tree_type.upper()}).")
-            else:
-                forza_caricamento = get_input(
-                    "Il Job ID locale non corrisponde a quello inserito. Forzare comunque l'uso degli iperparametri locali? (S/N): ", 
-                    "N"
-                )
-                if forza_caricamento.upper() == "S":
-                    hp_data = saved_config.get("hyperparameters", {})
-                    hp_obj = Hyperparameters(**hp_data)
-                    print(f"[INFO] Iperparametri forzati dal file locale (Task rilevato: {hp_obj.tree_type.upper()}).")
-                    
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            print(f"[INFO] Errore di lettura o file corrotto in '{CONFIG_PATH}': {e}")
+            hp_data = matched_training.get("hyperparameters", {})
+            if not hp_data:
+                raise ValueError("Voce di storico priva del blocco 'hyperparameters' (job addestrato con una versione precedente del client).")
+            hp_obj = Hyperparameters(**hp_data)
+            print(f"[INFO] Iperparametri estratti automaticamente dallo storico (Task rilevato: {hp_obj.tree_type.upper()}).")
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"[INFO] Impossibile ricostruire gli iperparametri dallo storico per il Job ID '{job_id}': {e}")
+    else:
+        print(f"[INFO] Nessuna voce di training trovata nello storico locale per il Job ID '{job_id}'.")
 
     # 3. Configurazione manuale di ripiego
     if not hp_obj:
@@ -524,6 +521,7 @@ def handle_training():
             "environment": request.environment,
             "dataset_type": request.dataset_type,
             "tree_type": request.hyperparameters.tree_type,
+            "hyperparameters": request.hyperparameters.model_dump(),
         })
         
     except Exception as e:

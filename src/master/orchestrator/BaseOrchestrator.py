@@ -670,7 +670,7 @@ class BaseOrchestrator(ABC):
             print(f"[{self.orchestrator_name}] [METRICS-WARN] Salvataggio fallito: {e}")
 
     def _resolve_metrics_path(self, job_id: str, phase: str) -> str:
-        fname = f"{phase}_{job_id}.json"          # phase = "training" | "inference"
+        fname = f"{phase}_{job_id}.json"
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/metrics/{self.__class__.__name__.lower()}/{fname}"
         return os.path.join("./.local_storage/metrics", fname)
