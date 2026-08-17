@@ -119,6 +119,58 @@ def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> 
     )
 
 
+def load_local_state() -> dict:
+    """Carica lo stato locale strutturato da CONFIG_PATH.
+
+    Formato atteso:
+        {"baseline_boot": {...}, "last_training_request": {...}}
+
+    Retrocompatibilità: se il file esiste ma è nel vecchio formato "piatto"
+    (scritto prima di questa modifica, senza le chiavi di sezione), il
+    contenuto viene interpretato una tantum in base ai campi presenti e
+    incapsulato nella sezione corretta, così i file già su disco restano
+    utilizzabili senza bisogno di cancellarli manualmente.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[ATTENZIONE] Impossibile leggere lo stato locale '{CONFIG_PATH}': {e}")
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    if "baseline_boot" in data or "last_training_request" in data:
+        return data
+
+    # Vecchio formato piatto: proviamo a capire quale dei due schemi fosse.
+    if "dataset_type" in data and "tree_type" in data and "hyperparameters" not in data:
+        print(f"[INFO] Rilevato '{CONFIG_PATH}' in formato precedente (boot config). Migrazione automatica in memoria.")
+        return {"baseline_boot": data}
+    if "hyperparameters" in data:
+        print(f"[INFO] Rilevato '{CONFIG_PATH}' in formato precedente (training request). Migrazione automatica in memoria.")
+        return {"last_training_request": data}
+
+    # Formato non riconoscibile: lo ignoriamo piuttosto che propagare dati sbagliati.
+    print(f"[ATTENZIONE] '{CONFIG_PATH}' non è nel formato atteso e non è stato possibile determinarne la sezione. Verrà ignorato.")
+    return {}
+
+
+def save_local_state_section(section: str, data: dict) -> None:
+    """Aggiorna una singola sezione dello stato locale strutturato, preservando le altre."""
+    state = load_local_state()
+    state[section] = data
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except IOError as e:
+        print(f"[ATTENZIONE] Impossibile salvare la sezione '{section}' in '{CONFIG_PATH}': {e}")
+
+
 def load_history() -> list:
     """Carica lo storico locale delle richieste inviate (training + inferenza)."""
     if not os.path.exists(HISTORY_PATH):
@@ -502,14 +554,9 @@ def handle_training():
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA DATI]: {e}")
         return
 
-    # CENTRALIZZAZIONE: Salvataggio file di configurazione locale in .local_storage
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(request.model_dump(), f, indent=2)
-        print(f"\n[OK] File di configurazione memorizzato in: '{CONFIG_PATH}'")
-    except IOError as e:
-        print(f"Impossibile salvare 'config.json' in locale: {e}")
+    # CENTRALIZZAZIONE: Salvataggio della richiesta di training nello stato locale strutturato
+    save_local_state_section("last_training_request", request.model_dump())
+    print(f"\n[OK] Richiesta di training memorizzata in: '{CONFIG_PATH}' (sezione 'last_training_request')")
 
     # 6. Invio del pacchetto e gestione dello stato
     target_queue = "federated_queue.fifo" if request.mode == "federated" else "centralized_queue.fifo"
@@ -574,9 +621,7 @@ def handle_baseline_selection():
         "tree_type": selected_tree_type
     }
     
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(boot_config, f, indent=2)
+    save_local_state_section("baseline_boot", boot_config)
     print(f"[OK] Boot configuration registrata: {dtype.upper()} | TASK: {selected_tree_type.upper()}")
         
     run_baseline()

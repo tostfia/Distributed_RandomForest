@@ -76,10 +76,27 @@ def run_baseline():
     if os.path.exists(BOOT_CONFIG_PATH):
         with open(BOOT_CONFIG_PATH, "r") as f:
             try:
-                tmp_cfg = json.load(f)
-                dataset_type = tmp_cfg.get("dataset_type", "real")
-                user_tree_type = tmp_cfg.get("tree_type", "classifier")
-                print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
+                raw_state = json.load(f)
+                if not isinstance(raw_state, dict):
+                    raise ValueError("Il contenuto del file di stato locale non è un oggetto JSON valido.")
+
+                if "baseline_boot" in raw_state:
+                    # Nuovo formato strutturato: {"baseline_boot": {...}, "last_training_request": {...}}
+                    boot_cfg = raw_state["baseline_boot"]
+                elif "dataset_type" in raw_state and "hyperparameters" not in raw_state:
+                    # Retrocompatibilità: vecchio formato piatto scritto direttamente come boot config.
+                    boot_cfg = raw_state
+                    print(f" [INFO] '{BOOT_CONFIG_PATH}' è nel formato precedente (piatto). Letto comunque per retrocompatibilità.")
+                else:
+                    # Il file esiste ma contiene solo (o principalmente) una last_training_request:
+                    # non c'è una boot config valida, si scala sui default.
+                    boot_cfg = {}
+                    print(f" [INFO] '{BOOT_CONFIG_PATH}' non contiene una sezione 'baseline_boot' valida. Uso i default.")
+
+                dataset_type = boot_cfg.get("dataset_type", "real")
+                user_tree_type = boot_cfg.get("tree_type", "classifier")
+                if boot_cfg:
+                    print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except Exception as e:
                 print(f" [ATTENZIONE] Errore nel parsing di {BOOT_CONFIG_PATH}: {e}")
                 pass
