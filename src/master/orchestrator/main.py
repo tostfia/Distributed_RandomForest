@@ -15,7 +15,9 @@ def main():
 
     ec2_id = os.environ.get("EC2_ID", "Locale")
     hostname = socket.gethostname()
-    orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}"
+
+    orchestrator_index = os.environ.get("ORCHESTRATOR_INDEX", "1")
+    orchestrator_name = f"Orchestrator-{ec2_id}-{mode}-{hostname}-{orchestrator_index}"
 
     def _graceful_shutdown(signum, frame):
         print(f"[SHUTDOWN] Ricevuto segnale {signum}, deregistro {orchestrator_name}...")

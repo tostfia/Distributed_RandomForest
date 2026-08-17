@@ -14,7 +14,17 @@ TARGET_DIRS=(
     "$PROJECT_ROOT/test_reports/local/"
 )
 
+CONFIG_PATH="$PROJECT_ROOT/.local_storage/config.json"
+TMP_PRESERVE_PATH="$(mktemp -t baseline_boot_preserve.XXXXXX.json)"
+PRESERVE_SCRIPT="$SCRIPT_DIR/preserve_baseline_boot.py"
+
 echo "[CLEANUP] Avvio pulizia selettiva dei contenuti..."
+
+if command -v python3 &> /dev/null; then
+    python3 "$PRESERVE_SCRIPT" save "$CONFIG_PATH" "$TMP_PRESERVE_PATH"
+else
+    echo "[WARNING] python3 non trovato: 'baseline_boot' non verrà preservato in questo cleanup."
+fi
 
 for DIR in "${TARGET_DIRS[@]}"; do
     if [ ! -d "$DIR" ]; then
@@ -24,13 +34,18 @@ for DIR in "${TARGET_DIRS[@]}"; do
 
     echo "Svuotamento dei contenuti in: $DIR"
 
-    # MODIFICA: 'mindepth 1' evita di toccare la cartella radice.
-    # L'esclusione di .gitkeep protegge il file di placeholder.
     find "$DIR" -mindepth 1 \
         ! -name ".gitkeep" \
         -exec rm -rf {} +
 
-    echo " [OK] Contenuto di $DIR svuotato (struttura radice e .gitkeep preservati)."
+    echo "  [OK] Contenuto di $DIR svuotato (struttura radice e .gitkeep preservati)."
 done
+
+if command -v python3 &> /dev/null; then
+    python3 "$PRESERVE_SCRIPT" restore "$CONFIG_PATH" "$TMP_PRESERVE_PATH"
+    if [ -f "$CONFIG_PATH" ]; then
+        echo "[CLEANUP] 'baseline_boot' preservata in: $CONFIG_PATH"
+    fi
+fi
 
 echo -e "[CLEANUP] Pulizia completata con successo!\n"
