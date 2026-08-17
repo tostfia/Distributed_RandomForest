@@ -9,6 +9,42 @@ from src.master.orchestrator.federated import FederatedOrchestrator
 import docker
 
 
+def _wait_for_job_processing(state_manager, job_id, timeout=400, interval=0.3) -> float:
+    """
+    Attende (con timeout) che i worker abbiano davvero completato e
+    checkpointato almeno un chunk di alberi (alberi_addestrati > 0).
+
+    NOTA: status=="PROCESSING" da solo NON basta — viene scritto subito dopo
+    che il job viene reclamato, PRIMA che l'ETL (che può durare 130-260s sul
+    dataset reale) e il primo giro di RPC ai worker siano anche solo iniziati.
+    Usare solo quel segnale farebbe scattare il kill quando zero alberi sono
+    stati prodotti, lasciando lo standby senza alcun checkpoint reale da cui
+    ripartire — esattamente lo scenario che NON vogliamo testare.
+
+    Il timeout di default (400s) è dimensionato per coprire l'intero ETL più
+    il tempo del primo round di training, non solo l'acquisizione del lock.
+
+    A differenza di chunk_sent_event (in-process, inutilizzabile quando il
+    training avviene in un container separato come 'orchestrator-1'), questo
+    segnale è letto dallo stato condiviso e funziona identicamente sia in
+    locale che in Docker. Ritorna i secondi di attesa effettivi (utile per
+    log), o -1.0 se il timeout scade prima che risulti del progresso reale.
+    """
+    waited = 0.0
+    while waited < timeout:
+        try:
+            state = state_manager.obtain_request(job_id)
+            if state:
+                item_data = state.get("Item", state)
+                if item_data.get("status") == "PROCESSING" and item_data.get("alberi_addestrati", 0) > 0:
+                    return waited
+        except Exception:
+            pass
+        time.sleep(interval)
+        waited += interval
+    return -1.0
+
+
 def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
     """
     Attende (con timeout) che 'orch' risulti effettivamente leader, prima di
@@ -154,9 +190,14 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             orch.state_manager.try_claim_job = _denied
 
         def kill_system_leader_target():
-            kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 270)
-            print(f"[TEST KILLER] Lascio lavorare il leader per {kill_after_seconds} secondi prima del crash...")
-            time.sleep(kill_after_seconds)
+            timeout = ft_cfg.get("max_wait_for_training_start_seconds", 400)
+            waited = _wait_for_job_processing(orch_leader.state_manager, job_id, timeout=timeout)
+            if waited < 0:
+                print(f"[TEST WARN] Timeout di {timeout}s raggiunto senza che risultasse alcun albero completato. "
+                      f"Procedo comunque a simulare il guasto (nessun checkpoint reale da recuperare).")
+            else:
+                print(f"[TEST KILLER] Primo checkpoint reale rilevato dopo {waited:.1f}s: i worker hanno "
+                      f"prodotto lavoro concreto. Simulo il crash immediatamente.")
             
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO DI {orch_leader.orchestrator_name.upper()} !!!")
             
@@ -199,23 +240,27 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                     pass
             
             print(f"[TEST TRIGGER] '{orch_leader.orchestrator_name}' è stato neutralizzato.")
-        if docker_env != "true":
-            killer_thread = threading.Thread(target=kill_system_leader_target, name="KillerThread")
-            killer_thread.daemon = True
-            killer_thread.start()
-        else: 
-        
+
+        def kill_docker_leader_target():
+            timeout = ft_cfg.get("max_wait_for_training_start_seconds", 400)
+            waited = _wait_for_job_processing(orch_leader.state_manager, job_id, timeout=timeout)
+            if waited < 0:
+                print(f"[TEST WARN] Timeout di {timeout}s raggiunto senza che risultasse alcun albero completato "
+                      f"(Docker). Procedo comunque a simulare il guasto (nessun checkpoint reale da recuperare).")
+            else:
+                print(f"[TEST KILLER] Primo checkpoint reale rilevato dopo {waited:.1f}s (Docker): i worker "
+                      f"hanno prodotto lavoro concreto. Simulo il crash immediatamente.")
+
+            print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO (DOCKER) !!!")
+
             client = docker.from_env()
-            
             containers = client.containers.list(filters={
                 "label": "com.docker.compose.service=orchestrator"
             })
             found = False
             for c in containers:
-
                 if "orchestrator-1" in c.name:
                     print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
-                    
                     c.update(restart_policy={"Name": "no"})
                     print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
                     c.kill()
@@ -223,6 +268,7 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                     break
             if not found:
                 print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
+
             # Il container è morto per davvero (kill fisico): a differenza del
             # ramo non-Docker, qui non c'è un heartbeat in-process da fermare
             # prima — resta solo da ripulire il lock, che il container appena
@@ -243,9 +289,35 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                 except Exception:
                     pass
 
-        kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 120)
+            # NOTA: qui non possiamo forzare il rilascio della JOB LEASE (a
+            # differenza del ramo non-Docker) perché il vero proprietario del
+            # lock non è 'orch_leader' (l'handle di questo TestEngine) ma il
+            # container 'orchestrator-1' con la sua identità interna — un
+            # release_job_lease firmato da un orchestrator_name diverso dal
+            # reale possessore fallisce silenziosamente. Bisogna quindi
+            # dimensionare max_monitor_timeout_seconds includendo il naturale
+            # TTL di 300s della lease (vedi try_claim_job in localstatemanager.py).
+            print(f"[TEST TRIGGER] '{orch_leader.orchestrator_name}' [Docker] è stato neutralizzato.")
+
+        if docker_env != "true":
+            killer_thread = threading.Thread(target=kill_system_leader_target, name="KillerThread")
+            killer_thread.daemon = True
+            killer_thread.start()
+        else:
+            killer_thread = threading.Thread(target=kill_docker_leader_target, name="DockerKillerThread")
+            killer_thread.daemon = True
+            killer_thread.start()
+
+        # Il kill ora scatta dopo il primo checkpoint reale (alberi_addestrati > 0),
+        # non più al semplice status PROCESSING: il timeout di monitoraggio deve
+        # coprire l'attesa per il primo checkpoint (che include l'intero ETL,
+        # 130-260s sul dataset reale) + il recovery. Il recovery però è più
+        # rapido di prima: l'ETL è già stato salvato su storage condiviso dal
+        # leader originale, quindi lo standby lo salta ([SHORT-CIRCUIT ETL]) e
+        # riparte solo dagli alberi mancanti.
+        max_wait_for_training_start = ft_cfg.get("max_wait_for_training_start_seconds", 400)
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
-        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", kill_after_seconds + failover_detection_margin + 60)
+        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", max_wait_for_training_start + failover_detection_margin + 300)
         job_completed = False
         trees_built = 0
         max_trees_built_seen = 0  # tiene il massimo, perché al COMPLETED il campo può azzerarsi

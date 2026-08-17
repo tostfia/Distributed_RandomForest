@@ -49,7 +49,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
     def run(self) -> dict:
 
-        ft_cfg = self.config.get("inference_orchestrator_fault", {})
+        ft_cfg = self.config.get("inference_orchestrator_failover", {})
         task_type = self.config.get("selected_task", "classifier")
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
@@ -113,6 +113,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         }
 
         try:
+            self._reuse_dataset_if_available(payload, seed=123)
             orch_leader._execute_training_step(payload, 0, target_trees, 123)
             
         except Exception as e:
@@ -193,22 +194,33 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                     pass
 
             print(f"[TEST TRIGGER] '{orch_leader.orchestrator_name}' è stato neutralizzato.")
-        if docker_env != "true":
-            killer_thread = threading.Thread(target=kill_orchestrator, name="KillerThread")
-            killer_thread.daemon = True
-            killer_thread.start()
-        else:
-            print(f"[TEST] Ambiente DOCKER rilevato: il crash del leader sarà simulato dal container .")
-            client = docker.from_env()   
+
+        def kill_docker_leader_target():
+            # A differenza del training, l'inferenza non scrive mai uno stato
+            # "in corso" nello StateManager (_execute_inference_step imposta
+            # status solo a "COMPLETED", a fine lavoro) — non esiste quindi un
+            # segnale condiviso equivalente a quello usato in orchestrator_fault.py
+            # per rilevare "i worker hanno iniziato". chunk_sent_event non è
+            # utilizzabile per lo stesso motivo: l'inferenza reale gira dentro
+            # 'orchestrator-1', un container separato da questo processo.
+            # Restiamo quindi su un'attesa fissa breve, la più vicina possibile
+            # al momento di dispatch reale (l'inferenza qui dura tipicamente
+            # solo 2-3s in totale, quindi anche pochi secondi di ritardo pesano).
+            kill_delay = ft_cfg.get("docker_kill_delay_seconds", 1)
+            print(f"[TEST KILLER] Lascio lavorare il leader per {kill_delay} secondi prima del crash (Docker, "
+                  f"stima approssimata: nessun segnale di 'inferenza avviata' disponibile)...")
+            time.sleep(kill_delay)
+
+            print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO (DOCKER) !!!")
+
+            client = docker.from_env()
             containers = client.containers.list(filters={
                 "label": "com.docker.compose.service=orchestrator"
             })
             found = False
             for c in containers:
-
                 if "orchestrator-1" in c.name:
                     print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
-                    
                     c.update(restart_policy={"Name": "no"})
                     print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
                     c.kill()
@@ -234,10 +246,25 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                     print(f"[TEST TRIGGER] Lock '{lock_key}' rilasciato da DynamoDB.")
                 except Exception:
                     pass
+            print(f"[TEST TRIGGER] '{orch_leader.orchestrator_name}' [Docker] è stato neutralizzato.")
 
-        kill_after_seconds = ft_cfg.get("kill_orchestrator_after_seconds", 270)
+        if docker_env != "true":
+            killer_thread = threading.Thread(target=kill_orchestrator, name="KillerThread")
+            killer_thread.daemon = True
+            killer_thread.start()
+        else:
+            print(f"[TEST] Ambiente DOCKER rilevato: il crash del leader sarà simulato dal container .")
+            killer_thread = threading.Thread(target=kill_docker_leader_target, name="DockerKillerThread")
+            killer_thread.daemon = True
+            killer_thread.start()
+
+        # Il kill (non-Docker: al primo chunk inviato; Docker: dopo un breve
+        # ritardo fisso, vedi sopra) avviene in pochi secondi in entrambi i
+        # casi: il timeout di monitoraggio non dipende più da
+        # "kill_orchestrator_after_seconds" (chiave rimossa), basta un
+        # margine di sicurezza per il recovery dello standby.
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
-        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", kill_after_seconds + failover_detection_margin + 60)
+        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", failover_detection_margin + 60)
         job_completed = False
         trees_built = 0
         max_trees_built_seen = 0  # tiene il massimo, perché al COMPLETED il campo può azzerarsi

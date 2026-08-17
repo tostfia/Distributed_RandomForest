@@ -21,6 +21,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         try:
             # Generiamo pochi alberi (es. 10 o 20) solo per creare legalmente il file .pkl su disco
             # Eseguiamo questa fase senza killare nessuno, in totale stabilità
+            self._reuse_dataset_if_available(payload, seed=123)
             num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
             self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
             print("[TEST] Modello globale generato con successo su disco. Pronto per il test di inferenza.")

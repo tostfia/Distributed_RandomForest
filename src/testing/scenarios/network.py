@@ -145,9 +145,17 @@ class NetworkSimulationScenario(BaseTestScenario):
 
     def _measure_rpc_baseline(self) -> float:
         """
-        Esegue un training minimo (1 albero) per misurare il tempo
-        di una singola chiamata RPC nelle condizioni correnti di rete.
-        Ritorna il tempo in secondi.
+        Esegue un training minimo (1 albero) per ottenere un tempo di
+        riferimento nelle condizioni correnti di rete.
+
+        ATTENZIONE: nonostante il nome storico, questo NON isola la sola
+        latenza RPC — _execute_training_step esegue anche l'intero ETL
+        (parsing CSV, split, preprocessing) prima di contattare il worker,
+        quindi il valore misurato è dominato dal tempo di preparazione dati
+        (tipicamente 130-260s), non dalla rete. Per isolare la vera latenza
+        RPC servirebbe un metodo "ping" leggero esposto dal worker (es.
+        BaseWorker.exposed_ping()) che bypassi del tutto l'ETL — non ancora
+        implementato. Ritorna il tempo totale in secondi.
         """
         probe_payload = {
             "job_id": f"net_probe_{int(time.time() * 1000)}",
@@ -160,6 +168,7 @@ class NetworkSimulationScenario(BaseTestScenario):
             },
         }
         t0 = time.perf_counter()
+        self._reuse_dataset_if_available(probe_payload, seed=0)
         self.orchestrator._execute_training_step(
             probe_payload, start_alberi=0, target_alberi=1, seed=0
         )
@@ -190,9 +199,10 @@ class NetworkSimulationScenario(BaseTestScenario):
             else:
                 print("[INFO] latency_seconds=0 e packet_loss_rate=0: nessuna regola tc applicata.")
 
-            # Misura probe RPC singolo (utile per confronto con/senza delay)
+            # Misura di riferimento (include ETL, NON è la sola latenza RPC —
+            # vedi docstring di _measure_rpc_baseline)
             probe_time = self._measure_rpc_baseline()
-            print(f"[PROBE] Latenza RPC singola: {probe_time * 1000:.1f}ms")
+            print(f"[PROBE] Tempo totale job di probe (1 albero, ETL incluso): {probe_time * 1000:.1f}ms")
 
             # Training reale
             task_type = self.config.get("selected_task", "classifier")
@@ -203,6 +213,7 @@ class NetworkSimulationScenario(BaseTestScenario):
                 target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
 
             t0 = time.perf_counter()
+            self._reuse_dataset_if_available(payload, seed=123)
             trees_built = self.orchestrator._execute_training_step(
                 payload, start_alberi=0, target_alberi=target_trees, seed = 123
             )
@@ -227,7 +238,7 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "status": status,
                 "applied_latency_ms": latency_ms if tc_applied else 0,
                 "applied_loss_percent": loss_percentage if tc_applied else 0,
-                "probe_rpc_baseline_ms": round(probe_time * 1000, 2),
+                "probe_job_total_time_ms": round(probe_time * 1000, 2),
                 "duration_seconds": duration,
                 "tc_rules_successfully_injected": tc_applied,
                 "throughput_trees_per_second": throughput,
