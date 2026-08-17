@@ -132,8 +132,11 @@ if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
 else
   echo "    Service trovati: ${TARGET_SERVICES[*]}"
   for svc in "${TARGET_SERVICES[@]}"; do
-    aws ecs update-service --cluster "$CLUSTER_NAME" --service "$svc" \
-      --desired-count 0 --region "$REGION" > /dev/null 2>&1 || echo "    ($svc: update fallito, salto)"
+    echo "    Eliminazione definitiva del servizio '$svc'..."
+    aws ecs update-service --cluster "$CLUSTER_NAME" --service "$svc" --desired-count 0 --region "$REGION" > /dev/null 2>&1
+    aws ecs delete-service --cluster "$CLUSTER_NAME" --service "$svc" --force --region "$REGION" > /dev/null 2>&1 \
+      && echo "    '$svc' eliminato con successo." \
+      || echo "    ($svc: eliminazione fallita, salto)"
   done
 
   echo ""
