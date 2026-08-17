@@ -158,7 +158,6 @@ def run_baseline():
         task_str = "regression" if user_tree_type == "regressor" else "classification"
         print(f" • Tipo Dataset: Sintetico (Stress Test Task - {user_tree_type.upper()})")
 
-        # Corretto il typo "ttask" -> "task"
         loader = SyntheticDataLoader(
             task=task_str,
             n_samples=n_samples,
