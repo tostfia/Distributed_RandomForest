@@ -31,7 +31,7 @@ services:
       replicas: 2
 
   worker:
-    build: .
+    #build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     ports:
@@ -72,7 +72,7 @@ services:
 
   
   test-engine:
-    build: .
+    #build: .
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     environment:
