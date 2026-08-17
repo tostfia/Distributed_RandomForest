@@ -332,7 +332,7 @@ cat <<EOF > /tmp/orchestrator-task-def.json
       ],
       "command": [
         "sh", "-c",
-        "export ORCHESTRATOR_ID=Orchestrator-\${EC2_ID}-\${TRAINING_MODE}-\$(hostname); exec python -m src.master.orchestrator.main"
+        "export ORCHESTRATOR_INDEX=\$(curl -s \"\$ECS_CONTAINER_METADATA_URI_V4/task\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['TaskARN'].split('/')[-1])\"); echo \"Registrazione con Task ID: \$ORCHESTRATOR_INDEX\"; exec python -m src.master.orchestrator.main"
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
