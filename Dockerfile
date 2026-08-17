@@ -47,7 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
+RUN setcap cap_net_admin+ep $(which tc)
 # Copiamo l'intero virtualenv già pronto dal builder stage
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
