@@ -9,6 +9,9 @@ NUM_WORKERS="${ENV_NUM_WORKERS:-2}"
 echo "[RUN_TEST] Avvio con NUM_WORKERS=$NUM_WORKERS (da .env)..."
 
 docker compose down
+
 docker compose up -d --scale worker=$NUM_WORKERS --scale orchestrator=2
+
 docker compose run --rm test-engine
+
 docker compose down
