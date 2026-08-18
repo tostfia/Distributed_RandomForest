@@ -67,6 +67,8 @@ services:
 
   test-engine:
     #build: .
+    profiles:
+      - testing
     mem_limit: 4096m
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
