@@ -2,6 +2,7 @@ import subprocess
 import time
 import threading
 import os
+import re
 import json
 from src.testing.scenarios.base import BaseTestScenario
 from src.master.orchestrator.centralized import CentralizedOrchestrator
@@ -81,6 +82,57 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
     return False
 
 
+def _resolve_leader_container(client, lock_dir="./.local_storage"):
+    """
+    Determina QUALE dei container Docker (tra 'orchestrator-1' e
+    'orchestrator-2') sta effettivamente detenendo la leadership in questo
+    momento, leggendo il lock condiviso su disco — invece di assumere
+    staticamente che sia sempre 'orchestrator-1'.
+
+    L'elezione della leadership tra i due container è non deterministica:
+    dipende da chi acquisisce per primo il lock all'avvio (vedi
+    _try_acquire_leadership in BaseOrchestrator). Uccidere sempre lo stesso
+    nome per posizione rischia quindi di colpire lo STANDBY invece del
+    LEADER, vanificando il test: il job continuerebbe indisturbato sul
+    leader originale e il test riporterebbe SUCCESS senza aver testato
+    alcun failover reale.
+
+    Il campo 'leader' nel lock contiene il nome interno dell'orchestratore
+    (es. 'Orchestrator-local-centralized-7a4fd6802b7b-1'), che include
+    l'hostname del container — che Docker imposta di default all'ID breve
+    del container (12 caratteri esadecimali). Estraiamo quell'ID e lo
+    confrontiamo con l'ID reale dei container in esecuzione per capire
+    quale dei due sia il vero leader.
+
+    Ritorna l'oggetto container Docker del leader, o None se non è stato
+    possibile determinarlo (lock assente/corrotto, o nessun container
+    corrispondente trovato).
+    """
+    lock_key = "global_orchestrator_leader_lock"
+    lock_path = os.path.join(lock_dir, f"{lock_key}.json")
+    if not os.path.exists(lock_path):
+        return None
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            lock_data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    leader_name = lock_data.get("leader", "")
+    match = re.search(r"[0-9a-f]{12}", leader_name.lower())
+    if not match:
+        return None
+    hostname_fragment = match.group(0)
+
+    containers = client.containers.list(filters={
+        "label": "com.docker.compose.service=orchestrator"
+    })
+    for c in containers:
+        if c.id.startswith(hostname_fragment):
+            return c
+    return None
+
+
 class OrchestratorFailoverScenario(BaseTestScenario):
     """
     Copre lo Scenario: Failover dell'Orchestratore.
@@ -91,7 +143,14 @@ class OrchestratorFailoverScenario(BaseTestScenario):
     
     def run(self) -> dict:
      
-        ft_cfg = self.config.get("fault_tolerance", {})
+        # BUGFIX: leggeva erroneamente il blocco 'fault_tolerance' (parametri
+        # dello scenario 4, Guasto Worker), che non contiene nessuna delle tre
+        # chiavi usate da QUESTO scenario. Il risultato era che
+        # max_wait_for_training_start_seconds/failover_detection_margin_seconds/
+        # max_monitor_timeout_seconds ricadevano sempre sui default hardcoded
+        # (400/90/790) sotto, IGNORANDO silenziosamente qualunque valore
+        # impostato in test_config.json sotto 'orchestrator_failover'.
+        ft_cfg = self.config.get("orchestrator_failover", {})
         
         
         
@@ -254,20 +313,36 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO (DOCKER) !!!")
 
             client = docker.from_env()
-            containers = client.containers.list(filters={
-                "label": "com.docker.compose.service=orchestrator"
-            })
-            found = False
-            for c in containers:
-                if "orchestrator-1" in c.name:
-                    print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
-                    c.update(restart_policy={"Name": "no"})
-                    print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
-                    c.kill()
-                    found = True
-                    break
-            if not found:
-                print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
+            target_container = _resolve_leader_container(client)
+
+            if target_container is None:
+                # Fallback: non siamo riusciti a leggere il lock (assente o
+                # corrotto). Come ultima risorsa proviamo comunque
+                # 'orchestrator-1', ma segnaliamo chiaramente che potrebbe
+                # essere il container sbagliato — meglio un test che grida
+                # la propria incertezza che uno che dichiara SUCCESS avendo
+                # ucciso lo standby per sbaglio.
+                print("[TEST TRIGGER WARN] Impossibile identificare il leader dal lock "
+                      "condiviso. Fallback su 'orchestrator-1' (potrebbe essere lo "
+                      "standby, se ha vinto l'elezione 'orchestrator-2'): il risultato "
+                      "di questo test va verificato manualmente.")
+                containers = client.containers.list(filters={
+                    "label": "com.docker.compose.service=orchestrator"
+                })
+                for c in containers:
+                    if "orchestrator-1" in c.name:
+                        target_container = c
+                        break
+
+            found = target_container is not None
+            if found:
+                print(f"[TEST TRIGGER] Leader identificato dal lock: {target_container.name}. "
+                      f"Disattivo la restart policy per evitare che risorga da solo...")
+                target_container.update(restart_policy={"Name": "no"})
+                print(f"[TEST TRIGGER] Kill fisico del container: {target_container.name}")
+                target_container.kill()
+            else:
+                print("[TEST TRIGGER ERROR] Nessun container leader trovato tra i container attivi.")
 
             # Il container è morto per davvero (kill fisico): a differenza del
             # ramo non-Docker, qui non c'è un heartbeat in-process da fermare

@@ -2,6 +2,7 @@ import subprocess
 import time
 import threading
 import os
+import re
 import json
 from src.testing.scenarios.base import BaseTestScenario
 from src.master.orchestrator.centralized import CentralizedOrchestrator
@@ -39,6 +40,93 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
         time.sleep(interval)
         waited += interval
     return False
+
+def _wait_for_inference_in_progress(job_id, timeout=60, interval=0.2) -> float:
+    """
+    Attende (con timeout) che l'inferenza distribuita sia DAVVERO in corso,
+    rilevando la comparsa del checkpoint di inferenza su disco con almeno un
+    chunk completato.
+
+    Perché serve: a differenza del training (che scrive alberi_addestrati>0
+    nello StateManager, un segnale condiviso e leggibile), l'inferenza aggiorna
+    lo stato del job solo a "COMPLETED", a fine lavoro. Un ritardo fisso prima
+    del kill è quindi una scommessa: troppo presto → nessun chunk salvato, lo
+    standby rifà tutto da zero (non si testa la ripresa da checkpoint); troppo
+    tardi → il leader ha già finito e marcato COMPLETED, e il failover non
+    viene testato affatto (falso positivo).
+
+    L'orchestratore, però, dopo OGNI chunk di inferenza completato da un worker,
+    salva la lista cumulativa dei chunk in
+    './.local_storage/inference_chunks_{job_id}.pkl' (vedi
+    _get_inference_checkpoint_path / _execute_inference_step in centralized.py).
+    Quel file — visibile al test via bind mount — è il segnale reale che
+    l'inferenza è iniziata ma non è detto sia finita: appena esiste ed è
+    leggibile (>=1 chunk), siamo nella finestra giusta per simulare il crash.
+
+    Ritorna i secondi attesi, o -1.0 se scade il timeout senza vedere il
+    checkpoint (l'inferenza potrebbe essere già finita, o non essere partita).
+    Applicabile solo in ambiente 'local' (checkpoint su filesystem locale).
+    """
+    checkpoint_path = f"./.local_storage/inference_chunks_{job_id}.pkl"
+    waited = 0.0
+    while waited < timeout:
+        if os.path.exists(checkpoint_path) and os.path.getsize(checkpoint_path) > 0:
+            return waited
+        time.sleep(interval)
+        waited += interval
+    return -1.0
+
+
+def _resolve_leader_container(client, lock_dir="./.local_storage"):
+    """
+    Determina QUALE dei container Docker (tra 'orchestrator-1' e
+    'orchestrator-2') sta effettivamente detenendo la leadership in questo
+    momento, leggendo il lock condiviso su disco — invece di assumere
+    staticamente che sia sempre 'orchestrator-1'.
+
+    L'elezione della leadership tra i due container è non deterministica:
+    dipende da chi acquisisce per primo il lock all'avvio (vedi
+    _try_acquire_leadership in BaseOrchestrator). Uccidere sempre lo stesso
+    nome per posizione rischia quindi di colpire lo STANDBY invece del
+    LEADER, vanificando il test: la richiesta di inferenza continuerebbe
+    indisturbata sul leader originale e il test riporterebbe SUCCESS senza
+    aver testato alcun failover reale.
+
+    Il campo 'leader' nel lock contiene il nome interno dell'orchestratore
+    (es. 'Orchestrator-local-centralized-7a4fd6802b7b-1'), che include
+    l'hostname del container — che Docker imposta di default all'ID breve
+    del container (12 caratteri esadecimali). Estraiamo quell'ID e lo
+    confrontiamo con l'ID reale dei container in esecuzione per capire
+    quale dei due sia il vero leader.
+
+    Ritorna l'oggetto container Docker del leader, o None se non è stato
+    possibile determinarlo (lock assente/corrotto, o nessun container
+    corrispondente trovato).
+    """
+    lock_key = "global_orchestrator_leader_lock"
+    lock_path = os.path.join(lock_dir, f"{lock_key}.json")
+    if not os.path.exists(lock_path):
+        return None
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            lock_data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    leader_name = lock_data.get("leader", "")
+    match = re.search(r"[0-9a-f]{12}", leader_name.lower())
+    if not match:
+        return None
+    hostname_fragment = match.group(0)
+
+    containers = client.containers.list(filters={
+        "label": "com.docker.compose.service=orchestrator"
+    })
+    for c in containers:
+        if c.id.startswith(hostname_fragment):
+            return c
+    return None
+
 
 class InferenceOrchestratorFaultScenario(BaseTestScenario):
     """
@@ -195,39 +283,69 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
             print(f"[TEST TRIGGER] '{orch_leader.orchestrator_name}' è stato neutralizzato.")
 
+        # Contenitore mutabile condiviso col killer thread: registra l'ID (breve)
+        # del container leader effettivamente ucciso, così la verifica finale può
+        # controllare che a completare il job sia stato un ALTRO orchestratore
+        # (il vero standby subentrato), non il leader originale — che sarebbe un
+        # falso positivo (kill fuori finestra, job chiuso dallo stesso leader).
+        killed_leader_info = {"container_id": None}
+
         def kill_docker_leader_target():
-            # A differenza del training, l'inferenza non scrive mai uno stato
-            # "in corso" nello StateManager (_execute_inference_step imposta
-            # status solo a "COMPLETED", a fine lavoro) — non esiste quindi un
-            # segnale condiviso equivalente a quello usato in orchestrator_fault.py
-            # per rilevare "i worker hanno iniziato". chunk_sent_event non è
-            # utilizzabile per lo stesso motivo: l'inferenza reale gira dentro
-            # 'orchestrator-1', un container separato da questo processo.
-            # Restiamo quindi su un'attesa fissa breve, la più vicina possibile
-            # al momento di dispatch reale (l'inferenza qui dura tipicamente
-            # solo 2-3s in totale, quindi anche pochi secondi di ritardo pesano).
-            kill_delay = ft_cfg.get("docker_kill_delay_seconds", 1)
-            print(f"[TEST KILLER] Lascio lavorare il leader per {kill_delay} secondi prima del crash (Docker, "
-                  f"stima approssimata: nessun segnale di 'inferenza avviata' disponibile)...")
-            time.sleep(kill_delay)
+            # Attendiamo un segnale REALE che l'inferenza è in corso — la
+            # comparsa del checkpoint di inferenza su disco con >=1 chunk — invece
+            # di un ritardo fisso "a scommessa". Così il crash cade sempre nella
+            # finestra utile: dopo che almeno un chunk è stato prodotto (c'è lavoro
+            # reale da recuperare) ma prima che il job sia COMPLETED (il failover
+            # viene davvero esercitato). Vedi _wait_for_inference_in_progress.
+            wait_timeout = ft_cfg.get("max_wait_for_inference_start_seconds", 60)
+            waited = _wait_for_inference_in_progress(job_id, timeout=wait_timeout)
+            if waited < 0:
+                # Fallback: nessun checkpoint comparso entro il timeout. Può
+                # succedere se l'inferenza è così rapida da completarsi prima di
+                # essere osservata, o se non è partita. Ripieghiamo sul vecchio
+                # ritardo fisso e segnaliamo che il test potrebbe non aver colto
+                # un failover genuino.
+                kill_delay = ft_cfg.get("docker_kill_delay_seconds", 1)
+                print(f"[TEST KILLER] [WARN] Nessun checkpoint di inferenza rilevato entro {wait_timeout}s: "
+                      f"ripiego su un ritardo fisso di {kill_delay}s. Il crash potrebbe cadere fuori dalla "
+                      f"finestra utile (inferenza non ancora avviata o già conclusa): verificare il risultato.")
+                time.sleep(kill_delay)
+            else:
+                print(f"[TEST KILLER] Inferenza in corso rilevata dopo {waited:.1f}s "
+                      f"(checkpoint con lavoro reale presente). Simulo il crash immediatamente.")
 
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO (DOCKER) !!!")
 
             client = docker.from_env()
-            containers = client.containers.list(filters={
-                "label": "com.docker.compose.service=orchestrator"
-            })
-            found = False
-            for c in containers:
-                if "orchestrator-1" in c.name:
-                    print(f"[TEST TRIGGER] Disattivo la restart policy di {c.name} per evitare che risorga da solo...")
-                    c.update(restart_policy={"Name": "no"})
-                    print(f"[TEST TRIGGER] Kill fisico del container: {c.name}")
-                    c.kill()
-                    found = True
-                    break
-            if not found:
-                print("[TEST TRIGGER ERROR] Orchestratore-1 non trovato tra i container attivi.")
+            target_container = _resolve_leader_container(client)
+
+            if target_container is None:
+                # Fallback: lock non leggibile (assente/corrotto). Proviamo
+                # comunque 'orchestrator-1', ma segnaliamo l'incertezza — meglio
+                # un test che dichiara la propria ambiguità che uno che riporta
+                # SUCCESS avendo ucciso lo standby per sbaglio.
+                print("[TEST TRIGGER WARN] Impossibile identificare il leader dal lock "
+                      "condiviso. Fallback su 'orchestrator-1' (potrebbe essere lo "
+                      "standby, se ha vinto l'elezione 'orchestrator-2'): il risultato "
+                      "di questo test va verificato manualmente.")
+                containers = client.containers.list(filters={
+                    "label": "com.docker.compose.service=orchestrator"
+                })
+                for c in containers:
+                    if "orchestrator-1" in c.name:
+                        target_container = c
+                        break
+
+            found = target_container is not None
+            if found:
+                killed_leader_info["container_id"] = target_container.id
+                print(f"[TEST TRIGGER] Leader identificato dal lock: {target_container.name}. "
+                      f"Disattivo la restart policy per evitare che risorga da solo...")
+                target_container.update(restart_policy={"Name": "no"})
+                print(f"[TEST TRIGGER] Kill fisico del container: {target_container.name}")
+                target_container.kill()
+            else:
+                print("[TEST TRIGGER ERROR] Nessun container leader trovato tra i container attivi.")
             # Container morto per davvero: qui non c'è un heartbeat in-process da
             # fermare prima, resta solo da ripulire il lock che il container
             # ucciso non ha potuto rilasciare da sé.
@@ -258,14 +376,18 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             killer_thread.daemon = True
             killer_thread.start()
 
-        # Il kill (non-Docker: al primo chunk inviato; Docker: dopo un breve
-        # ritardo fisso, vedi sopra) avviene in pochi secondi in entrambi i
-        # casi: il timeout di monitoraggio non dipende più da
-        # "kill_orchestrator_after_seconds" (chiave rimossa), basta un
-        # margine di sicurezza per il recovery dello standby.
+        # Il kill ora cade quando l'inferenza è genuinamente in corso (checkpoint
+        # con almeno un chunk presente). Come nel failover di training, lo standby
+        # che subentra potrebbe dover attendere la scadenza naturale della job-lease
+        # del leader morto (fino a ~300s) prima di poter reclamare il job — vedi il
+        # retry [RECOVERY-WAIT] in BaseOrchestrator._perform_active_recovery. Il
+        # timeout di monitoraggio deve quindi lasciare margine per quell'attesa più
+        # il recovery vero e proprio (rapido, perché i chunk già fatti vengono
+        # ripresi dal checkpoint via SHORT-CIRCUIT).
         failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
-        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", failover_detection_margin + 60)
+        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", failover_detection_margin + 360)
         job_completed = False
+        completed_by = None   # orchestrator_id che ha portato il job a COMPLETED
         trees_built = 0
         max_trees_built_seen = 0  # tiene il massimo, perché al COMPLETED il campo può azzerarsi
         elapsed = 0
@@ -283,15 +405,31 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                     status = item_data.get("status")
                     trees_built = item_data.get("alberi_addestrati", 0)
                     max_trees_built_seen = max(max_trees_built_seen, trees_built)
-                    current_owner = item_data.get("orchestrator_id")
+                    current_owner = item_data.get("orchestrator_id") or item_data.get("last_orchestrator")
                     
                     print(f"[TEST MONITOR] Stato: {status} | Alberi a checkpoint: {trees_built} | Gestore Attuale: {current_owner}")
                     
                     if status == "COMPLETED":
                         job_completed = True
+                        completed_by = current_owner
                         break
             except Exception as e:
                 print(f"[TEST MONITOR WARNING] Errore lettura stato: {e}")
+
+        # Verifica che il completamento sia opera dello STANDBY subentrato, non del
+        # leader originale ucciso. Il nome interno dell'orchestratore include
+        # l'hostname del container (= il suo ID breve), quindi se l'ID del container
+        # killato compare nel nome del completatore, il job è stato chiuso dallo
+        # stesso leader → il kill è caduto fuori finestra e il failover NON è stato
+        # realmente esercitato (falso positivo da respingere).
+        killed_id = killed_leader_info.get("container_id")
+        completed_by_killed_leader = bool(
+            killed_id and completed_by and killed_id[:12] in completed_by.lower()
+        )
+        if completed_by_killed_leader:
+            print(f"[TEST WARN] Il job risulta completato dallo stesso leader ucciso ({completed_by}): "
+                  f"il crash è probabilmente caduto a inferenza già conclusa. Failover NON esercitato.")
+
         # Il modello viene sempre salvato come "model_{job_id}.pkl" in entrambe le
         # modalità (vedi _resolve_model_path in centralized.py e federated.py).
         # NIENTE fallback glob "file più recente in ./saved_models/": in una
@@ -300,18 +438,19 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         # dichiarare SUCCESS un failover che in realtà non è mai avvenuto.
         path_modello_dinamico = f"./saved_models/model_{job_id}.pkl"
 
-        if job_completed or (trees_built == 0 and path_modello_dinamico and os.path.exists(path_modello_dinamico)):
+        if job_completed and not completed_by_killed_leader:
             test_status = "SUCCESS"
-            print(f"\n[TEST PASSED] Failover completato! Il modello {path_modello_dinamico} è stato generato.")
+            print(f"\n[TEST PASSED] Failover completato! Job chiuso dallo standby subentrato ({completed_by}).")
         else:
             test_status = "FAILED"
-            print(f"\n[TEST FAILED] Failover fallito.")
+            print(f"\n[TEST FAILED] Failover non verificato "
+                  f"({'completato dal leader ucciso' if completed_by_killed_leader else 'job non arrivato a COMPLETED entro il timeout'}).")
         duration = time.perf_counter() - start_time
 
         return {
             "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
             "status": test_status, 
             "original_leader": orch_leader.orchestrator_name, 
-            "recovered_by": "Master-2-Standby" if job_completed else "None", 
+            "recovered_by": completed_by if (job_completed and not completed_by_killed_leader) else "None", 
             "duration_seconds": duration
         }
