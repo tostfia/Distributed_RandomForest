@@ -154,9 +154,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         marker = re.search(r"WIDX(\d+)", w_name)
         if marker:
             return int(marker.group(1))
-        match = re.search(r"\d+", w_name)
-        if match:
-            return int(match.group())
         print(f"[{self.orchestrator_name}] [WARN] Impossibile derivare un indice stabile dal nome "
             f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}).")
         return fallback_idx

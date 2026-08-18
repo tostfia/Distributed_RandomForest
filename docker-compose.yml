@@ -1,6 +1,7 @@
 services:
   orchestrator:
     build: .
+    mem_limit: 2048m
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     stdin_open: true
@@ -25,10 +26,8 @@ services:
       - NET_ADMIN
     command: >
       sh -c "ORCHESTRATOR_ID=Orchestrator-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname)
-      python -m src.master.orchestrator.main"
+        python -m src.master.orchestrator.main"
     restart: on-failure
-    deploy:
-      replicas: 2
 
   worker:
     #build: .
@@ -36,12 +35,8 @@ services:
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     ports:
       - "18861-18870:18861"
-    deploy:
-      replicas: ${NUM_WORKERS:-2}
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2048M
+    cpus: '2.0'
+    mem_limit: 2048m
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
@@ -70,9 +65,9 @@ services:
       - orchestrator
     restart: on-failure
 
-  
   test-engine:
     #build: .
+    mem_limit: 4096m
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     environment:
@@ -84,6 +79,7 @@ services:
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
       - DOCKER_GID=${DOCKER_GID}
+      - FED_WORKER_WAIT_TIMEOUT_SECONDS=${FED_WORKER_WAIT_TIMEOUT_SECONDS:-60}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/app:z
@@ -96,5 +92,3 @@ services:
     cap_add:
       - NET_ADMIN
     command: python -m src.testing.engine
-    
-
