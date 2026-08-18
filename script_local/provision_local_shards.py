@@ -1,0 +1,166 @@
+"""
+Script di provisioning STANDALONE per l'ambiente LOCALE del training federato.
+
+È il gemello locale di script_aws/provision_federated_shards.py: da eseguire
+UNA VOLTA, PRIMA di avviare master e worker in locale/Docker, per generare su
+disco tutto ciò che i worker devono già possedere quando nascono, ovvero gli
+shard del dataset reale, uno per ciascun worker:
+
+    ./workers_cache/Worker-Locale-{NN}/train_shard.csv
+    ./workers_cache/Worker-Locale-{NN}/test_shard.csv
+
+Perché esiste
+-------------
+Finora, in locale, lo sharding avveniva "a runtime" dentro
+FederatedOrchestrator._ensure_local_bootstrap(), invocato dal primo
+_execute_training_step di un job. Questo intreccia la preparazione dei dati con
+l'esecuzione del job e, di riflesso, con i test di failover: un job (o un test)
+poteva trovarsi a rigenerare gli shard nel bel mezzo dell'esecuzione.
+
+Spostando la generazione qui, il modello locale si allinea a quello AWS: i dati
+risiedono già sui nodi quando il sistema parte, e il coordinatore
+(FederatedOrchestrator) si limita a VERIFICARE che il provisioning sia stato
+fatto — non lo esegue più reattivamente. Vedi _ensure_local_bootstrap (che ora
+è un semplice check) e _ensure_aws_bootstrap (già così da prima).
+
+Coerenza con il runtime
+-----------------------
+I parametri qui sotto (sample_fraction, dataset_seed, target_column, test_size,
+random_state, numero di worker, cartella di destinazione, schema di naming
+Worker-Locale-NN) DEVONO restare identici a quelli che il runtime si aspetta,
+altrimenti i worker non troverebbero i propri shard o li troverebbero diversi
+da quelli attesi. Sono gli stessi valori storicamente hard-coded in
+_ensure_local_bootstrap.
+
+Uso tipico
+----------
+    python -m script_local.provision_local_shards --num-workers 7
+    python -m script_local.provision_local_shards --num-workers 7 --data-folder ./dataset_cache --force
+
+Per il dataset 'synthetic' non serve provisioning: ogni worker genera
+autonomamente il proprio shard sintetico al boot (come già avviene a runtime).
+"""
+import argparse
+import os
+
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
+from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
+
+# Parametri di generazione: IDENTICI a quelli usati storicamente da
+# FederatedOrchestrator._ensure_local_bootstrap. Non vanno cambiati qui senza
+# aggiornare di pari passo il check nel runtime, o i worker riceverebbero shard
+# incoerenti con ciò che si aspettano.
+SAMPLE_FRACTION = 0.05
+DATASET_SEED = 123
+TARGET_COLUMN = "Label"
+TEST_SIZE = 0.20
+RANDOM_STATE = 123
+
+BASE_CACHE_DIR = "./workers_cache"
+
+
+def _worker_shard_dir(base_cache_dir: str, index_one_based: int) -> str:
+    """
+    Replica esattamente lo schema di naming usato da FederatedDataSplitter nel
+    ramo 'local' (padding a 2 cifre per i primi 9 worker, senza padding dal
+    decimo in poi): Worker-Locale-01 ... Worker-Locale-09, Worker-Locale-10, ...
+    """
+    i = index_one_based - 1
+    worker_id = f"Worker-Locale-0{i + 1}" if i < 9 else f"Worker-Locale-{i + 1}"
+    return os.path.join(base_cache_dir, worker_id)
+
+
+def _shards_already_present(num_workers: int, base_cache_dir: str = BASE_CACHE_DIR) -> bool:
+    """
+    Verifica la presenza degli shard con la STESSA logica di _ensure_local_bootstrap:
+    accetta sia la forma con padding (Worker-Locale-01) sia quella senza
+    (Worker-Locale-1), per non rigenerare shard validi già prodotti in passato.
+    """
+    for i in range(1, num_workers + 1):
+        dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
+        dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
+
+        train_p = os.path.join(dir_padded, "train_shard.csv")
+        test_p = os.path.join(dir_padded, "test_shard.csv")
+        train_up = os.path.join(dir_unpadded, "train_shard.csv")
+        test_up = os.path.join(dir_unpadded, "test_shard.csv")
+
+        if not ((os.path.exists(train_p) and os.path.exists(test_p)) or
+                (os.path.exists(train_up) and os.path.exists(test_up))):
+            return False
+    return True
+
+
+def _resolve_data_folder(data_folder: str) -> str:
+    """
+    Stessa risoluzione della sorgente dati usata a runtime: se il valore passato
+    è assente, inesistente o il placeholder './data', ripiega su './dataset_cache'
+    quando presente, altrimenti './data'.
+    """
+    if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
+        return "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
+    return data_folder
+
+
+def provision(num_workers: int, data_folder: str, dataset_type: str = "real", force: bool = False) -> None:
+    print("=====================================================")
+    print("   PROVISIONING FEDERATO IN LOCALE (offline, one-shot)")
+    print("=====================================================")
+    print(f" • Worker target:  {num_workers}")
+    print(f" • Dataset type:   {dataset_type}")
+    print(f" • Destinazione:   {os.path.abspath(BASE_CACHE_DIR)}")
+
+    if dataset_type == "synthetic":
+        print("=====================================================\n")
+        print("[PROVISIONING] Dataset SINTETICO: nessun provisioning necessario. "
+              "Ogni worker genera autonomamente il proprio shard sintetico al boot.")
+        return
+
+    resolved_folder = _resolve_data_folder(data_folder)
+    print(f" • Sorgente dati:  {resolved_folder}")
+    print("=====================================================\n")
+
+    if not force and _shards_already_present(num_workers):
+        print("[PROVISIONING] Shard già presenti su disco per tutti i worker richiesti. "
+              "Salto la rigenerazione (usa --force per sovrascrivere).")
+        return
+
+    print("[PROVISIONING] Generazione degli shard in corso...")
+    data_loader = RawCSVDataLoader(
+        data_url=resolved_folder,
+        sample_fraction=SAMPLE_FRACTION,
+        dataset_seed=DATASET_SEED,
+    )
+    splitter = FederatedDataSplitter(
+        target_column=TARGET_COLUMN,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+    )
+    splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
+    print(f"\n[PROVISIONING OK] Shard reali distribuiti nelle cartelle locali dei worker "
+          f"sotto '{BASE_CACHE_DIR}'. Il cluster locale è pronto per l'avvio.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Provisioning offline degli shard federati su filesystem locale "
+                    "(gemello locale di provision_federated_shards.py)."
+    )
+    parser.add_argument("--num-workers", type=int, default=int(os.environ.get("NUM_WORKERS", 3)))
+    parser.add_argument("--data-folder", type=str, default=os.environ.get("DATASET_PATH", "./dataset_cache"))
+    parser.add_argument("--dataset-type", type=str, default=os.environ.get("DATASET_TYPE", "real"),
+                        choices=["real", "synthetic"])
+    parser.add_argument("--force", action="store_true",
+                        help="Rigenera e sovrascrive gli shard anche se già presenti su disco.")
+    args = parser.parse_args()
+
+    provision(
+        num_workers=args.num_workers,
+        data_folder=args.data_folder,
+        dataset_type=args.dataset_type,
+        force=args.force,
+    )
+
+
+if __name__ == "__main__":
+    main()

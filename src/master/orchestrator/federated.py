@@ -50,63 +50,55 @@ class FederatedOrchestrator(BaseOrchestrator):
         # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
         self._trees_cache = {}
 
-
     def _ensure_local_bootstrap(self, payload: dict):
         """
-        Esegue il bootstrap dei file CSV LOCALI se siamo in ambiente 'local'.
-        Usa fcntl.flock per garantire mutua esclusione assoluta a livello di File System
-        ed evitare race condition tra repliche concorrenti.
+        VERIFICA (senza generarli) che gli shard federati siano già presenti sul
+        filesystem locale per l'ambiente 'local'. La generazione/sharding NON
+        avviene più qui: è responsabilità di uno script di provisioning standalone
+        (script_local/provision_local_shards.py), eseguito UNA VOLTA, PRIMA di
+        avviare master e worker — coerente con quanto già fa _ensure_aws_bootstrap
+        per l'ambiente AWS, e con l'idea che in uno scenario federato i dati
+        risiedano già sui nodi quando il sistema parte, invece di essere
+        generati/distribuiti reattivamente durante un job.
+ 
+        Per il dataset 'synthetic' non serve alcun provisioning: ogni worker
+        genera autonomamente il proprio shard sintetico al boot.
         """
         if self.environment != "local":
             print(f"[{self.orchestrator_name}] Ambiente Cloud/AWS rilevato. Bootstrap locale saltato.")
             return
         datasetype = self._resolve_dataset_type(payload)
-        lock_dir = "./.local_storage"
-        os.makedirs(lock_dir, exist_ok=True)
-        bootstrap_mutex = os.path.join(lock_dir, "bootstrap_data.mutex")
-
-        # Acquisiamo un lock esclusivo sul file di bootstrap prima di fare qualsiasi controllo o scrittura
-        with open(bootstrap_mutex, "a") as mutex:
-            fcntl.flock(mutex, fcntl.LOCK_EX)
-            try:
-                num_workers = self.num_workers
-                print(f"[{self.orchestrator_name}] [BOOTSTRAP] Controllo shard per {num_workers} worker...")
-                
-                if datasetype == "synthetic":
-                    print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Il bootstrap e lo sharding sono delegati autonomamente ai singoli worker.")
-                    return
-                data_folder = getattr(self.cfg, "dataset_path", None)
-                if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
-                    data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
-                
-                shards_esistenti = True
-                base_cache_dir = "./workers_cache"
-                for i in range(1, num_workers + 1):
-                    dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
-                    dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
-                    
-                    train_p = os.path.join(dir_padded, "train_shard.csv")
-                    test_p = os.path.join(dir_padded, "test_shard.csv")
-                    train_up = os.path.join(dir_unpadded, "train_shard.csv")
-                    test_up = os.path.join(dir_unpadded, "test_shard.csv")
-                    
-                    if not ((os.path.exists(train_p) and os.path.exists(test_p)) or 
-                            (os.path.exists(train_up) and os.path.exists(test_up))):
-                        shards_esistenti = False
-                        break
-                
-                if shards_esistenti:
-                    print(f"[{self.orchestrator_name}] [BOOTSTRAP] Shard già presenti su disco. Salto il ricalcolo.")
-                else:
-                    print(f"[{self.orchestrator_name}] [BOOTSTRAP] Shard incompleti o assenti. Avvio Generazione...")
-                    data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
-                    splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
-                    splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
-                    print(f"[{self.orchestrator_name}] [BOOTSTRAP OK] Shard reali distribuiti nelle cartelle locali dei Worker.")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [BOOTSTRAP WARN] Fallimento durante il bootstrap locale: {e}")
-            finally:
-                fcntl.flock(mutex, fcntl.LOCK_UN)
+        if datasetype == "synthetic":
+            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Nessun controllo shard necessario "
+                  f"(generato autonomamente da ogni worker).")
+            return
+ 
+        num_workers = self.num_workers
+        base_cache_dir = "./workers_cache"
+        print(f"[{self.orchestrator_name}] [CHECK LOCAL] Verifica provisioning shard su disco per {num_workers} worker...")
+ 
+        mancanti = []
+        for i in range(1, num_workers + 1):
+            dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
+            dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
+ 
+            train_p = os.path.join(dir_padded, "train_shard.csv")
+            test_p = os.path.join(dir_padded, "test_shard.csv")
+            train_up = os.path.join(dir_unpadded, "train_shard.csv")
+            test_up = os.path.join(dir_unpadded, "test_shard.csv")
+ 
+            if not ((os.path.exists(train_p) and os.path.exists(test_p)) or
+                    (os.path.exists(train_up) and os.path.exists(test_up))):
+                mancanti.append(f"Worker-Locale-{i:02d}")
+ 
+        if mancanti:
+            raise RuntimeError(
+                f"[{self.orchestrator_name}] Provisioning locale incompleto: mancano gli shard per "
+                f"{len(mancanti)} worker (in '{base_cache_dir}'), es. {mancanti[:3]}. Esegui "
+                f"'python -m script_local.provision_local_shards --num-workers {num_workers}' "
+                f"prima di avviare il cluster."
+            )
+        print(f"[{self.orchestrator_name}] [CHECK LOCAL OK] Tutti gli shard richiesti sono presenti su disco.")
 
     def _ensure_aws_bootstrap(self, payload: dict):
         """
