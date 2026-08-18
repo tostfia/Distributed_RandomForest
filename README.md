@@ -106,3 +106,6 @@ Per distruggere i processi attualmente attivi:  pkill -f "Distributed_RandomFore
 Per le credenziali aws lanciare ogni volta aws_creds.sh
 
 esegui: export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+
+
+Per uccidere i processi rimasti attivi: pkill -9 -f "Distributed_RandomForest"
