@@ -239,9 +239,9 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "applied_latency_ms": latency_ms if tc_applied else 0,
                 "applied_loss_percent": loss_percentage if tc_applied else 0,
                 "probe_job_total_time_ms": round(probe_time * 1000, 2),
-                "duration_seconds": duration,
+                "duration_seconds": round(duration, 2),
                 "tc_rules_successfully_injected": tc_applied,
-                "throughput_trees_per_second": throughput,
+                "throughput_trees_per_second": round(throughput, 2),
                 "accuracy_metrics": accuracy_metrics
             }
 

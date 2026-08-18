@@ -104,3 +104,5 @@ docker compose exec orchestrator python -m src.client.main
 Per distruggere i processi attualmente attivi:  pkill -f "Distributed_RandomForest"
 
 Per le credenziali aws lanciare ogni volta aws_creds.sh
+
+esegui: export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)

@@ -91,7 +91,7 @@ class ScalabilityScenario(BaseTestScenario):
             if task_type == "classifier":
                 print(f"     • Metric:     Accuracy = {m['accuracy'].get('accuracy', 0.0)*100:.2f}%")
             else:
-                print(f"     • Metric:     MSE = {m['accuracy'].get('mean_squared_error', 0.0):.4f}")
+                print(f"     • Metric:     MSE = {m['accuracy'].get('mse', 0.0):.4f}")
             
             # Salvataggio nel dizionario di output finale richiesto dall'orchestratore
             results[f"workers_{worker_count}"] = {

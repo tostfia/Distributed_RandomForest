@@ -83,6 +83,7 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-federated}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - DOCKER_GID=${DOCKER_GID}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/app:z
@@ -91,7 +92,7 @@ services:
       - ./saved_models:/app/saved_models:z
       - ./workers_cache:/app/workers_cache:z
     group_add:
-      - 1001
+      - "${DOCKER_GID}"
     cap_add:
       - NET_ADMIN
     command: python -m src.testing.engine
