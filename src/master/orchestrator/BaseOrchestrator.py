@@ -16,7 +16,7 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "distributed-random-forest")
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
@@ -268,14 +268,7 @@ class BaseOrchestrator(ABC):
         def _handle_sigterm(signum, frame):
             raise KeyboardInterrupt()
 
-        # signal.signal() è permesso SOLO nel thread principale dell'interprete:
-        # in un vero deployment start() gira sempre lì, quindi qui non cambia
-        # nulla. Se invece start() viene lanciato su un thread secondario (es.
-        # da un test harness che simula un secondo orchestratore in-process),
-        # registrare l'handler solleverebbe ValueError e farebbe morire il
-        # thread all'istante — saltiamo la registrazione in quel caso, dato
-        # che comunque un thread non-main non riceverebbe mai un vero SIGTERM
-        # del sistema operativo.
+      
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, _handle_sigterm)
         else:
@@ -484,11 +477,7 @@ class BaseOrchestrator(ABC):
                 except Exception as e:
                     print(f"[{self.orchestrator_name}] [WARN] Impossibile rilasciare la job lease per {job_id[:8]}: {e}")
         except KeyboardInterrupt:
-            # SIGTERM (es. durante un deploy/scale-down) o Ctrl+C: KeyboardInterrupt
-            # eredita da BaseException, quindi NON viene mai intercettato dagli
-            # `except Exception` sopra. Senza questo blocco la lease su JobLocks
-            # resterebbe intestata a questo orchestrator fino a scadenza del TTL,
-            # bloccando il recovery del prossimo leader (CLAIM FAILED / ABORT).
+          
             print(f"[{self.orchestrator_name}] [INTERRUPTED] Interruzione durante l'elaborazione del Job {job_id[:8]}: rilascio la lease prima di terminare.")
             try:
                 self.state_manager.release_job_lease(job_id, self.orchestrator_name)
@@ -644,6 +633,42 @@ class BaseOrchestrator(ABC):
                         "dataset_type": job_meta.get("dataset_type"),
                         "hyperparameters": job_meta.get("hyperparameters", {}),
                     }
+
+                    # Il leader precedente è "mancato" (crash), ma la sua lease su
+                    # JobLocks resta valida fino alla scadenza naturale del TTL: un
+                    # processo morto non può rilasciarla. Se subentrassimo subito con
+                    # _process_job, il suo try_claim_job fallirebbe ([CLAIM FAILED] /
+                    # [ABORT]) e — chiamato qui con receipt_handle=None — uscirebbe
+                    # senza ritentare, lasciando il job orfano fino al timeout esterno.
+                    #
+                    # Attendiamo quindi attivamente che la lease del vecchio leader
+                    # scada, ritentando il claim con un piccolo backoff. Appena il
+                    # claim riesce, la lease è nostra: _process_job qui sotto rifarà
+                    # try_claim_job, che stavolta la rinnova (refresh_lock) e prosegue
+                    # normalmente col recupero dal checkpoint.
+                    #
+                    # NB: questo NON altera il percorso a regime (non-failover):
+                    # riguarda solo il ramo di recovery di un job già PROCESSING
+                    # ereditato da un altro orchestrator.
+                    lease_wait_timeout = 330   # poco oltre il TTL di 300s della lease su JobLocks
+                    lease_poll_interval = 5
+                    waited = 0.0
+                    claim_ok = False
+                    while waited < lease_wait_timeout:
+                        if self.state_manager.try_claim_job(job_id, self.orchestrator_name, lease_seconds=300):
+                            claim_ok = True
+                            break
+                        print(f"[{self.orchestrator_name}] [RECOVERY-WAIT] Lease del leader precedente ancora attiva "
+                              f"per Job {job_id[:8]}. Nuovo tentativo tra {lease_poll_interval}s "
+                              f"(atteso finora: {waited:.0f}s).")
+                        time.sleep(lease_poll_interval)
+                        waited += lease_poll_interval
+
+                    if not claim_ok:
+                        print(f"[{self.orchestrator_name}] [RECOVERY-ABORT] Impossibile acquisire la lease per Job "
+                              f"{job_id[:8]} entro {lease_wait_timeout}s: la lascio a un tentativo successivo.")
+                        continue
+
                     try:
                         self._process_job(recovered_payload, receipt_handle=None)
                     except Exception as e:
