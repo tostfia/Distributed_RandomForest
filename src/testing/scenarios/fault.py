@@ -65,8 +65,8 @@ class FaultToleranceScenario(BaseTestScenario):
             
 
         threading.Thread(target=kill_worker_local, daemon=True).start()
-        
         start_time = time.perf_counter()
+        
         payload = self._build_payload()
         self._reuse_dataset_if_available(payload, seed=123)
         num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)

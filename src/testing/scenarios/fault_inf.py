@@ -63,6 +63,12 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             except Exception as e:
                     print(f"[TEST ERRORE] Impossibile eseguire il kill: {e}")
 
+                # Reset esplicito: chunk_sent_event potrebbe essere ancora "set" dall'ultimo
+        # chunk inviato durante il training preliminare qui sopra. Senza questo clear,
+        # il thread di kill lo vedrebbe già segnalato e scatterebbe subito, prima che
+        # un worker riceva un vero task di inferenza.
+        self.orchestrator.chunk_sent_event.clear()
+
         threading.Thread(target=kill_worker_local, daemon=True).start()
         start_time = time.perf_counter()
         
