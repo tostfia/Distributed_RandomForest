@@ -40,6 +40,7 @@ services:
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
+      - NUM_WORKERS=${NUM_WORKERS:-2}
       - PYTHONUNBUFFERED=1
       - RPC_PORT=18861
       - ENV_MODE=${ENV_MODE:-local}

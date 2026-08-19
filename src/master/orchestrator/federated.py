@@ -391,6 +391,15 @@ class FederatedOrchestrator(BaseOrchestrator):
         hyperparameters = payload.get("hyperparameters", {})
         tree_type = hyperparameters.get("tree_type", "classifier")
 
+        # Marcatore di "inferenza avviata": l'inferenza federata calcola tutto in
+        # RAM e via RPC, senza salvare il checkpoint chunk-per-chunk che invece
+        # produce quella centralizzata. Non lascerebbe quindi alcun segnale
+        # osservabile dall'esterno mentre è in corso — il che rende impossibile,
+        # per un monitor esterno (o per il test di failover), sapere che l'inferenza
+        # è davvero partita. Scriviamo un flag leggero su disco per colmare questo
+        # divario: viene creato appena l'inferenza inizia e rimosso quando termina.
+        self._mark_inference_started(job_id)
+
         inference_start_time = time.perf_counter()
 
         model_path = self._resolve_model_path(job_id)
@@ -416,14 +425,35 @@ class FederatedOrchestrator(BaseOrchestrator):
             else self.select_from_config(self._resolve_dataset_type(payload))
         )
 
-        y_pred_global = []
-        y_true_global = []
-        y_probs_global = []
-        total_samples_ref = [0]
+        # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
+        # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
+        # dopo un failover sa esattamente quali worker sono già stati validati e
+        # può saltarli, richiedendo solo quelli mancanti. Ogni voce contiene il
+        # risultato completo di un worker: {y_pred, y_true, y_probs, n_samples}.
+        # Struttura persistita tramite CheckpointDAO in inference_chunks_{job_id}.
+        results_by_worker = {}
         failed_workers = set()
-        self.chunk_sent_event.clear()   
+        self.chunk_sent_event.clear()
         results_lock = threading.Lock()
         INF_RETRY_WAIT_SECONDS = 10
+
+        # Ripresa da checkpoint: se un leader precedente (poi caduto) aveva già
+        # raccolto i risultati di alcuni worker, li ricarichiamo e non li
+        # richiediamo di nuovo. In inferenza federata "un worker" è l'unità di
+        # lavoro (predice sul proprio shard), quindi il checkpoint è chiavato per
+        # worker_index, non per chunk di alberi come nel centralizzato.
+        inference_cp_path = self._get_inference_checkpoint_path(job_id)
+        try:
+            if self.checkpoint_dao.exists(inference_cp_path):
+                restored = self.checkpoint_dao.load(inference_cp_path)
+                if isinstance(restored, dict):
+                    results_by_worker.update(restored)
+                    print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Ripristinati "
+                          f"{len(results_by_worker)} worker già validati dal checkpoint: "
+                          f"{sorted(results_by_worker.keys())}.")
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [WARN] Checkpoint di inferenza non caricabile "
+                  f"({e}): riparto senza ripresa.")
 
         def validate_worker(w_name, idx):
             wait_started_at = time.perf_counter()
@@ -474,18 +504,31 @@ class FederatedOrchestrator(BaseOrchestrator):
                     worker_data = pickle.loads(obtain(raw_response))
  
                     with results_lock:
-                        y_pred_global.extend(worker_data["y_pred"])
-                        y_true_global.extend(worker_data["y_true"])
-                        total_samples_ref[0] += worker_data["n_samples"]
-                        if tree_type == "classifier":
-                            # Chiave opzionale: worker meno recenti potrebbero non restituirla ancora.
-                            worker_probs = worker_data.get("y_probs")
-                            if worker_probs is not None:
-                                y_probs_global.extend(worker_probs)
-                            else:
-                                print(f"[{self.orchestrator_name}] [WARN] Worker '{w_name}' non ha restituito "
-                                      f"'y_probs': l'AUC finale sarà None (worker non aggiornato).")
-                        print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' ({worker_data['n_samples']} record).")
+                        # Registriamo il risultato COMPLETO del worker sotto il suo
+                        # indice stabile. Salvare per-worker (invece di estendere
+                        # liste piatte) è ciò che rende la ripresa possibile: un
+                        # eventuale standby subentrato ritrova esattamente questi
+                        # risultati e non re-interroga i worker già validati.
+                        worker_probs = worker_data.get("y_probs") if tree_type == "classifier" else None
+                        if tree_type == "classifier" and worker_probs is None:
+                            print(f"[{self.orchestrator_name}] [WARN] Worker '{w_name}' non ha restituito "
+                                  f"'y_probs': l'AUC finale sarà None (worker non aggiornato).")
+                        results_by_worker[idx] = {
+                            "y_pred": list(worker_data["y_pred"]),
+                            "y_true": list(worker_data["y_true"]),
+                            "y_probs": list(worker_probs) if worker_probs is not None else None,
+                            "n_samples": worker_data["n_samples"],
+                        }
+                        # Persistiamo il checkpoint aggiornato. La LocalCheckpointDAO
+                        # scrive in modo atomico (tmp + os.replace), quindi un crash
+                        # a metà non corrompe il file già valido.
+                        try:
+                            self.checkpoint_dao.save(inference_cp_path, dict(results_by_worker))
+                        except Exception as cp_err:
+                            print(f"[{self.orchestrator_name}] [WARN] Salvataggio checkpoint inferenza "
+                                  f"fallito per worker {idx}: {cp_err}")
+                        print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' "
+                              f"({worker_data['n_samples']} record). Checkpoint: {len(results_by_worker)} worker.")
                     return  # successo, il thread termina
  
                 except Exception as ex:
@@ -506,7 +549,13 @@ class FederatedOrchestrator(BaseOrchestrator):
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names, start=1):
-            stable_idx = self._infer_worker_index(name,idx)
+            stable_idx = self._infer_worker_index(name, idx)
+            # SHORT-CIRCUIT ripresa: se questo worker è già nel checkpoint (validato
+            # da un leader precedente prima del crash), non lo re-interroghiamo.
+            if stable_idx in results_by_worker:
+                print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT INF] Worker '{name}' "
+                      f"(index {stable_idx}) già validato dal checkpoint. Skip.")
+                continue
             t = threading.Thread(target=validate_worker, args=(name, stable_idx))
             t.start()
             threads.append(t)
@@ -520,9 +569,30 @@ class FederatedOrchestrator(BaseOrchestrator):
                 except Exception: pass
  
         rpc_inference_time = time.perf_counter() - rpc_start_time
- 
+
+        # Assemblaggio finale: ricomponiamo le liste globali dai risultati
+        # per-worker (sia quelli ripresi dal checkpoint sia quelli appena
+        # raccolti). Ordiniamo per worker_index così l'output è deterministico
+        # e y_probs resta allineato a y_pred/y_true campione-per-campione.
+        y_pred_global = []
+        y_true_global = []
+        y_probs_global = []
+        total_samples = 0
+        all_probs_present = True
+        for w_idx in sorted(results_by_worker.keys()):
+            r = results_by_worker[w_idx]
+            y_pred_global.extend(r["y_pred"])
+            y_true_global.extend(r["y_true"])
+            total_samples += r["n_samples"]
+            if r.get("y_probs") is not None:
+                y_probs_global.extend(r["y_probs"])
+            else:
+                all_probs_present = False
+        total_samples_ref = [total_samples]
+
         if not y_pred_global:
             print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
+            self._clear_inference_started(job_id)
             return {}
  
         if failed_workers:
@@ -532,11 +602,13 @@ class FederatedOrchestrator(BaseOrchestrator):
  
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
 
-        # y_probs è allineato sample-per-sample con y_pred_global/y_true_global SOLO se
-        # ogni worker rispondente lo ha fornito (stesso ordine di extend()). In caso contrario
-        # l'array sarebbe disallineato: meglio non calcolare l'AUC piuttosto che calcolarlo male.
+        # y_probs è utilizzabile per l'AUC solo se OGNI worker incluso lo ha
+        # fornito: in tal caso è allineato campione-per-campione con
+        # y_pred/y_true (stesso ordine per-worker). Se anche un solo worker non
+        # l'ha restituito, l'array sarebbe disallineato: meglio non calcolare
+        # l'AUC che calcolarla male.
         y_probs_array = None
-        if tree_type == "classifier" and len(y_probs_global) == len(y_pred_global):
+        if tree_type == "classifier" and all_probs_present and len(y_probs_global) == len(y_pred_global):
             y_probs_array = np.array(y_probs_global, dtype=np.float64)
 
         # I worker restituiscono già la predizione finale del modello globale sul proprio
@@ -565,6 +637,14 @@ class FederatedOrchestrator(BaseOrchestrator):
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
  
+        # Job concluso: rimuoviamo sia il marcatore di "inferenza avviata" sia il
+        # checkpoint di inferenza per-worker. Lasciarli confonderebbe un eventuale
+        # rilancio dello stesso job_id (ripresa da uno stato ormai completo).
+        self._clear_inference_started(job_id)
+        try:
+            self.checkpoint_dao.delete(inference_cp_path)
+        except Exception:
+            pass
         return {
             "status": "SUCCESS" if not failed_workers else "PARTIAL",
             "testing_set_size": total_samples_ref[0],
@@ -661,6 +741,37 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/checkpoints/inference_chunks_{job_id}.pkl"
         return f"./.local_storage/inference_chunks_{job_id}.pkl"
+
+    def _get_inference_marker_path(self, job_id: str) -> str:
+        """
+        Path del marcatore 'inferenza avviata'. Solo per ambiente 'local': è un
+        segnale di osservabilità pensato per monitor/test sullo stesso filesystem
+        (via bind mount in Docker), non un artefatto di stato distribuito.
+        """
+        return f"./.local_storage/inference_started_{job_id}.marker"
+
+    def _mark_inference_started(self, job_id: str):
+        """Crea il marcatore leggero che segnala l'avvio dell'inferenza federata."""
+        if self.environment != "local" or not job_id:
+            return
+        try:
+            marker = self._get_inference_marker_path(job_id)
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [WARN] Impossibile creare il marcatore di inferenza per {job_id[:8]}: {e}")
+
+    def _clear_inference_started(self, job_id: str):
+        """Rimuove il marcatore a inferenza conclusa (o fallita). Idempotente."""
+        if self.environment != "local" or not job_id:
+            return
+        try:
+            marker = self._get_inference_marker_path(job_id)
+            if os.path.exists(marker):
+                os.remove(marker)
+        except Exception:
+            pass
     
     def _load_inference_checkpoint(self, job_id: str):
         path = self._get_inference_checkpoint_path(job_id)

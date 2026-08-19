@@ -41,37 +41,82 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
         waited += interval
     return False
 
-def _wait_for_inference_in_progress(job_id, timeout=60, interval=0.2) -> float:
+def _count_checkpoint_workers(checkpoint_path: str) -> int:
     """
-    Attende (con timeout) che l'inferenza distribuita sia DAVVERO in corso,
-    rilevando la comparsa del checkpoint di inferenza su disco con almeno un
-    chunk completato.
+    Conta quanti worker/chunk sono già salvati nel checkpoint di inferenza,
+    leggendolo direttamente dal file pickle (la LocalCheckpointDAO serializza
+    con pickle puro). Ritorna 0 se il file non esiste, non è ancora leggibile,
+    o è in corso di scrittura (la scrittura atomica tmp+os.replace rende questa
+    finestra minima, ma un tentativo può comunque fallire: in tal caso 0 e si
+    riprova al giro dopo).
 
-    Perché serve: a differenza del training (che scrive alberi_addestrati>0
-    nello StateManager, un segnale condiviso e leggibile), l'inferenza aggiorna
-    lo stato del job solo a "COMPLETED", a fine lavoro. Un ritardo fisso prima
-    del kill è quindi una scommessa: troppo presto → nessun chunk salvato, lo
-    standby rifà tutto da zero (non si testa la ripresa da checkpoint); troppo
-    tardi → il leader ha già finito e marcato COMPLETED, e il failover non
-    viene testato affatto (falso positivo).
+    Gestisce entrambe le strutture possibili del checkpoint:
+      - federato: dict {worker_index: {...}}  -> len(dict)
+      - centralizzato: list di chunk          -> len(list)
+    """
+    if not os.path.exists(checkpoint_path) or os.path.getsize(checkpoint_path) == 0:
+        return 0
+    try:
+        import pickle
+        with open(checkpoint_path, "rb") as f:
+            data = pickle.load(f)
+        if isinstance(data, dict):
+            return len(data)
+        if isinstance(data, list):
+            return len(data)
+        return 0
+    except Exception:
+        # File in scrittura, troncato o non ancora valido: riprova al giro dopo.
+        return 0
 
-    L'orchestratore, però, dopo OGNI chunk di inferenza completato da un worker,
-    salva la lista cumulativa dei chunk in
-    './.local_storage/inference_chunks_{job_id}.pkl' (vedi
-    _get_inference_checkpoint_path / _execute_inference_step in centralized.py).
-    Quel file — visibile al test via bind mount — è il segnale reale che
-    l'inferenza è iniziata ma non è detto sia finita: appena esiste ed è
-    leggibile (>=1 chunk), siamo nella finestra giusta per simulare il crash.
 
-    Ritorna i secondi attesi, o -1.0 se scade il timeout senza vedere il
-    checkpoint (l'inferenza potrebbe essere già finita, o non essere partita).
-    Applicabile solo in ambiente 'local' (checkpoint su filesystem locale).
+def _wait_for_inference_in_progress(job_id, timeout=60, interval=0.2,
+                                    min_workers=1, expected_workers=None,
+                                    require_partial=False) -> float:
+    """
+    Attende (con timeout) che l'inferenza distribuita sia in corso e, se
+    richiesto, che sia in una FINESTRA DI RIPRESA PARZIALE: almeno `min_workers`
+    worker già validati (c'è lavoro salvato da riprendere) ma non ancora tutti
+    (`expected_workers`), così che uccidere il leader ORA lasci allo standby dei
+    risultati da riprendere via checkpoint E dei worker ancora da completare.
+
+    Perché serve la finestra parziale (require_partial=True): nel federato
+    l'inferenza è velocissima. Se ci si limita ad attendere "l'inferenza è
+    partita" (marcatore) e si uccide subito, il leader muore prima che QUALSIASI
+    worker abbia salvato: lo standby non trova nulla da riprendere e rifà tutto
+    da zero — un failover valido, ma che NON esercita lo SHORT-CIRCUIT della
+    ripresa. Aspettando invece che il checkpoint contenga tra 1 e N-1 worker, il
+    crash cade nel punto in cui la ripresa parziale è realmente dimostrabile.
+
+    Segnali osservati (ambiente 'local', via bind mount):
+      - checkpoint 'inference_chunks_{job_id}.pkl' (federato: dict per-worker;
+        centralizzato: lista di chunk) — contato per sapere quanti worker sono
+        pronti;
+      - marcatore 'inference_started_{job_id}.marker' — solo come segnale di
+        "inferenza avviata", usato quando require_partial=False.
+
+    Ritorna i secondi attesi al raggiungimento della condizione, o -1.0 se scade
+    il timeout. Con require_partial=True il timeout include anche il caso in cui
+    l'inferenza è passata da 0 a "tutti i worker" senza mai essere osservata in
+    stato parziale (finestra troppo stretta): in tal caso il chiamante applica
+    il proprio fallback.
     """
     checkpoint_path = f"./.local_storage/inference_chunks_{job_id}.pkl"
+    marker_path = f"./.local_storage/inference_started_{job_id}.marker"
     waited = 0.0
     while waited < timeout:
-        if os.path.exists(checkpoint_path) and os.path.getsize(checkpoint_path) > 0:
-            return waited
+        n_done = _count_checkpoint_workers(checkpoint_path)
+
+        if require_partial:
+            # Finestra parziale: almeno min_workers salvati, ma non tutti.
+            upper_ok = (expected_workers is None) or (n_done < expected_workers)
+            if n_done >= min_workers and upper_ok:
+                return waited
+        else:
+            # Modalità "inferenza avviata": basta un segnale qualsiasi.
+            if n_done >= min_workers or os.path.exists(marker_path):
+                return waited
+
         time.sleep(interval)
         waited += interval
     return -1.0
@@ -291,28 +336,48 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         killed_leader_info = {"container_id": None}
 
         def kill_docker_leader_target():
-            # Attendiamo un segnale REALE che l'inferenza è in corso — la
-            # comparsa del checkpoint di inferenza su disco con >=1 chunk — invece
-            # di un ritardo fisso "a scommessa". Così il crash cade sempre nella
-            # finestra utile: dopo che almeno un chunk è stato prodotto (c'è lavoro
-            # reale da recuperare) ma prima che il job sia COMPLETED (il failover
-            # viene davvero esercitato). Vedi _wait_for_inference_in_progress.
+            # Vogliamo che il crash cada nella FINESTRA DI RIPRESA PARZIALE:
+            # almeno un worker già validato e salvato nel checkpoint (c'è lavoro
+            # da riprendere) ma non ancora tutti (resta lavoro da completare). È
+            # l'unico punto in cui lo standby esercita davvero lo SHORT-CIRCUIT
+            # della ripresa, invece di rifare l'inferenza da zero.
             wait_timeout = ft_cfg.get("max_wait_for_inference_start_seconds", 60)
-            waited = _wait_for_inference_in_progress(job_id, timeout=wait_timeout)
-            if waited < 0:
-                # Fallback: nessun checkpoint comparso entro il timeout. Può
-                # succedere se l'inferenza è così rapida da completarsi prima di
-                # essere osservata, o se non è partita. Ripieghiamo sul vecchio
-                # ritardo fisso e segnaliamo che il test potrebbe non aver colto
-                # un failover genuino.
-                kill_delay = ft_cfg.get("docker_kill_delay_seconds", 1)
-                print(f"[TEST KILLER] [WARN] Nessun checkpoint di inferenza rilevato entro {wait_timeout}s: "
-                      f"ripiego su un ritardo fisso di {kill_delay}s. Il crash potrebbe cadere fuori dalla "
-                      f"finestra utile (inferenza non ancora avviata o già conclusa): verificare il risultato.")
-                time.sleep(kill_delay)
+            expected_workers = getattr(orch_leader, "num_workers", None)
+            # Polling stretto: nel federato l'inferenza è velocissima, la finestra
+            # 1..N-1 dura poco, quindi campioniamo spesso.
+            poll_interval = ft_cfg.get("inference_poll_interval_seconds", 0.05)
+
+            waited = _wait_for_inference_in_progress(
+                job_id, timeout=wait_timeout, interval=poll_interval,
+                min_workers=1, expected_workers=expected_workers, require_partial=True
+            )
+
+            if waited >= 0:
+                print(f"[TEST KILLER] Finestra di ripresa parziale rilevata dopo {waited:.2f}s "
+                      f"(>=1 worker nel checkpoint, non ancora tutti). Simulo il crash: "
+                      f"lo standby dovrà riprendere il lavoro già salvato e completare il resto.")
             else:
-                print(f"[TEST KILLER] Inferenza in corso rilevata dopo {waited:.1f}s "
-                      f"(checkpoint con lavoro reale presente). Simulo il crash immediatamente.")
+                # Fallback 1: la finestra parziale non è stata colta (inferenza
+                # troppo rapida, passata da 0 a N senza stato intermedio
+                # osservabile). Ripieghiamo su "inferenza avviata": almeno il
+                # failover viene esercitato, anche se lo standby potrebbe rifare
+                # tutto da zero invece di riprendere parzialmente.
+                waited = _wait_for_inference_in_progress(
+                    job_id, timeout=wait_timeout, interval=poll_interval,
+                    min_workers=1, require_partial=False
+                )
+                if waited >= 0:
+                    print(f"[TEST KILLER] [WARN] Finestra parziale non colta (inferenza troppo rapida): "
+                          f"il crash cade su 'inferenza avviata' dopo {waited:.2f}s. Il failover è comunque "
+                          f"testato, ma la ripresa PARZIALE da checkpoint potrebbe non essere esercitata.")
+                else:
+                    # Fallback 2: nessun segnale entro il timeout. Ultimo ripiego:
+                    # ritardo fisso, con avviso che il crash potrebbe cadere fuori
+                    # dalla finestra utile.
+                    kill_delay = ft_cfg.get("docker_kill_delay_seconds", 1)
+                    print(f"[TEST KILLER] [WARN] Nessun segnale di inferenza entro {wait_timeout}s: "
+                          f"ripiego su un ritardo fisso di {kill_delay}s. Verificare il risultato.")
+                    time.sleep(kill_delay)
 
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO (DOCKER) !!!")
 

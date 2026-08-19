@@ -161,6 +161,16 @@ class FederatedWorker(BaseWorker):
             worker_id_uniforme = f"Worker-Locale-{self.worker_index:02d}"
             self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
             os.makedirs(self.local_cache_dir, exist_ok=True)
+            # Iniettiamo l'indice stabile appena conquistato nel NOME del worker
+            # (marcatore WIDX), esattamente come fa il ramo AWS sopra. Senza questo,
+            # il nome registrato presso l'orchestratore resterebbe quello generico
+            # passato dal compose (Worker-Locale-federated-<hostname-hash>), privo
+            # di indice: _infer_worker_index non potrebbe estrarlo e ripiegherebbe
+            # sulla POSIZIONE nella lista dei worker disponibili — un indice
+            # instabile tra orchestratori diversi, che romperebbe sia il binding
+            # worker<->shard sia la ripresa da checkpoint dell'inferenza dopo un
+            # failover. Con WIDX nel nome, l'indice è deterministico ovunque.
+            self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
 
         print(
             f"[{self.worker_name}] Inizializzato con successo. "
