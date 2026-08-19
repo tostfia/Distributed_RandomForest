@@ -55,9 +55,61 @@ for arg in "$@"; do
     --purge-legacy-mode) PURGE_LEGACY_MODE=1 ;;
   esac
 done
+
+# ---------------------------------------------------------------------
+# Attende la RIMOZIONE REALE (non la stabilizzazione) di un service ECS
+# già colpito da 'delete-service --force'.
+#
+# BUG CORRETTO: la versione precedente chiamava 'aws ecs wait
+# services-stable' sugli stessi service appena eliminati. Quel waiter è
+# pensato per un service che ESISTE ancora e deve raggiungere lo stato a
+# regime (status ACTIVE, runningCount == desiredCount) — su un service in
+# fase di eliminazione lo stato passa per DRAINING e poi sparisce, quindi
+# il waiter fallisce quasi subito con un "terminal failure state" appena
+# osserva DRAINING. Con 'set -e' in testa allo script, quel fallimento
+# interrompeva TUTTO il teardown prima ancora di arrivare alla pulizia di
+# DynamoDB/SQS/S3 più sotto.
+#
+# Qui invece facciamo un polling esplicito sul runningCount del service:
+# consideriamo la pulizia completa quando describe-services non trova più
+# il service (rimosso del tutto) oppure lo trova con runningCount==0.
+# ---------------------------------------------------------------------
+wait_for_service_removal() {
+  local svc="$1"
+  local max_attempts=60   # 60 tentativi * 10s = 10 minuti di margine
+  local attempt=0
+
+  echo "    Attendo lo spegnimento reale dei task di '$svc'..."
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    local status running_count
+    status=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$svc" \
+      --query "services[0].status" --output text --region "$REGION" 2>/dev/null || echo "MISSING")
+
+    if [ "$status" == "MISSING" ] || [ "$status" == "None" ] || [ "$status" == "INACTIVE" ]; then
+      echo "    '$svc' completamente rimosso (status: $status)."
+      return 0
+    fi
+
+    running_count=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$svc" \
+      --query "services[0].runningCount" --output text --region "$REGION" 2>/dev/null || echo "0")
+
+    if [ "$running_count" == "0" ] || [ "$running_count" == "None" ]; then
+      echo "    '$svc' a runningCount=0 (status: $status)."
+      return 0
+    fi
+
+    sleep 10
+    attempt=$((attempt + 1))
+  done
+
+  echo "    [ATTENZIONE] Timeout in attesa dello spegnimento di '$svc' (ancora presenti task dopo 10 minuti)."
+  echo "                 Verifica manualmente con: aws ecs list-tasks --cluster $CLUSTER_NAME --service-name $svc --region $REGION"
+  return 0  # non blocchiamo l'intero teardown per un singolo service lento
+}
+
 # ---------------------------------------------------------------------
 # Svuota TUTTI gli item di una tabella DynamoDB, senza cancellare la
-# tabella stessa (schema, throughput, ecc. restano intatti).
+# tabella stessa (schema, throughput, ecc. restano intatte).
 # Richiede 'jq' installato sulla macchina che lancia lo script.
 # ---------------------------------------------------------------------
 purge_dynamodb_table() {
@@ -143,13 +195,13 @@ else
   echo "==> SINCRONIZZAZIONE AWS: Attendo la distruzione di TUTTI i container attivi..."
   echo "    (Fargate sta spegnendo i vecchi nodi zombie. Il terminale si sbloccherà automaticamente, attendi...)"
 
-  # Questo comando blocca l'esecuzione finché i nodi in esecuzione (running-count) non scendono a 0 (pari al desired-count)
+  # Polling esplicito per-service invece del waiter 'services-stable' (che su
+  # service già eliminati fallisce sempre, vedi commento di wait_for_service_removal).
   echo "==> [2/5] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
-  aws ecs wait services-stable \
-    --cluster "$CLUSTER_NAME" \
-    --services "${TARGET_SERVICES[@]}" \
-    --region "$REGION"
-  echo "    Fargate ha spento tutti i container."
+  for svc in "${TARGET_SERVICES[@]}"; do
+    wait_for_service_removal "$svc"
+  done
+  echo "    Fargate ha spento tutti i container (o il timeout di sicurezza è scaduto, vedi eventuali avvisi sopra)."
 
   if [ "$PURGE_LEGACY_MODE" -eq 1 ] && [ "${#LEGACY_SERVICES[@]}" -gt 0 ]; then
     echo ""
