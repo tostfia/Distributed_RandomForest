@@ -109,3 +109,7 @@ esegui: export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 
 
 Per uccidere i processi rimasti attivi: pkill -9 -f "Distributed_RandomForest"
+
+Pacchetto da installare per i test su aws: curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" e in seguiti comando sudo (chiedere ad ia) -o; per verificare: "session-manager-plugin.deb"
+
+Questo su Fedora: sudo dnf install -y ./session-manager-plugin.rpm
