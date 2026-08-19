@@ -1,8 +1,6 @@
 from src.shared.binding.serviceregistry import ServiceRegistry
-from src.shared.config import SystemConfig
 from src.testing.scenarios.base import BaseTestScenario
 import time
-import os
 import random
 
 class ScalabilityScenario(BaseTestScenario):
@@ -10,15 +8,33 @@ class ScalabilityScenario(BaseTestScenario):
 
     def run(self) -> dict:
         print("\n--- [SCENARIO 2] Test di Scalabilità e Throughput ---")
-      
+
         scal_cfg = self.config.get("scalability_test", {})
         results = {}
         task_type = self.config.get("selected_task", "classifier")
-        env = self.orchestrator.environment  
+        env = self.orchestrator.environment
+        execution_mode = env
         all_active_workers = ServiceRegistry.get_available_workers(env)
         total_available = len(all_active_workers)
         workers_to_test = [w for w in scal_cfg.get("worker_counts_to_test", []) if w <= total_available]
         raw_metrics = {}
+
+        if not workers_to_test:
+            print(f"[SCALABILITY {execution_mode.upper()}] [WARN] Nessuna configurazione testabile: "
+                  f"worker_counts_to_test={scal_cfg.get('worker_counts_to_test', [])} ma solo "
+                  f"{total_available} worker realmente disponibili/registrati "
+                  f"(ServiceRegistry.get_available_workers). Su AWS verifica che il desired-count "
+                  f"del/dei worker-service copra il valore massimo che vuoi testare.")
+            return {
+                "scenario_description": (
+                    "Strong scaling test NON eseguito: nessuna configurazione di worker_counts_to_test "
+                    "risultava <= al numero di worker realmente disponibili."
+                ),
+                "status": "SKIPPED_NO_TESTABLE_WORKER_COUNT",
+                "execution_mode": execution_mode,
+                "total_available_workers": total_available,
+                "requested_worker_counts": scal_cfg.get("worker_counts_to_test", []),
+            }
 
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
@@ -27,7 +43,7 @@ class ScalabilityScenario(BaseTestScenario):
         rng = random.Random(123)
         worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
-            print(f"[SCALABILITY LOCAL] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
+            print(f"[SCALABILITY {execution_mode.upper()}] Test con {worker_count} Worker attivi (Mock ServiceRegistry)...")
             sampled_ids = rng.sample(worker_ids, worker_count)
             sampled_workers = {k: all_active_workers[k] for k in sampled_ids}
             original_get_workers = ServiceRegistry.get_available_workers
@@ -40,12 +56,12 @@ class ScalabilityScenario(BaseTestScenario):
                 num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
                 train_duration = time.perf_counter() - start_train
                 self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
-                
+
                 # TIMING INFERENZA
                 start_infer = time.perf_counter()
                 accuracy_metrics = self._run_inference_and_get_metrics(payload, task_type)
                 infer_duration = time.perf_counter() - start_infer
-                
+
                 # Calcolo throughput immediati
                 train_throughput = num_trees / train_duration if train_duration > 0 else 0
                 num_samples = accuracy_metrics.get("testing_set_size", 0)
@@ -66,25 +82,25 @@ class ScalabilityScenario(BaseTestScenario):
         baseline_w = min(workers_to_test)
         base_train_time = raw_metrics[baseline_w]["train_duration"]
         base_infer_time = raw_metrics[baseline_w]["infer_duration"]
-        
+
         print("\n" + "="*80)
         print(f"   REPORT DI SCALABILITÀ COMPLETO (Baseline di riferimento: {baseline_w} Worker)")
         print("="*80)
 
         for worker_count in workers_to_test:
             m = raw_metrics[worker_count]
-            
+
             # Formula dello Speedup: Tempo con 1 Worker (o baseline) / Tempo con N Worker
             train_speedup = base_train_time / m["train_duration"] if m["train_duration"] > 0 else 1.0
             infer_speedup = base_infer_time / m["infer_duration"] if m["infer_duration"] > 0 else 1.0
-            
+
             # Stampa a schermo strutturata
             print(f"\n[Configurazione: {worker_count} Worker]")
             print(f"    ADDESTRAMENTO ({m['num_trees']} alberi complessivi):")
             print(f"     • Durata:     {m['train_duration']:.2f} secondi")
             print(f"     • Throughput: {m['train_throughput']:.2f} alberi/s")
             print(f"     • Speedup:    {train_speedup:.2f}x")
-            
+
             print(f"   INFERENZA :")
             print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
             print(f"     • Speedup:    {infer_speedup:.2f}x")
@@ -92,7 +108,7 @@ class ScalabilityScenario(BaseTestScenario):
                 print(f"     • Metric:     Accuracy = {m['accuracy'].get('accuracy', 0.0)*100:.2f}%")
             else:
                 print(f"     • Metric:     MSE = {m['accuracy'].get('mse', 0.0):.4f}")
-            
+
             # Salvataggio nel dizionario di output finale richiesto dall'orchestratore
             results[f"workers_{worker_count}"] = {
                 "training": {
@@ -112,12 +128,13 @@ class ScalabilityScenario(BaseTestScenario):
 
         return {
             "scenario_description": (
-                "Strong scaling test completato per Addestramento ed Inferenza. "
+                f"Strong scaling test completato per Addestramento ed Inferenza in ambiente {execution_mode}. "
                 f"Carico fisso di {target_trees} alberi per ciascuna configurazione di worker testata."
             ),
-            "execution_mode": "local",
+            "execution_mode": execution_mode,
             "scaling_type": "strong",
             "baseline_worker_count": baseline_w,
+            "total_available_workers": total_available,
             "metrics_per_scale": results
         }
 
@@ -132,7 +149,7 @@ class ScalabilityScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
-    
+
     def _run_inference_and_get_metrics(self, payload, task_type):
         """
         Esegue l'inferenza nativa dell'orchestratore e legge le metriche reali

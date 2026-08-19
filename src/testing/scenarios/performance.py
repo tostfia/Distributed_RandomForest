@@ -1,35 +1,34 @@
 import os
 import time
 from src.testing.scenarios.base import BaseTestScenario
-from sklearn.metrics import precision_score, recall_score, f1_score
 
-import numpy as np
 class PerformanceAndMetricsScenario(BaseTestScenario):
 
     """Copre lo Scenario 1: Valutazione Prestazioni (Classif./Regr.) e Analisi Metriche."""
-    
+
     def run(self) -> dict:
-        print("[PERFORMANCE] Esecuzione in modalità LOCALE...")
+        execution_mode = getattr(self.orchestrator, "environment", "local")
+        print(f"[PERFORMANCE] Esecuzione in ambiente '{execution_mode.upper()}'...")
         task_type = self.config.get("selected_task", "classifier")
         payload = self._build_payload()
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
         else:
             target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
-        
+
         start_time = time.perf_counter()
         self._reuse_dataset_if_available(payload, seed=123)
         num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
         duration = time.perf_counter() - start_time
         self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
-        
+
         throughput = num_trees / duration if duration > 0 else 0
         accuracy_metrics = self._run_inference_and_get_metrics(payload, task_type)
 
         return {
-            "scenario_description": "Valutazione delle prestazioni pure di addestramento in esecuzione locale.",
+            "scenario_description": f"Valutazione delle prestazioni pure di addestramento in esecuzione {execution_mode}.",
             "status": "SUCCESS" if num_trees == target_trees else "FAILED",
-            "execution_mode": "local",
+            "execution_mode": execution_mode,
             "duration_seconds": round(duration, 4),
             "trees_built": num_trees,
             "throughput_trees_per_sec": round(throughput, 4),
@@ -46,8 +45,6 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", "synthetic/synthetic_dataset.csv"),
             "hyperparameters": hp
         }
-    
-
 
     def _run_inference_and_get_metrics(self, payload, task_type):
         """
