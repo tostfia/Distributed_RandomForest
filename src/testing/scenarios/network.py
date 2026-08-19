@@ -1,18 +1,38 @@
 import os
+import statistics
 import subprocess
 import time
 
 from src.testing.scenarios.base import BaseTestScenario
+from src.testing.scenarios import aws_ecs_utils
 
 
 class NetworkSimulationScenario(BaseTestScenario):
     """
-    Scenario 3: Simulazione di ritardi di rete tramite tc netem.
+    Scenario 3: Simulazione/misurazione di ritardi di rete.
 
-    Lo scenario applica lui stesso il delay su un'interfaccia via tc, esegue il
-    training RPC, poi ripristina le regole originali dell'interfaccia.
+    - In locale/Docker: inietta artificialmente un delay via 'tc netem' su
+      un'interfaccia (altrimenti la latenza RPC su loopback/bridge Docker
+      sarebbe pressoché nulla, quindi non ci sarebbe nulla da misurare).
 
-    NOTA IMPORTANTE SUI PERMESSI:
+    - Su AWS/Fargate: NON inietta nulla. Verificato che l'account AWS
+      Academy Learner Lab usato in questo progetto non ha accesso ad AWS
+      Fault Injection Simulator (aws:fis:ListExperimentTemplates ->
+      AccessDeniedException per l'identità 'voclabs/...'), che sarebbe
+      stato il modo AWS-native per iniettare latenza/loss reali sui task
+      ECS senza CAP_NET_ADMIN. 'tc' diretto non è utilizzabile su Fargate
+      per lo stesso motivo (CAP_NET_ADMIN non disponibile nel task).
+      Lo scenario diventa quindi una MISURA della latenza RPC reale tra i
+      task (leader<->worker, stessa VPC, ENI separate) invece di una
+      simulazione: più probe consecutivi per avere min/media/max, poi lo
+      stesso training/inferenza reale degli altri scenari. Il risultato
+      NON è direttamente comparabile al numero "1.5s" impostato in
+      test_config.json per il caso locale (quello è un delay artificiale
+      scelto da voi, questo è un tempo osservato); vanno presentati nella
+      relazione come due esperimenti diversi, non come stesso esperimento
+      su due ambienti.
+
+    NOTA IMPORTANTE SUI PERMESSI (solo rilevante per il ramo locale/Docker):
     tc richiede la capability Linux CAP_NET_ADMIN.
 
     - In Docker (RUNNING_IN_DOCKER=true): la capability va data al container
@@ -28,15 +48,21 @@ class NetworkSimulationScenario(BaseTestScenario):
       delay di rete reale (status: SKIPPED_NO_TC_PERMISSIONS).
     """
 
+    # Numero di probe RPC consecutivi usati SOLO nel ramo AWS per stimare
+    # min/media/max della latenza reale (vedi _measure_rpc_baseline_stats_aws).
+    AWS_PROBE_COUNT = 5
+
     def __init__(self, config, orchestrator):
         super().__init__(config, orchestrator)
-        
-        
+
+        self.aws_env = aws_ecs_utils.is_aws_environment(orchestrator)
+
         # In Docker la capability CAP_NET_ADMIN viene data al container/binario
         # (docker-compose 'cap_add' + 'setcap' sul binario tc), quindi tc funziona
         # senza sudo. In esecuzione locale (bare metal) questa capability di solito
         # non è presente sul binario, quindi serve sudo per modificare le regole
-        # di rete del kernel.
+        # di rete del kernel. Su AWS questo attributo non viene mai usato (vedi
+        # run()), lasciato solo per compatibilità con gli helper del ramo locale.
         self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
 
         if self.running_in_docker:
@@ -56,7 +82,7 @@ class NetworkSimulationScenario(BaseTestScenario):
         return base if self.running_in_docker else ["sudo", "-n", *base]
 
     # ------------------------------------------------------------------ #
-    # tc helpers                                                          #
+    # tc helpers (solo locale/Docker)                                    #
     # ------------------------------------------------------------------ #
 
     def _tc_available(self) -> bool:
@@ -175,11 +201,43 @@ class NetworkSimulationScenario(BaseTestScenario):
         self._mark_job_finished(probe_payload["job_id"], alberi_addestrati=1)
         return time.perf_counter() - t0
 
+    def _measure_rpc_baseline_stats_aws(self, num_probes: int) -> dict:
+        """
+        Ripete _measure_rpc_baseline() più volte per stimare min/media/max
+        della latenza reale osservata tra orchestratore e worker su AWS.
+
+        Ha lo stesso limite documentato in _measure_rpc_baseline: ogni probe
+        include comunque l'ETL (short-circuit dopo il primo grazie a
+        _reuse_dataset_if_available, quindi dal secondo probe in poi il
+        tempo è più rappresentativo del solo RPC+training di 1 albero).
+        Per questo il PRIMO probe viene scartato dalle statistiche: include
+        il costo ETL "a freddo" e falserebbe min/media verso l'alto.
+        """
+        samples_ms = []
+        for i in range(num_probes):
+            t = self._measure_rpc_baseline() * 1000
+            print(f"[NETWORK AWS] Probe {i + 1}/{num_probes}: {t:.1f}ms"
+                  + (" (scartato dalle statistiche: include ETL a freddo)" if i == 0 else ""))
+            samples_ms.append(t)
+
+        stats_samples = samples_ms[1:] if len(samples_ms) > 1 else samples_ms
+        return {
+            "samples_ms": [round(s, 2) for s in samples_ms],
+            "cold_first_probe_excluded_from_stats": len(samples_ms) > 1,
+            "min_ms": round(min(stats_samples), 2),
+            "max_ms": round(max(stats_samples), 2),
+            "avg_ms": round(statistics.mean(stats_samples), 2),
+            "median_ms": round(statistics.median(stats_samples), 2),
+        }
+
     # ------------------------------------------------------------------ #
     # run                                                                  #
     # ------------------------------------------------------------------ #
 
     def run(self) -> dict:
+        if self.aws_env:
+            return self._run_aws_measurement_only()
+
         net_cfg = self.config.get("network_simulation", {})
 
         latency_ms = int(net_cfg.get("latency_seconds", 0.0) * 1000)
@@ -236,6 +294,7 @@ class NetworkSimulationScenario(BaseTestScenario):
             return {
                 "scenario_description": "Valutazione dell'impatto dei ritardi e della perdita di pacchetti sulle chiamate RPC.",
                 "status": status,
+                "execution_mode": "local",
                 "applied_latency_ms": latency_ms if tc_applied else 0,
                 "applied_loss_percent": loss_percentage if tc_applied else 0,
                 "probe_job_total_time_ms": round(probe_time * 1000, 2),
@@ -249,6 +308,72 @@ class NetworkSimulationScenario(BaseTestScenario):
             # Il finally garantisce il ripristino anche in caso di eccezione
             if tc_applied:
                 self._clear_tc_rules()
+
+    def _run_aws_measurement_only(self) -> dict:
+        """
+        Ramo AWS: nessuna iniezione di delay/loss (CAP_NET_ADMIN non
+        disponibile su Fargate, e AWS Fault Injection Simulator non
+        accessibile con le credenziali del Learner Lab usato per questo
+        progetto: 'aws fis list-experiment-templates' ritorna
+        AccessDeniedException per l'identità 'voclabs/...'). Misura invece
+        la latenza RPC reale tra i task su più probe, poi esegue comunque
+        il training/inferenza reale.
+        """
+        print("\n--- [SCENARIO 3] Simulazione di Rete: NON applicabile su AWS/ECS (misura reale) ---")
+        print("[INFO] CAP_NET_ADMIN non disponibile su Fargate; AWS Fault Injection Simulator "
+              "non accessibile con le credenziali AWS Academy di questo progetto (verificato: "
+              "'fis:ListExperimentTemplates' -> AccessDeniedException). Nessun delay/loss viene "
+              "iniettato: questo scenario misura invece la latenza RPC REALE tra i task "
+              "(leader<->worker, stessa VPC) su più probe consecutivi.")
+
+        probe_stats = self._measure_rpc_baseline_stats_aws(self.AWS_PROBE_COUNT)
+        print(f"[NETWORK AWS] Latenza RPC osservata (job di probe, ETL incluso dopo il primo): "
+              f"min={probe_stats['min_ms']}ms avg={probe_stats['avg_ms']}ms "
+              f"median={probe_stats['median_ms']}ms max={probe_stats['max_ms']}ms")
+
+        task_type = self.config.get("selected_task", "classifier")
+        payload = self._build_payload("network_test_aws")
+        if task_type == "classifier":
+            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
+        else:
+            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+
+        t0 = time.perf_counter()
+        self._reuse_dataset_if_available(payload, seed=123)
+        trees_built = self.orchestrator._execute_training_step(
+            payload, start_alberi=0, target_alberi=target_trees, seed=123
+        )
+        duration = time.perf_counter() - t0
+        self._mark_job_finished(payload["job_id"], alberi_addestrati=trees_built)
+
+        throughput = trees_built / duration if duration > 0 else 0
+        accuracy_metrics = self._run_inference_and_get_metrics(payload, task_type)
+
+        status = "SUCCESS_REAL_NETWORK_NO_INJECTION" if trees_built == target_trees else "PARTIAL"
+
+        return {
+            "scenario_description": (
+                "Su AWS non viene iniettato alcun delay/loss artificiale (CAP_NET_ADMIN non "
+                "disponibile su Fargate, AWS FIS non accessibile con le credenziali Academy usate). "
+                "Lo scenario misura invece la latenza RPC reale tra i task distribuiti sulla VPC "
+                "e ne riporta min/media/mediana/max su più probe, poi esegue il training/inferenza "
+                "reale. Non comparabile 1:1 col delay artificiale di 1.5s usato nel test locale: "
+                "sono due esperimenti diversi (uno simula condizioni avverse, l'altro misura le "
+                "condizioni reali dell'infrastruttura)."
+            ),
+            "status": status,
+            "execution_mode": "aws",
+            "network_injection_applied": False,
+            "network_injection_unavailable_reason": (
+                "CAP_NET_ADMIN non disponibile su Fargate; AWS FIS non accessibile "
+                "(fis:ListExperimentTemplates -> AccessDeniedException per le credenziali "
+                "AWS Academy Learner Lab di questo progetto)."
+            ),
+            "measured_real_rpc_latency_ms": probe_stats,
+            "duration_seconds": round(duration, 2),
+            "throughput_trees_per_second": round(throughput, 2),
+            "accuracy_metrics": accuracy_metrics,
+        }
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
@@ -266,7 +391,7 @@ class NetworkSimulationScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
-    
+
     def _run_inference_and_get_metrics(self, payload, task_type):
         """
         Esegue l'inferenza nativa dell'orchestratore e legge le metriche reali
