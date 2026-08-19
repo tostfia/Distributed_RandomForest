@@ -28,7 +28,7 @@ class TestEngine:
         self.worker_processes = []
 
         self._initialize_infrastructure()
-        
+
     def _load_config(self) -> dict:
 
         try:
@@ -39,8 +39,8 @@ class TestEngine:
             return {"selected_task": "classifier", "dataset_path": "synthetic/synthetic_dataset.csv"}
 
     def _initialize_infrastructure(self):
-     
-        self.orchestrator = CentralizedOrchestrator(orchestrator_name= "orchestrator-centralizzato-testing") if self.mode == "centralized" else FederatedOrchestrator(orchestrator_name= "orchestrator-federato-testing")   
+
+        self.orchestrator = CentralizedOrchestrator(orchestrator_name= "orchestrator-centralizzato-testing") if self.mode == "centralized" else FederatedOrchestrator(orchestrator_name= "orchestrator-federato-testing")
         self._cleanup_stale_processing_jobs()
         self._start_local_workers()
 
@@ -104,13 +104,13 @@ class TestEngine:
                 port = port_base + i-1
                 print(f"[ENGINE] Avvio {worker_name} sulla porta {port}...")
                 cmd = [
-                    "python", "worker_supervisor.py", "--", 
+                    "python", "worker_supervisor.py", "--",
                     "python", "-m", "src.worker.main", worker_name, str(port), self.mode, self.env
                 ]
                 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.worker_processes.append(p)
             time.sleep(1)  # Simula il tempo di avvio dei worker
-            print("[ENGINE] Worker locali avviati.")    
+            print("[ENGINE] Worker locali avviati.")
 
     def _cleanup_workers(self):
         print("[ENGINE] Pulizia dei worker locali...")
@@ -118,13 +118,13 @@ class TestEngine:
             p.terminate()
             p.wait()
         print("[ENGINE] Worker locali terminati.")
-    
+
 
     def run_scenarios(self):
         print("\n==================================================")
         print("       AVVIO AUTOMATICO ENGINE DI TEST DI SISTEMA  ")
         print("==================================================")
-     
+
         try:
             print("Seleziona lo scenario da eseguire:")
             print("1. Performance e Metriche")
@@ -135,12 +135,22 @@ class TestEngine:
             print("6. Failover dell'Orchestratore (addestramento)")
             print("7. Failover dell'Orchestratore (inferenza)")
             valid_options = ["1", "2", "3", "4","5", "6", "7", "all"]
-            while True:
-                user_choice = input("Scelta (1-7, o 'all' per eseguire tutti): ").strip().lower()
-                if user_choice in valid_options:
-                    config_mode = user_choice
-                    break
-                print("[ERRORE] Opzione non valida. Riprova.")
+            # Bypass non-interattivo: se la variabile d'ambiente SCENARIO è
+            # impostata (usato da run_test_engine_ecs.sh / task ECS one-off
+            # senza terminale collegato all'avvio), la usiamo al posto del
+            # prompt. Se non è impostata il comportamento resta identico a
+            # oggi (chiede a terminale) — utile in locale/Docker/ECS Exec.
+            env_choice = os.environ.get("SCENARIO", "").strip().lower()
+            if env_choice in valid_options:
+                config_mode = env_choice
+                print(f"Scelta (da variabile d'ambiente SCENARIO): {config_mode}")
+            else:
+                while True:
+                    user_choice = input("Scelta (1-7, o 'all' per eseguire tutti): ").strip().lower()
+                    if user_choice in valid_options:
+                        config_mode = user_choice
+                        break
+                    print("[ERRORE] Opzione non valida. Riprova.")
             if config_mode == "all":
                 self._run_all_scenarios()
             elif config_mode == "1":
@@ -170,24 +180,24 @@ class TestEngine:
             docker = os.environ.get("RUNNING_IN_DOCKER")
             if docker != "true":
                 self._cleanup_workers()
-            
-            
-    
+
+
+
     def _run_all_scenarios(self):
         print("\n--- Esecuzione di tutti gli scenari di test ---")
 
-        # Scenario 1 
+        # Scenario 1
         perf_scenario = PerformanceAndMetricsScenario(self.config, self.orchestrator)
         self.global_reports["performance_and_metrics"] = perf_scenario.run()
-        
+
         # Scenario 2
         scal_scenario = ScalabilityScenario(self.config, self.orchestrator)
         self.global_reports["scalability"] = scal_scenario.run()
-        
+
         # Scenario 3
         net_scenario = NetworkSimulationScenario(self.config, self.orchestrator)
         self.global_reports["network_simulation"] = net_scenario.run()
-        
+
         # Scenario 4
         fault_scenario = FaultToleranceScenario(self.config, self.orchestrator)
         self.global_reports["fault_tolerance"] = fault_scenario.run()
@@ -204,7 +214,7 @@ class TestEngine:
         orchestrator_fault_inf = InferenceOrchestratorFaultScenario(self.config, self.orchestrator)
         self.global_reports["inference_orchestrator_failover"] = orchestrator_fault_inf.run()
 
-        
+
         self._print_final_summary()
 
     def _print_final_summary(self):
@@ -214,7 +224,7 @@ class TestEngine:
         print(json.dumps(self.global_reports, indent=2))
         print("==================================================")
 
-        
+
         exec_mode = os.environ.get("RUNNING_IN_DOCKER", "false")
         if exec_mode == "true":
             output_dir = "./test_reports/docker"
@@ -222,17 +232,46 @@ class TestEngine:
             output_dir = "./test_reports/local"
         test_name = "all_tests" if len(self.global_reports) != 1 else next(iter(self.global_reports.keys()))
         output_path = os.path.join(output_dir, f"test_report_{test_name}.json")
-        
+
         try:
-            
+
             os.makedirs(output_dir, exist_ok=True)
-            
+
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(self.global_reports, f, indent=2)
-                
+
             print(f"[ENGINE SYSTEM] Report delle metriche salvato in: '{output_path}'")
         except IOError as e:
             print(f"[ENGINE ERRORE] Impossibile salvare il report su disco: {e}")
+
+        # ------------------------------------------------------------
+        # Upload su S3 (solo ambiente AWS): il task ECS che esegue questo
+        # engine è effimero (run-task one-off via run_test_engine_ecs.sh,
+        # fermato a fine sessione) — il file scritto sopra vive solo nel
+        # filesystem del container e sparirebbe insieme al task. Qui lo
+        # duplichiamo su S3 (stesso bucket dei dataset) così il report
+        # resta consultabile dopo che il task è stato fermato. Fallisce
+        # in modo silenzioso (solo un warning) per non rompere l'engine
+        # se boto3/bucket non sono disponibili per qualche motivo.
+        # ------------------------------------------------------------
+        if self.env == "aws":
+            self._upload_report_to_s3(output_path, test_name)
+
+    def _upload_report_to_s3(self, local_path: str, test_name: str):
+        bucket_name = os.environ.get("DATASETS_BUCKET_NAME")
+        if not bucket_name:
+            print("[ENGINE] [WARN] DATASETS_BUCKET_NAME non impostata: salto l'upload del report su S3.")
+            return
+        try:
+            import boto3
+            region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+            s3_client = boto3.client("s3", region_name=region)
+            timestamp = int(time.time())
+            s3_key = f"test_reports/aws/test_report_{test_name}_{timestamp}.json"
+            s3_client.upload_file(local_path, bucket_name, s3_key)
+            print(f"[ENGINE SYSTEM] Report caricato anche su S3: s3://{bucket_name}/{s3_key}")
+        except Exception as e:
+            print(f"[ENGINE] [WARN] Upload del report su S3 fallito (il file resta comunque su disco locale del task): {e}")
 
 
 if __name__ == "__main__":
