@@ -122,7 +122,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
-            fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=0.05)
+            # Letto dal manifesto (scritto da run_baseline.py) invece di un
+            # letterale fisso: permette di rilanciare lo stesso job con soglie
+            # diverse (es. 0.0 per disattivare il filtro di correlazione e
+            # tenere solo la rimozione delle feature a varianza zero) senza
+            # dover editare questo file — utile per un ablation study.
+            correlation_threshold = payload.get("correlation_threshold", 0.05)
+            fs = CICIDSFeatureSelector(target_column=target_col, correlation_threshold=correlation_threshold)
             train_df = fs.fit_transform(train_df)
             test_df = fs.transform(test_df)
 
