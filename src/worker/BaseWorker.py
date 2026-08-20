@@ -35,7 +35,7 @@ def _init_child_process(X, y):
 def _train_single_tree_processor(args):
     """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
     global _child_X, _child_y
-    tree_seed, max_depth, max_samples, bootstrap, tree_class, max_features = args
+    tree_seed, max_depth, max_samples, bootstrap, tree_class, max_features, min_samples_split, class_weight, criterion = args
     np.random.seed(tree_seed)
     
     # Preleviamo la shape direttamente dalla memoria condivisa del processo figlio
@@ -45,21 +45,42 @@ def _train_single_tree_processor(args):
         size = int(max_samples * n_samples) if max_samples else n_samples
         indices = np.random.choice(n_samples, size=size, replace=True)
         X_train, y_train = _child_X[indices], _child_y[indices]
-    else: 
+        # Campioni MAI estratti per questo albero (~36.8% atteso con size=n_samples):
+        # li conserviamo per poter stimare l'errore Out-Of-Bag "gratis" più avanti,
+        # senza dover consumare il test set separato (Breiman, 2001).
+        in_bag_mask = np.zeros(n_samples, dtype=bool)
+        in_bag_mask[indices] = True
+        oob_indices = np.flatnonzero(~in_bag_mask)
+    else:
         X_train, y_train = _child_X, _child_y
+        # Senza bootstrap ogni albero vede l'intero training set: non esiste un
+        # sottoinsieme "mai visto" su cui stimare l'OOB.
+        oob_indices = np.array([], dtype=np.int64)
    
     # max_features attiva il sottocampionamento casuale delle feature ad ogni
     # split: è ciò che decorrela gli alberi tra loro (Breiman, 2001) e
     # distingue un vero Random Forest da un semplice bagging di alberi.
     # random_state passato esplicitamente invece di affidarsi solo al seed
     # globale np.random.seed sopra, per coerenza col path federato.
-    tree = tree_class(
+    tree_kwargs = dict(
         splitter="best",
         max_depth=max_depth,
         max_features=max_features,
+        min_samples_split=min_samples_split,
         random_state=tree_seed,
     )
+    if criterion is not None:
+        tree_kwargs["criterion"] = criterion
+    # class_weight è valido solo per gli alberi di classificazione
+    if class_weight is not None and "Classifier" in tree_class.__name__:
+        tree_kwargs["class_weight"] = class_weight
+
+    tree = tree_class(**tree_kwargs)
     tree.fit(X_train, y_train)
+    # Attributo "extra" sull'istanza sklearn: sopravvive al pickle esattamente
+    # come classes_/n_features_in_, quindi arriva intatto fino all'Orchestratore
+    # senza dover cambiare la struttura dati (tree object) che viaggia in RPC.
+    tree.oob_sample_indices_ = oob_indices
     return tree
 
 class BaseWorker(Service, ABC): 
@@ -209,7 +230,8 @@ class BaseWorker(Service, ABC):
     def _get_tree_class(self):
         pass
 
-    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None):
+    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None,
+                                     min_samples_split=2, class_weight=None, criterion=None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
@@ -259,7 +281,8 @@ class BaseWorker(Service, ABC):
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
             print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Esecuzione diretta senza Pool.")
-            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features)
+            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features,
+                            min_samples_split, class_weight, criterion)
 
             global _child_X, _child_y
             _old_child_X, _old_child_y = _child_X, _child_y
@@ -284,7 +307,8 @@ class BaseWorker(Service, ABC):
             worker_tasks = []
             for i in range(num_trees):
                 seed = base_seed + i
-                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features))
+                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features,
+                                      min_samples_split, class_weight, criterion))
             local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")
@@ -304,10 +328,17 @@ class BaseWorker(Service, ABC):
         print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio completato.")
         return serialized_task
     
-    def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None):
+    def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None, tree_type=None, global_classes=None):
         """
-        Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola 
+        Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola
         le predizioni parziali sui dati di test sfruttando il C nativo di Scikit-Learn.
+
+        Per la classificazione restituiamo le probabilità per-albero (predict_proba),
+        non le etichette dure: è lo stesso meccanismo di "soft voting" che sklearn
+        usa internamente in RandomForestClassifier.predict/predict_proba (media delle
+        distribuzioni di classe delle foglie), molto più informativo — soprattutto
+        per l'AUC — del semplice conteggio di voti maggioritari con granularità
+        1/n_alberi. Per la regressione il comportamento resta invariato (predict).
         """
         print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
         
@@ -333,8 +364,29 @@ class BaseWorker(Service, ABC):
             X_eval = self.X_test
             print(f"[{self.worker_name}] Utilizzo del testing set federato locale (Shape: {X_eval.shape}).")
 
-        print(f"[{self.worker_name}] Avvio inferenza nativa lineare su {len(trees)} alberi...")
-        sub_predictions = [tree.predict(X_eval) for tree in trees]
+        is_classifier = (tree_type == "classifier") if tree_type is not None else self.is_regression() is False
+
+        if is_classifier and global_classes is not None:
+            global_classes_arr = np.asarray(global_classes)
+            n_global_classes = len(global_classes_arr)
+            print(f"[{self.worker_name}] Avvio inferenza soft-voting (predict_proba) su {len(trees)} alberi "
+                  f"({n_global_classes} classi globali)...")
+            sub_predictions = []
+            for tree in trees:
+                # Un singolo albero, se addestrato su un campione bootstrap che per caso
+                # non conteneva tutte le classi, espone tree.classes_ come sottoinsieme
+                # di global_classes: rimappiamo le sue colonne di probabilità nello
+                # spazio delle classi GLOBALE (0 per le classi non viste da quell'albero)
+                # invece di assumere ciecamente che l'ordine coincida.
+                raw_proba = tree.predict_proba(X_eval)
+                aligned_proba = np.zeros((X_eval.shape[0], n_global_classes), dtype=np.float64)
+                tree_classes = np.asarray(tree.classes_)
+                col_positions = np.searchsorted(global_classes_arr, tree_classes)
+                aligned_proba[:, col_positions] = raw_proba
+                sub_predictions.append(aligned_proba)
+        else:
+            print(f"[{self.worker_name}] Avvio inferenza nativa lineare (hard predict) su {len(trees)} alberi...")
+            sub_predictions = [tree.predict(X_eval) for tree in trees]
             
         print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
         return pickle.dumps(sub_predictions)

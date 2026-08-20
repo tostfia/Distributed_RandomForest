@@ -41,6 +41,7 @@ SYNTHETIC_REGRESSOR_REFERENCE_HP = {
     # override anche il regressore "di riferimento" non sarebbe un vero
     # Random Forest. 1/3 è il valore storicamente suggerito da Breiman (2001).
     "max_features": 1 / 3,
+    "criterion": "squared_error",
     "bootstrap": True,
     "max_samples": 1.0,
 }
@@ -122,6 +123,7 @@ def run_baseline():
                 "max_depth": 10,
                 "min_samples_split": 2,
                 "max_features": "sqrt",
+                "criterion": "gini",
                 "bootstrap": True,
                 "max_samples": 1.0
             }
@@ -248,6 +250,7 @@ def run_baseline():
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
                 'max_features': ['sqrt', 'log2', 0.5],
+                'criterion': ['gini', 'entropy'],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [True],
                 'max_samples':[0.5,0.7,0.8,1.0]
@@ -257,6 +260,7 @@ def run_baseline():
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
                 'max_features': ['sqrt', 'log2', 0.5],
+                'criterion': ['gini', 'entropy'],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [False],
             },
@@ -302,6 +306,7 @@ def run_baseline():
                 "max_depth": best_params.get("max_depth") ,
                 "min_samples_split": int(best_params.get("min_samples_split", 2)),
                 "max_features": best_params.get("max_features", "sqrt"),
+                "criterion": best_params.get("criterion", "gini"),
                 "class_weight": best_params.get("class_weight", None),
                 "bootstrap": best_booststrap,
                 "max_samples": float(best_params.get("max_samples", 1.0)) if best_booststrap else 1.0,
@@ -338,6 +343,7 @@ def run_baseline():
                 "max_depth": best_hp_reale.get("max_depth"),
                 "min_samples_split": int(best_hp_reale.get("min_samples_split", 2)),
                 "max_features": best_hp_reale.get("max_features", "sqrt"),
+                "criterion": best_hp_reale.get("criterion", "gini"),
                 "bootstrap": best_bootstrap,
                 "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
             }
@@ -389,6 +395,9 @@ def run_baseline():
     
     if hp["bootstrap"]:
         rf_kwargs["max_samples"] = hp["max_samples"]
+
+    if hp.get("criterion"):
+        rf_kwargs["criterion"] = hp["criterion"]
 
     if user_tree_type == "classifier":
         if dataset_type == "real":

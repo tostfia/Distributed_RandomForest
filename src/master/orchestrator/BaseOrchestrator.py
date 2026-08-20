@@ -8,7 +8,6 @@ import numpy as np
 import signal
 import threading
 from src.dataset.metrics_dao import MetricsDAOFactory
-from sklearn.utils.extmath import weighted_mode
 from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score
 from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
@@ -715,11 +714,11 @@ class BaseOrchestrator(ABC):
     def _aggregate_forest_predictions(
             self,
             predictions_matrix: np.ndarray,
-            tree_type: str
+            tree_type: str,
+            global_classes: np.ndarray = None
         ):
             """
-            Aggrega una matrice di predizioni GREZZE per-albero, shape (n_alberi, n_campioni),
-            in un'unica predizione finale per campione.
+            Aggrega le predizioni GREZZE per-albero in un'unica predizione finale per campione.
 
             Da usare SOLO quando si dispone davvero delle predizioni dei singoli alberi
             (es. modalità centralizzata, dove ogni worker restituisce le predizioni del
@@ -727,27 +726,157 @@ class BaseOrchestrator(ABC):
             state aggregate a monte (es. modalità federata, dove ogni worker restituisce
             direttamente la predizione finale del modello globale sul proprio shard locale):
             in quel caso passare le predizioni finali direttamente a calculate_metrics().
-            """
-            if predictions_matrix.ndim != 2:
-                raise ValueError(
-                    f"_aggregate_forest_predictions richiede una matrice 2D (n_alberi, n_campioni), "
-                    f"ricevuta shape {predictions_matrix.shape}. Se le predizioni sono già aggregate "
-                    f"per campione, chiamare direttamente calculate_metrics()."
-                )
 
+            Classificazione: predictions_matrix ha shape (n_alberi, n_campioni, n_classi_globali)
+            e contiene le probabilità per-albero (predict_proba), già allineate allo stesso
+            spazio di classi globale. Si fa SOFT VOTING (media delle probabilità, poi argmax),
+            lo stesso meccanismo che sklearn usa internamente in RandomForestClassifier —
+            invece del voto di maggioranza sulle etichette dure, che produce una stima di
+            probabilità quantizzata a passi di 1/n_alberi ed è quindi meno informativa per l'AUC.
+            Regressione: predictions_matrix ha shape (n_alberi, n_campioni) di valori grezzi,
+            aggregati con una semplice media (comportamento invariato).
+            """
             if tree_type == "classifier":
-                # Calcolo della maggioranza dei voti pesata (in questo caso pesi uniformi)
-                uniform_weights = np.ones_like(predictions_matrix)
-                final_predictions, _ = weighted_mode(predictions_matrix, uniform_weights, axis=0)
-                final_predictions = final_predictions.ravel().astype(int)
-                # Frazione di alberi che ha votato per la classe positiva, usata come proxy
-                # di probabilità per l'AUC (valida solo se le etichette sono codificate 0/1)
-                y_probs = np.mean(predictions_matrix, axis=0)
+                if predictions_matrix.ndim != 3:
+                    raise ValueError(
+                        f"_aggregate_forest_predictions in modalità classificazione richiede una "
+                        f"matrice 3D di probabilità per-albero (n_alberi, n_campioni, n_classi), "
+                        f"ricevuta shape {predictions_matrix.shape}. Se le predizioni sono già "
+                        f"aggregate per campione, chiamare direttamente calculate_metrics()."
+                    )
+                if global_classes is None:
+                    raise ValueError(
+                        "_aggregate_forest_predictions in modalità classificazione richiede "
+                        "global_classes per tradurre gli indici di colonna nelle etichette reali."
+                    )
+                global_classes = np.asarray(global_classes)
+
+                # Soft voting: media delle probabilità per-albero sulle stesse colonne di classe,
+                # poi argmax — coerente con RandomForestClassifier.predict di sklearn.
+                avg_proba = np.mean(predictions_matrix, axis=0)
+                final_predictions = global_classes[np.argmax(avg_proba, axis=1)]
+
+                # y_probs (score continuo per l'AUC) è ben definito solo nel caso binario.
+                if len(global_classes) == 2:
+                    # Convenzione: l'etichetta con valore maggiore (es. 1 in 0/1) è la classe positiva.
+                    positive_idx = int(np.argmax(global_classes))
+                    y_probs = avg_proba[:, positive_idx]
+                else:
+                    y_probs = None
             else:
+                if predictions_matrix.ndim != 2:
+                    raise ValueError(
+                        f"_aggregate_forest_predictions in modalità regressione richiede una "
+                        f"matrice 2D (n_alberi, n_campioni), ricevuta shape {predictions_matrix.shape}. "
+                        f"Se le predizioni sono già aggregate per campione, chiamare direttamente "
+                        f"calculate_metrics()."
+                    )
                 final_predictions = np.mean(predictions_matrix, axis=0)
                 y_probs = None
 
             return final_predictions, y_probs
+
+    def _compute_oob_metrics(
+            self,
+            all_trees: list,
+            X_train: np.ndarray,
+            y_train: np.ndarray,
+            tree_type: str
+        ):
+            """
+            Stima Out-Of-Bag (OOB) dell'errore di generalizzazione (Breiman, 2001).
+
+            Ogni albero bootstrap non vede mai una porzione del training set
+            (~36.8% atteso con max_samples=1.0): aggregando le predizioni dei
+            SOLI alberi per cui un dato campione era OOB si ottiene una stima
+            della performance di generalizzazione "gratis", senza consumare
+            il test set separato. Richiede che ogni albero esponga l'attributo
+            `oob_sample_indices_` (impostato dai worker in fase di training —
+            vedi `_train_single_tree_processor` / `_train_single_fed_tree`).
+
+            Alberi senza questo attributo, o con array OOB vuoto (es. addestrati
+            con bootstrap=False), vengono semplicemente esclusi dal calcolo.
+            Restituisce None se non c'è materiale sufficiente per una stima
+            (nessun albero con indici OOB, o nessun campione mai lasciato fuori).
+            """
+            n_samples = X_train.shape[0]
+            trees_with_oob = [
+                t for t in all_trees
+                if getattr(t, "oob_sample_indices_", None) is not None and len(t.oob_sample_indices_) > 0
+            ]
+
+            if not trees_with_oob:
+                print(f"[{self.orchestrator_name}] [OOB] Nessun albero con indici OOB disponibili "
+                      f"(bootstrap disattivato o alberi troppo vecchi). Stima OOB saltata.")
+                return None
+
+            if tree_type == "classifier":
+                trees_with_classes = [t for t in trees_with_oob if hasattr(t, "classes_")]
+                if not trees_with_classes:
+                    print(f"[{self.orchestrator_name}] [OOB] Nessun albero espone 'classes_'. Stima OOB saltata.")
+                    return None
+                global_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                n_classes = len(global_classes)
+
+                # Media delle probabilità (soft voting) SOLO fra gli alberi per cui
+                # il campione era OOB, coerente con l'aggregazione usata in inferenza.
+                proba_sum = np.zeros((n_samples, n_classes), dtype=np.float64)
+                oob_count = np.zeros(n_samples, dtype=np.int64)
+
+                for t in trees_with_oob:
+                    oob_idx = t.oob_sample_indices_
+                    raw_proba = t.predict_proba(X_train[oob_idx])
+                    tree_classes = np.asarray(t.classes_)
+                    col_positions = np.searchsorted(global_classes, tree_classes)
+                    proba_sum[np.ix_(oob_idx, col_positions)] += raw_proba
+                    oob_count[oob_idx] += 1
+
+                covered = oob_count > 0
+                if not np.any(covered):
+                    print(f"[{self.orchestrator_name}] [OOB] Nessun campione ha almeno un albero OOB "
+                          f"(troppo pochi alberi?). Stima OOB saltata.")
+                    return None
+
+                avg_proba = proba_sum[covered] / oob_count[covered, None]
+                oob_predictions = global_classes[np.argmax(avg_proba, axis=1)]
+                positive_idx = int(np.argmax(global_classes))
+                y_probs = avg_proba[:, positive_idx] if n_classes == 2 else None
+
+                metrics = self.calculate_metrics(
+                    final_predictions=oob_predictions,
+                    y_test=y_train[covered],
+                    tree_type=tree_type,
+                    y_probs=y_probs
+                )
+            else:
+                pred_sum = np.zeros(n_samples, dtype=np.float64)
+                oob_count = np.zeros(n_samples, dtype=np.int64)
+
+                for t in trees_with_oob:
+                    oob_idx = t.oob_sample_indices_
+                    pred_sum[oob_idx] += t.predict(X_train[oob_idx])
+                    oob_count[oob_idx] += 1
+
+                covered = oob_count > 0
+                if not np.any(covered):
+                    print(f"[{self.orchestrator_name}] [OOB] Nessun campione ha almeno un albero OOB "
+                          f"(troppo pochi alberi?). Stima OOB saltata.")
+                    return None
+
+                oob_predictions = pred_sum[covered] / oob_count[covered]
+                metrics = self.calculate_metrics(
+                    final_predictions=oob_predictions,
+                    y_test=y_train[covered],
+                    tree_type=tree_type
+                )
+
+            coverage = float(np.mean(covered))
+            metrics["oob_coverage"] = coverage
+            metrics["oob_samples_used"] = int(np.sum(covered))
+            metrics["oob_trees_used"] = len(trees_with_oob)
+            print(f"[{self.orchestrator_name}] [OOB] Stima calcolata su {int(np.sum(covered))}/{n_samples} "
+                  f"campioni ({coverage * 100:.1f}% di copertura) usando {len(trees_with_oob)} alberi.")
+            return metrics
 
     def calculate_metrics(
             self,
