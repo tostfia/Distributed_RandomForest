@@ -33,6 +33,9 @@ if [ -f "$ENV_FILE" ]; then
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
   ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
+  # Timeout RPC (in secondi) verso i worker: letti dal .env se presenti,
+  # altrimenti default identici a quelli finora hardcoded nel codice
+  # dell'orchestratore (600s training, 300s inferenza).
   ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
   ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
 
@@ -41,16 +44,16 @@ if [ -f "$ENV_FILE" ]; then
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
   DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
   DETECTED_WORKERS="${ENV_NUM_WORKERS:-2}"
-  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800}"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900}"
+  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-600}"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-300}"
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato. Uso parametri di fallback."
   DETECTED_MODE="${1:-centralized}"
   DETECTED_REGION="us-east-1"
   DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
   DETECTED_WORKERS="2"
-  DETECTED_RPC_SYNC_TIMEOUT="1800"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="900"
+  DETECTED_RPC_SYNC_TIMEOUT="600"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="300"
 fi
 
 REGION="$DETECTED_REGION"
@@ -78,8 +81,17 @@ RPC_INFERENCE_SYNC_TIMEOUT_SECONDS="$DETECTED_RPC_INFERENCE_SYNC_TIMEOUT"
 # del desired-count di orchestrator/worker attivi in contemporanea.
 DEPLOYMENT_CONFIG="minimumHealthyPercent=0,maximumPercent=100"
 
-WORKER_CPU=1024
-WORKER_MEMORY=4096
+# Alzato da 1024/4096 (1 vCPU) a 4096/16384 (4 vCPU): un worker isolato su
+# Fargate ha la sua CPU dedicata, quindi con piu' vCPU puo' davvero parallelizzare
+# il pool di processi (vedi fix in BaseWorker.py) invece di restare a 1 processo
+# per mancanza di core. Con 4 vCPU per worker il totale richiesto contemporaneamente
+# sale a ~34 vCPU (7 worker x 4 = 28, + 2 orchestrator x 2 = 4, + eventuale
+# test-engine = 2). Non verificabile in anticipo se rientra nella quota Fargate
+# del Learner Lab (permesso negato su servicequotas): se il deploy fallisce con
+# un errore di capacita' su create-service/run-task, abbassare questo valore
+# (es. a 2048/8192) e ripetere.
+WORKER_CPU=4096
+WORKER_MEMORY=16384
 ORCH_CPU=2048
 ORCH_MEMORY=8192
 
