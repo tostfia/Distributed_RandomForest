@@ -8,11 +8,6 @@ set -e
 # del prompt "Scelta (1-7, o 'all')" che hai in locale, ma con i worker
 # raggiungibili sul loro IP privato (nessuna esposizione RPC su internet).
 #
-# Verificato con 'aws iam simulate-principal-policy' che il ruolo
-# 'voclabs' di questo Learner Lab ha i permessi necessari per ECS Exec
-# (ecs:ExecuteCommand, ssm:StartSession, ssmmessages:*) — a differenza di
-# AWS FIS, che risultava invece negato.
-#
 # Prerequisiti:
 #   - deploy.sh già eseguito con successo (worker-service/orchestrator-service
 #     RUNNING sul cluster 'forest-cluster')

@@ -25,6 +25,9 @@ from src.dataset.checkpoint_dao import CheckpointDAOFactory
 TEST_SIZE = 0.2
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 
+RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900))
+
 class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
@@ -35,7 +38,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.test_data_path = None
         self.chunk_sent_event = threading.Event()
         self._trees_cache = {}
-        
+
         super().__init__(
             orchestrator_name=name,
             queue_name=self.cfg.sqs_centralized_queue
@@ -48,7 +51,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         if dataset_type:
             return str(dataset_type).strip().lower()
         return "real"
-    
+
     def _prepare_data(self, payload: dict, base_seed: int):
         t0 = time.perf_counter()
         job_id = payload.get("job_id", "unknown_job")
@@ -71,12 +74,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
             else:
                 train_df, test_df = splitter.split(df_full)
         else:
-            if not dataset_path: 
+            if not dataset_path:
                 raise ValueError("dataset_path mancante.")
             print(f"[DEBUG] dataset_path ricevuto = {repr(dataset_path)}")
             loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
             df_raw = loader.load()
-            
+
             # Istanziamo il nuovo preprocessor modificato
             preprocessor = CICIDSPreprocessor(target_column=target_col)
             # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO ───
@@ -90,7 +93,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             # ─── FASE 3 & 4: PREPROCESAMENTO INDIPENDENTE (Metadata + NaN/inf) ───
             print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TRAIN SET ===")
             train_df = preprocessor.process(train_df)
-            
+
             print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TEST SET ===")
             test_df = preprocessor.process(test_df)
 
@@ -107,7 +110,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         else:
             train_data_path = f"./.local_storage/shared_train_{job_id}.csv"
             test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
-            
+
         print(f"\n[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         try:
             dao = DatasetDAOFactory.get_dao(self.environment)
@@ -135,7 +138,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             else:
                 expected_train = f"./.local_storage/shared_train_{expected_job_id}.csv"
                 expected_test = f"./.local_storage/shared_test_{expected_job_id}.csv"
-            
+
             dao = DatasetDAOFactory.get_dao(self.environment)
             if dao.exists(expected_train) and dao.exists(expected_test):
                 print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT ETL] Dataset già presente nello storage condiviso. Salto la fase ETL.")
@@ -189,14 +192,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 else:
                     print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                     start_alberi = 0
-                
+
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
         tree_type = hp.get("tree_type", "classifier")
-        
+
         # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
@@ -207,13 +210,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 if available_workers:
                     print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
                     break
-                
+
                 print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
                 time.sleep(10)
 
             worker_names = list(available_workers.keys())
             num_workers = len(worker_names)
-            source_info = self.train_data_path 
+            source_info = self.train_data_path
 
             # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
             CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
@@ -223,7 +226,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             task_queue = queue.Queue()
             sub_start = start_alberi
             task_id_counter = start_alberi + 1
-            
+
             while sub_start < target_alberi:
                 sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
                 # Ogni sotto-task associa un seed specifico calcolato sull'offset cumulativo
@@ -234,7 +237,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 sub_start = sub_end
 
             results_lock = threading.Lock()
-            
+
             active_worker_names = list(worker_names)
 
             # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
@@ -250,17 +253,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 try:
                     print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                     worker_conn = rpyc.connect(
-                        w_info["host"], 
-                        w_info["port"], 
+                        w_info["host"],
+                        w_info["port"],
                         config={
                             'allow_pickle': True,
-                            'sync_request_timeout': 600,
+                            'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
                             'keepalive': True
                         }
                     )
                     with self.connessioni_lock:
                         self.connessioni_attive.append(worker_conn)
-                    
+
                     # ─── Il thread resta attivo finché non raccogliamo la quota di alberi globale ───
                     while len(all_trained_trees) < target_alberi:
                         try:
@@ -273,7 +276,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             with results_lock:
                                 total_attuali = len(all_trained_trees)
                                 num_worker_attivi = len(active_worker_names)
-                            
+
                             if total_attuali >= target_alberi or num_worker_attivi <= 1:
                                 break
                             time.sleep(1)
@@ -287,15 +290,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
                             result_raw = worker_conn.root.train_subset_forest(
                                 source_info=source_info,
-                                num_trees=quota_chunk,       
-                                base_seed=chunk_seed,    
+                                num_trees=quota_chunk,
+                                base_seed=chunk_seed,
                                 max_depth=max_depth,
                                 tree_type=hp.get("tree_type")
                             )
-                            
+
                             # Deserializzazione sicura dei byte trasmessi via rete
                             result_trees = pickle.loads(obtain(result_raw))
-                            
+
                             with results_lock:
                                 all_trained_trees.extend(result_trees)
                                 current_total = len(all_trained_trees)
@@ -310,7 +313,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                     print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
                                 except Exception as e_fs:
                                     print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
-                                
+
                                 # Sincronizziamo in tempo reale anche il contatore logico nel Database/State Manager
                                 if hasattr(self, 'state_manager') and self.state_manager:
                                     try:
@@ -324,11 +327,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                         )
                                     except Exception as e_db:
                                         print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
-                                
+
                             print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
                             self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
                             task_queue.task_done()
-                            
+
                         except Exception as e:
 
                             self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="FAILED")
@@ -336,12 +339,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             # FAULT TOLERANCE REALE: Reinserimento immediato del chunk per la fault tolerance
                             task_queue.put((task_id, start_t, end_t, chunk_seed))
                             print(f"[{self.orchestrator_name}-Thread] Task {task_id} riaccodato con successo per il failover.")
-                            
+
                             with results_lock:
                                 if w_name in active_worker_names:
                                     active_worker_names.remove(w_name)
                             break  # Il canale RPC con questo worker è saltato, chiudiamo il thread relativo
-                        
+
                 except Exception as conn_err:
                     print(f"   [ERRORE CRITICO] Impossibile connettersi a {w_name}: {conn_err}")
                     with results_lock:
@@ -384,7 +387,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
             try:
                 n_features = all_trained_trees[0].n_features_in_
-                
+
                 if tree_type == "classifier":
                     global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
                     # Deriviamo le classi reali dagli alberi già addestrati (ogni DecisionTree
@@ -402,20 +405,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     global_model.n_classes_ = len(detected_classes)
                 else:
                     global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
-                
+
                 global_model.estimators_ = all_trained_trees
                 global_model.n_features_in_ = n_features
                 global_model.n_outputs_ = 1
-                
-                
+
+
                 model_path = self._resolve_model_path(self.current_job_id)
                 self.checkpoint_dao.save(model_path, global_model)
-                
+
                 print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
-                
+
                 # ─── MODIFICA 3: Restituiamo la dimensione REALE degli alberi salvati ───
                 return len(all_trained_trees)
-                
+
             except Exception as e:
                 print(f"   [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
                 traceback.print_exc()
@@ -424,7 +427,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         print(f"   [{self.orchestrator_name}] Nessun albero collezionato.")
         # ─── Ritorna 0 se non è stato possibile generare o caricare nulla ───
         return 0
-    
+
     def _execute_inference_step(self, payload: dict) -> dict:
         """
         Esegue l'inferenza distribuita centralizzata in modalità Fault-Tolerant
@@ -490,7 +493,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         predictions_chunks = self._load_inference_checkpoint(job_id)  # Tentativo di ripristino da checkpoint
         already_done_ranges = {start for start, _ in predictions_chunks}
         results_lock = threading.Lock()
-       
+
         active_worker_names = list(worker_names)
         self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
         while tree_start < total_trees:
@@ -500,7 +503,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 serialized_chunk_trees = pickle.dumps(chunk_estimators)
                 task_queue.put((task_id_counter, tree_start, tree_end, serialized_chunk_trees))
                 task_id_counter += 1
-            else: 
+            else:
                 print(f"[SHORT-CIRCUIT] Chunk {tree_start}-{tree_end} già completato. Skip.")
             tree_start = tree_end
 
@@ -517,17 +520,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
             try:
                 print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                 worker_conn = rpyc.connect(
-                    w_info["host"], 
-                    w_info["port"], 
+                    w_info["host"],
+                    w_info["port"],
                     config={
                         'allow_pickle': True,
-                        'sync_request_timeout': 600,
+                        'sync_request_timeout': RPC_INFERENCE_SYNC_TIMEOUT_SECONDS,
                         'keepalive': True
                     }
                 )
                 with self.connessioni_lock:
                     self.connessioni_attive.append(worker_conn)
-                
+
                 while True:
                     try:
                         task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=2)
@@ -540,14 +543,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="PROCESSING")
                     try:
                         self.chunk_sent_event.set()
-                        
+
                         # Invocazione remota sul metodo esposto dal BaseWorker
                         raw_response = worker_conn.root.predict_subset_forest(
-                            chunk_trees_bytes, 
+                            chunk_trees_bytes,
                             serialized_X_test
                         )
                         sub_predictions = pickle.loads(obtain(raw_response))
-                        
+
                         with results_lock:
                             # Tracciamo start_idx per poter riordinare sequenzialmente i blocchi alla fine
                             predictions_chunks.append((start_idx, sub_predictions))
@@ -557,11 +560,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                print(f"   [RPC INF <- {w_name}] [CHECKPOINT INFERENZA OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {len(predictions_chunks)} chunk.")
                             except Exception as e_fs:
                                 print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere i chunk di inferenza parziali su file: {e_fs}")
-                            
+
                         print(f"   [RPC INF <- {w_name}] Task {task_id} completato con successo.")
                         self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="COMPLETED")
                         task_queue.task_done()
-                        
+
                     except Exception as e:
                         print(f"   [ERRORE RPC INFERENZA] Fallimento del worker {w_name} sul Task {task_id}: {e}")
                         retries = task_retries.get(task_id, 0) + 1
@@ -577,12 +580,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="REQUEUED")
                             task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
                             print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
-                        
+
                         with results_lock:
                             if w_name in active_worker_names:
                                 active_worker_names.remove(w_name)
                         break  # Interruzione del loop per questo canale RPC corrotto
-                print(f"[{w_name}] ha completato {rounds_done} round")       
+                print(f"[{w_name}] ha completato {rounds_done} round")
             except Exception as conn_err:
                 print(f"   [ERRORE CONNESSIOINE INFERENZA] Impossibile raggiungere il worker {w_name}: {conn_err}")
                 with results_lock:
@@ -597,7 +600,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         worker_conn.close()
                     except Exception:
                         pass
-         
+
         # 6. AVVIO MULTI-THREADING E SINCRONIZZAZIONE DEI CONSUMATORI
         rpc_start_time = time.perf_counter()
         threads = []
@@ -608,7 +611,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         for t in threads:
             t.join()
-        
+
         try:
             if failed_tasks:
                 raise RuntimeError(f"Inferenza parziale: {len(failed_tasks)} chunk non completati.")
@@ -625,14 +628,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # 7. ORDINAMENTO SEQUENZIALE E COMPOSIZIONE DELLA MATRICE DELLE PREDIZIONI
         print(f"[{self.orchestrator_name}] Collezionamento predizioni completato. Ricomposizione matrice in corso...")
         predictions_chunks.sort(key=lambda x: x[0])
-        
+
         all_worker_predictions = []
         for _, sub_preds in predictions_chunks:
             all_worker_predictions.extend(sub_preds)
 
         predictions_matrix = np.array(all_worker_predictions)
         print(f"[{self.orchestrator_name}] Matrice complessiva delle predizioni rigenerata: {predictions_matrix.shape}")
-        
+
         total_inference_time = time.perf_counter() - inference_start_time
 
         # 8. AGGREGAZIONE DEL VOTO DI MAGGIORANZA (CLASSIFICAZIONE) / MEDIA (REGRESSIONE)
@@ -682,7 +685,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         """
         # 1. Chiamiamo la classe base per aggiornare DynamoDB (evita duplicazione di codice)
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
-        
+
         # 2. Se ci sono alberi fisici da blindare su disco/S3, lo facciamo qui
         if alberi_reali is not None and len(alberi_reali) > 0:
             checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
@@ -704,19 +707,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso checkpoint degli alberi parziali.")
         except Exception as e:
             print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {checkpoint_trees_path}: {e}")
- 
+
         inference_cp = self._get_inference_checkpoint_path(job_id)
         try:
             self.checkpoint_dao.delete(inference_cp)
         except Exception as e:
             print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare {inference_cp}: {e}")
-    
+
     def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
-        
+
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
         return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
-    
+
     def _resolve_model_path(self, job_id: str) -> str:
         """Path del modello globale aggregato, in una sotto-cartella dedicata alla
         modalità centralizzata per evitare collisioni col modello federato in caso
@@ -724,14 +727,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/saved_models/centralized/model_{job_id}.pkl"
         return os.path.join("./saved_models", f"model_{job_id}.pkl")
-    
-    
+
+
     def _get_inference_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/checkpoints/inference_chunks_{job_id}.pkl"
         return f"./.local_storage/inference_chunks_{job_id}.pkl"
-    
-    
+
+
     def _load_inference_checkpoint(self, job_id: str):
         path = self._get_inference_checkpoint_path(job_id)
         if self.checkpoint_dao.exists(path):
@@ -742,7 +745,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
         return []
-    
+
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Centralizzato...")
     orchestrator = CentralizedOrchestrator()

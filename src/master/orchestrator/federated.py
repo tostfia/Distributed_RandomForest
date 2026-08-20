@@ -1,4 +1,3 @@
-import fcntl
 import json
 import pickle
 import os
@@ -16,21 +15,28 @@ import re
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
-from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
-from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 
+# Timeout (in secondi) per le chiamate RPC sincrone verso i worker. Configurabile via
+# .env / variabile d'ambiente per poter alzarlo su AWS (dove un singolo worker può
+# dover addestrare/predire un chunk molto più grande che in locale, es. scenario di
+# scalabilita' con pochi worker attivi), senza toccare il default usato finora in
+# locale/Docker se la variabile non e' impostata. Due costanti separate perché
+# training e inferenza avevano gia' default diversi (600s e 300s).
+RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900))
+
 class FederatedOrchestrator(BaseOrchestrator):
-    
+
     def __init__(self, orchestrator_name: str = None, num_workers: int = None):
         self.cfg = SystemConfig()
         self.num_workers = num_workers or int(os.environ.get("NUM_WORKERS", getattr(self.cfg, "num_workers", 3)))
         name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
-        
+
         super().__init__(
             orchestrator_name=name,
             queue_name=self.cfg.sqs_federated_queue
@@ -60,7 +66,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         per l'ambiente AWS, e con l'idea che in uno scenario federato i dati
         risiedano già sui nodi quando il sistema parte, invece di essere
         generati/distribuiti reattivamente durante un job.
- 
+
         Per il dataset 'synthetic' non serve alcun provisioning: ogni worker
         genera autonomamente il proprio shard sintetico al boot.
         """
@@ -72,25 +78,25 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Nessun controllo shard necessario "
                   f"(generato autonomamente da ogni worker).")
             return
- 
+
         num_workers = self.num_workers
         base_cache_dir = "./workers_cache"
         print(f"[{self.orchestrator_name}] [CHECK LOCAL] Verifica provisioning shard su disco per {num_workers} worker...")
- 
+
         mancanti = []
         for i in range(1, num_workers + 1):
             dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
             dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
- 
+
             train_p = os.path.join(dir_padded, "train_shard.csv")
             test_p = os.path.join(dir_padded, "test_shard.csv")
             train_up = os.path.join(dir_unpadded, "train_shard.csv")
             test_up = os.path.join(dir_unpadded, "test_shard.csv")
- 
+
             if not ((os.path.exists(train_p) and os.path.exists(test_p)) or
                     (os.path.exists(train_up) and os.path.exists(test_up))):
                 mancanti.append(f"Worker-Locale-{i:02d}")
- 
+
         if mancanti:
             raise RuntimeError(
                 f"[{self.orchestrator_name}] Provisioning locale incompleto: mancano gli shard per "
@@ -136,10 +142,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                 f"'python -m scripts.provision_federated_shards' prima di avviare il cluster."
             )
         print(f"[{self.orchestrator_name}] [CHECK AWS OK] Tutti gli shard richiesti sono presenti su S3.")
-        
+
     def _perform_active_recovery(self):
         """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
-        
+
         super()._perform_active_recovery()
 
     def _infer_worker_index(self, w_name: str, fallback_idx: int) -> int:
@@ -156,7 +162,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         if dataset_type:
             return str(dataset_type).strip().lower()
         return "real"
-    
+
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Invia la richiesta a ciascun worker attivo per il proprio shard locale.
@@ -164,7 +170,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         Alla fine, se gli alberi totali superano il target (over-provisioning), applica lo scarto uniforme.
         """
         self.current_job_id = payload.get("job_id")
-        
+
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment == "aws":
             self._ensure_aws_bootstrap(payload)
@@ -172,7 +178,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             self._ensure_local_bootstrap(payload)
             os.makedirs("./.local_storage", exist_ok=True)
 
-        
+
         if start_alberi == 0 and self.checkpoint_dao.exists(checkpoint_trees_path):
             self.checkpoint_dao.delete(checkpoint_trees_path)
         if start_alberi == 0:
@@ -209,7 +215,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 else:
                     print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                     start_alberi = 0
-                
+
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 
@@ -225,7 +231,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     break
                 print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
                 time.sleep(10)
-                
+
             worker_names = list(available_workers.keys())
             num_workers = len(worker_names)
 
@@ -250,7 +256,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 assigned_tasks[w_name] = (task_id_counter, sub_start, sub_end, task_seed)
                 task_id_counter += 1
                 sub_start = sub_end
-                
+
             feature_selezionate = (None if self.environment == "aws" else self.select_from_config(self._resolve_dataset_type(payload)))
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
@@ -263,7 +269,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             def contact_worker(w_name, idx):
                 task = assigned_tasks.get(w_name)
                 if task is None:
-                    return 
+                    return
                 task_id, start_t, end_t, chunk_seed = task
                 quota_chunk = end_t - start_t
                 wait_started_at = time.perf_counter()
@@ -273,7 +279,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         if w_name in available_now:
                             w_info = available_now[w_name]
                             break
-                        
+
                         if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
                             print(f"[{self.orchestrator_name}] [TIMEOUT] Worker '{w_name}' non tornato disponibile "
                                 f"entro {self.worker_wait_timeout:.0f}s. Task {task_id} ({quota_chunk} alberi) "
@@ -285,14 +291,14 @@ class FederatedOrchestrator(BaseOrchestrator):
                               f"nessun altro worker lo prenderà in carico.")
                         time.sleep(RETRY_WAIT_SECONDS)
                     worker_conn = None
-                    try: 
+                    try:
                         print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                         worker_conn = rpyc.connect(
-                            w_info["host"], 
-                            w_info["port"], 
+                            w_info["host"],
+                            w_info["port"],
                             config={
                                 'allow_pickle': True,
-                                'sync_request_timeout': 600,
+                                'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
                                 'keepalive': True
                             }
                         )
@@ -307,10 +313,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                             n_estimators_local=quota_chunk,
                             worker_index=idx,
                             hyperparameters={
-                                **hp, 
+                                **hp,
                                 "random_state": chunk_seed + (idx * 1000),
                                 "feature_selezionate": feature_selezionate,
-                                
+
                             },
                         )
                         result_trees = pickle.loads(obtain(result_raw))
@@ -340,7 +346,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                     )
                                 except Exception as e_db:
                                     print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
-                            
+
                         print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
                         self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
                         return  # task di questo worker concluso, il thread termina
@@ -366,21 +372,21 @@ class FederatedOrchestrator(BaseOrchestrator):
                 t = threading.Thread(target=contact_worker, args=(worker_name, stable_idx))
                 threads.append(t)
                 t.start()
- 
+
             for t in threads:
                 t.join()
-            print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")   
- 
+            print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")
+
             if not all_trained_trees:
                 raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
- 
+
             if len(all_trained_trees) > target_alberi:
                 print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
                 collected_trees = random.sample(all_trained_trees, target_alberi)
             else:
                 print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
                 collected_trees = all_trained_trees
-            
+
             final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
             self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
             return final_count
@@ -463,7 +469,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     if w_name in available_now:
                         w_info = available_now[w_name]
                         break
- 
+
                     if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
                         print(f"[{self.orchestrator_name}] [TIMEOUT INF] Worker '{w_name}' non è tornato disponibile "
                               f"entro {self.worker_wait_timeout:.0f}s. I suoi campioni vengono ESCLUSI dalla metrica "
@@ -479,12 +485,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                     conn = rpyc.connect(
                         w_info["host"], w_info["port"],
-                        config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": 300}
+                        config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}
                     )
                     with self.connessioni_lock:
                         self.connessioni_attive.append(conn)
                     self.chunk_sent_event.set()
- 
+
                     worker_hyperparameters = {
                         **hyperparameters,
                         "dataset_type": self._resolve_dataset_type(payload),
@@ -502,7 +508,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "hyperparameters": worker_hyperparameters
                     }))
                     worker_data = pickle.loads(obtain(raw_response))
- 
+
                     with results_lock:
                         # Registriamo il risultato COMPLETO del worker sotto il suo
                         # indice stabile. Salvare per-worker (invece di estendere
@@ -530,7 +536,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' "
                               f"({worker_data['n_samples']} record). Checkpoint: {len(results_by_worker)} worker.")
                     return  # successo, il thread termina
- 
+
                 except Exception as ex:
                     print(f"   [ERRORE INF] Fallimento su '{w_name}': {ex}. In attesa che torni disponibile "
                           f"(la sua validazione NON verrà eseguita da altri worker).")
@@ -545,7 +551,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             conn.close()
                         except Exception:
                             pass
- 
+
         rpc_start_time = time.perf_counter()
         threads = []
         for idx, name in enumerate(worker_names, start=1):
@@ -559,15 +565,15 @@ class FederatedOrchestrator(BaseOrchestrator):
             t = threading.Thread(target=validate_worker, args=(name, stable_idx))
             t.start()
             threads.append(t)
- 
+
         for t in threads:
             t.join()
- 
+
         with self.connessioni_lock:
             for conn in self.connessioni_attive:
                 try: conn.close()
                 except Exception: pass
- 
+
         rpc_inference_time = time.perf_counter() - rpc_start_time
 
         # Assemblaggio finale: ricomponiamo le liste globali dai risultati
@@ -594,12 +600,12 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
             self._clear_inference_started(job_id)
             return {}
- 
+
         if failed_workers:
             print(f"[{self.orchestrator_name}] [WARN] {len(failed_workers)} worker non hanno risposto: {failed_workers}. Metriche calcolate sui rimanenti.")
- 
+
         total_inference_time = time.perf_counter() - inference_start_time
- 
+
         y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
 
         # y_probs è utilizzabile per l'AUC solo se OGNI worker incluso lo ha
@@ -636,7 +642,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 )
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
- 
+
         # Job concluso: rimuoviamo sia il marcatore di "inferenza avviata" sia il
         # checkpoint di inferenza per-worker. Lasciarli confonderebbe un eventuale
         # rilancio dello stesso job_id (ripresa da uno stato ormai completo).
@@ -652,9 +658,9 @@ class FederatedOrchestrator(BaseOrchestrator):
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
             "metrics": metrics
-        } 
+        }
 
-    
+
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:
             print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
@@ -663,7 +669,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         print(f"[{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
         try:
             n_features = all_trained_trees[0].n_features_in_
-            
+
             if tree_type == "classifier":
                 global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
                 # Stesso fix applicato in centralized.py: classi derivate dagli alberi reali
@@ -678,25 +684,25 @@ class FederatedOrchestrator(BaseOrchestrator):
                 global_model.n_classes_ = len(detected_classes)
             else:
                 global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
-            
+
             global_model.estimators_ = all_trained_trees
             global_model.n_features_in_ = n_features
             global_model.n_outputs_ = 1
-            
+
             model_path = self._resolve_model_path(self.current_job_id)
             self.checkpoint_dao.save(model_path, global_model)
- 
+
             print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
-            
-            
+
+
             return len(all_trained_trees)
-            
+
         except Exception as e:
             print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
             traceback.print_exc()
             return len(all_trained_trees)
-    
-        
+
+
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
 
@@ -717,18 +723,18 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] Checkpoint alberi rimosso da {checkpoint_trees_path}.")
         except Exception as e:
             print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint alberi: {e}")
- 
+
         inference_cp = self._get_inference_checkpoint_path(job_id)
         try:
             self.checkpoint_dao.delete(inference_cp)
         except Exception as e:
             print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint inferenza: {e}")
-    
+
     def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
         return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
- 
+
     def _resolve_model_path(self, job_id: str) -> str:
         """Path del modello globale aggregato, in una sotto-cartella dedicata alla
         modalità federata per evitare collisioni col modello centralizzato in caso
@@ -772,7 +778,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 os.remove(marker)
         except Exception:
             pass
-    
+
     def _load_inference_checkpoint(self, job_id: str):
         path = self._get_inference_checkpoint_path(job_id)
         if self.checkpoint_dao.exists(path):
@@ -783,11 +789,11 @@ class FederatedOrchestrator(BaseOrchestrator):
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
         return []
-    
+
     def select_from_config(self, dataset_type: str = "real"):
         config_filename = f"config_{dataset_type}.json"
         config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
-        
+
         if not os.path.exists(config_path):
             current_file_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
