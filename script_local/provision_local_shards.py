@@ -56,6 +56,15 @@ TARGET_COLUMN = "Label"
 TEST_SIZE = 0.20
 RANDOM_STATE = 123
 
+# Default storico: partizionamento IID, invariato rispetto a prima. "dirichlet" e
+# "by_day" sono opt-in via CLI/env e servono per simulare eterogeneità non-IID tra
+# i worker (vedi FederatedDataSplitter.split_and_shard). alpha è un iperparametro
+# dell'ESPERIMENTO (non del modello) e va quindi tracciato insieme al resto della
+# configurazione dell'esperimento (es. nel config JSON prodotto da run_baseline.py),
+# non hard-codato qui come gli altri parametri sopra.
+DEFAULT_PARTITION_STRATEGY = "iid"
+DEFAULT_ALPHA = 0.5
+
 BASE_CACHE_DIR = "./workers_cache"
 
 
@@ -102,12 +111,15 @@ def _resolve_data_folder(data_folder: str) -> str:
     return data_folder
 
 
-def provision(num_workers: int, data_folder: str, dataset_type: str = "real", force: bool = False) -> None:
+def provision(num_workers: int, data_folder: str, dataset_type: str = "real", force: bool = False,
+              partition_strategy: str = DEFAULT_PARTITION_STRATEGY, alpha: float = DEFAULT_ALPHA,
+              day_column: str = None) -> None:
     print("=====================================================")
     print("   PROVISIONING FEDERATO IN LOCALE (offline, one-shot)")
     print("=====================================================")
     print(f" • Worker target:  {num_workers}")
     print(f" • Dataset type:   {dataset_type}")
+    print(f" • Strategia part.:{partition_strategy}" + (f" (alpha={alpha})" if partition_strategy == "dirichlet" else ""))
     print(f" • Destinazione:   {os.path.abspath(BASE_CACHE_DIR)}")
 
     if dataset_type == "synthetic":
@@ -136,7 +148,14 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
         test_size=TEST_SIZE,
         random_state=RANDOM_STATE,
     )
-    splitter.split_and_shard(data_loader, num_workers=num_workers, environment="local")
+    splitter.split_and_shard(
+        data_loader,
+        num_workers=num_workers,
+        environment="local",
+        partition_strategy=partition_strategy,
+        alpha=alpha,
+        day_column=day_column,
+    )
     print(f"\n[PROVISIONING OK] Shard reali distribuiti nelle cartelle locali dei worker "
           f"sotto '{BASE_CACHE_DIR}'. Il cluster locale è pronto per l'avvio.")
 
@@ -152,6 +171,19 @@ def main() -> None:
                         choices=["real", "synthetic"])
     parser.add_argument("--force", action="store_true",
                         help="Rigenera e sovrascrive gli shard anche se già presenti su disco.")
+    parser.add_argument("--partition-strategy", type=str,
+                        default=os.environ.get("PARTITION_STRATEGY", DEFAULT_PARTITION_STRATEGY),
+                        choices=["iid", "dirichlet", "by_day"],
+                        help="Strategia di partizionamento tra i worker: 'iid' (default, storica), "
+                             "'dirichlet' (eterogeneità sintetica controllata da --alpha), "
+                             "'by_day' (partizionamento naturale per file/giorno di origine).")
+    parser.add_argument("--alpha", type=float, default=float(os.environ.get("ALPHA", DEFAULT_ALPHA)),
+                        help="Iperparametro di eterogeneità per partition_strategy='dirichlet'. "
+                             "Valori piccoli (es. 0.1) = eterogeneità estrema; valori grandi "
+                             "(es. 10+) tendono all'IID.")
+    parser.add_argument("--day-column", type=str, default=os.environ.get("DAY_COLUMN"),
+                        help="Nome della colonna che identifica il giorno/file di origine, "
+                             "richiesta solo con partition_strategy='by_day'.")
     args = parser.parse_args()
 
     provision(
@@ -159,6 +191,9 @@ def main() -> None:
         data_folder=args.data_folder,
         dataset_type=args.dataset_type,
         force=args.force,
+        partition_strategy=args.partition_strategy,
+        alpha=args.alpha,
+        day_column=args.day_column,
     )
 
 
