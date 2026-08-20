@@ -37,7 +37,7 @@ def _train_single_fed_tree(args):
     
     global _fed_child_X, _fed_child_y
     
-    tree_seed, max_depth, max_samples, bootstrap, tree_class, class_weight = args
+    tree_seed, max_depth, max_samples, bootstrap, tree_class, class_weight, max_features = args
     np.random.seed(tree_seed)
     
     n_samples = _fed_child_X.shape[0]
@@ -59,7 +59,7 @@ def _train_single_fed_tree(args):
         y_sampled = _fed_child_y
         
     # 2. Prepariamo i parametri per l'inizializzazione dell'albero in modo dinamico
-    kwargs = {"random_state": tree_seed}
+    kwargs = {"random_state": tree_seed, "max_features": max_features}
     
     if max_depth is not None:
         kwargs["max_depth"] = max_depth
@@ -299,6 +299,11 @@ class FederatedWorker(BaseWorker):
         base_seed = int(hyperparameters.get("random_state", 123))
 
         self.tree_type = hyperparameters.get("tree_type", "classifier")
+        # Fallback ai default "corretti" di RandomForest{Classifier,Regressor}
+        # se il manifesto non specifica esplicitamente max_features.
+        max_features = hyperparameters.get(
+            "max_features", "sqrt" if not self.is_regression() else (1 / 3)
+        )
         self.target_column = "Target" if self.is_regression() else "Label"
         
         print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
@@ -322,7 +327,7 @@ class FederatedWorker(BaseWorker):
         worker_tasks = []
         for i in range(n_estimators_local):
             seed = base_seed + i
-            worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, class_weight))
+            worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, class_weight, max_features))
 
         if n_estimators_local == 1:
             print(f"[{self.worker_name}] Ottimizzazione: 1 solo albero. Calcolo diretto senza Pool.")

@@ -35,7 +35,7 @@ def _init_child_process(X, y):
 def _train_single_tree_processor(args):
     """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
     global _child_X, _child_y
-    tree_seed, max_depth, max_samples, bootstrap, tree_class = args
+    tree_seed, max_depth, max_samples, bootstrap, tree_class, max_features = args
     np.random.seed(tree_seed)
     
     # Preleviamo la shape direttamente dalla memoria condivisa del processo figlio
@@ -48,7 +48,17 @@ def _train_single_tree_processor(args):
     else: 
         X_train, y_train = _child_X, _child_y
    
-    tree = tree_class(splitter="best", max_depth=max_depth) 
+    # max_features attiva il sottocampionamento casuale delle feature ad ogni
+    # split: è ciò che decorrela gli alberi tra loro (Breiman, 2001) e
+    # distingue un vero Random Forest da un semplice bagging di alberi.
+    # random_state passato esplicitamente invece di affidarsi solo al seed
+    # globale np.random.seed sopra, per coerenza col path federato.
+    tree = tree_class(
+        splitter="best",
+        max_depth=max_depth,
+        max_features=max_features,
+        random_state=tree_seed,
+    )
     tree.fit(X_train, y_train)
     return tree
 
@@ -199,12 +209,17 @@ class BaseWorker(Service, ABC):
     def _get_tree_class(self):
         pass
 
-    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type = None):
+    def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
         if tree_type is not None:
             self.tree_type = tree_type
+        # Se l'Orchestratore non specifica max_features (manifesti vecchi/non
+        # aggiornati), ricadiamo sui default "corretti" di un vero Random
+        # Forest invece che su None (= tutte le feature ad ogni split).
+        if max_features is None:
+            max_features = "sqrt" if not self.is_regression() else (1 / 3)
         cached_task_bytes = self._load_task_from_shared_storage(source_info, base_seed, num_trees)
         if cached_task_bytes is not None:
             print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Restituisco i byte.")
@@ -244,7 +259,7 @@ class BaseWorker(Service, ABC):
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
             print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Esecuzione diretta senza Pool.")
-            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class)
+            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features)
 
             global _child_X, _child_y
             _old_child_X, _old_child_y = _child_X, _child_y
@@ -269,7 +284,7 @@ class BaseWorker(Service, ABC):
             worker_tasks = []
             for i in range(num_trees):
                 seed = base_seed + i
-                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class))
+                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features))
             local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")

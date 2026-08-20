@@ -199,7 +199,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
         tree_type = hp.get("tree_type", "classifier")
-
+        # Fallback allineato ai default "corretti" di RandomForest{Classifier,Regressor}
+        # se il manifesto non lo specifica esplicitamente.
+        max_features = hp.get("max_features", "sqrt" if tree_type == "classifier" else 1 / 3)
+        
         # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
@@ -293,7 +296,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 num_trees=quota_chunk,
                                 base_seed=chunk_seed,
                                 max_depth=max_depth,
-                                tree_type=hp.get("tree_type")
+                                tree_type=hp.get("tree_type"),
+                                max_features=max_features
                             )
 
                             # Deserializzazione sicura dei byte trasmessi via rete

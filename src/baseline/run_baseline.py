@@ -36,6 +36,11 @@ SYNTHETIC_REGRESSOR_REFERENCE_HP = {
     "n_estimators": 40,
     "max_depth": None,
     "min_samples_split": 2,
+    # Esplicito perché il default sklearn per RandomForestRegressor è 1.0
+    # (usa TUTTE le feature ad ogni split, cioè bagging puro): senza questo
+    # override anche il regressore "di riferimento" non sarebbe un vero
+    # Random Forest. 1/3 è il valore storicamente suggerito da Breiman (2001).
+    "max_features": 1 / 3,
     "bootstrap": True,
     "max_samples": 1.0,
 }
@@ -116,6 +121,7 @@ def run_baseline():
                 "n_estimators": 10,
                 "max_depth": 10,
                 "min_samples_split": 2,
+                "max_features": "sqrt",
                 "bootstrap": True,
                 "max_samples": 1.0
             }
@@ -241,6 +247,7 @@ def run_baseline():
                 'n_estimators': [10, 20, 30],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
+                'max_features': ['sqrt', 'log2', 0.5],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [True],
                 'max_samples':[0.5,0.7,0.8,1.0]
@@ -249,6 +256,7 @@ def run_baseline():
                 'n_estimators': [10, 20, 30],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
+                'max_features': ['sqrt', 'log2', 0.5],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [False],
             },
@@ -293,6 +301,7 @@ def run_baseline():
                 "n_estimators": int(best_params.get("n_estimators", 10)),
                 "max_depth": best_params.get("max_depth") ,
                 "min_samples_split": int(best_params.get("min_samples_split", 2)),
+                "max_features": best_params.get("max_features", "sqrt"),
                 "class_weight": best_params.get("class_weight", None),
                 "bootstrap": best_booststrap,
                 "max_samples": float(best_params.get("max_samples", 1.0)) if best_booststrap else 1.0,
@@ -328,6 +337,7 @@ def run_baseline():
                 "n_estimators": int(best_hp_reale.get("n_estimators", 10)),
                 "max_depth": best_hp_reale.get("max_depth"),
                 "min_samples_split": int(best_hp_reale.get("min_samples_split", 2)),
+                "max_features": best_hp_reale.get("max_features", "sqrt"),
                 "bootstrap": best_bootstrap,
                 "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
             }
@@ -368,6 +378,10 @@ def run_baseline():
         n_estimators=hp["n_estimators"],
         max_depth=hp["max_depth"],
         min_samples_split=hp["min_samples_split"],
+        # Esplicito e letto dal manifesto invece di affidarsi al default sklearn
+        # (che per il Regressor è 1.0 = nessun subsampling delle feature, cioè
+        # bagging puro, non vero Random Forest).
+        max_features=hp.get("max_features", "sqrt" if user_tree_type == "classifier" else 1 / 3),
         bootstrap=hp["bootstrap"],
         n_jobs=1,
         random_state=RANDOM_SEED
