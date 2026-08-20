@@ -70,6 +70,10 @@ def run_baseline():
     SYNTHETIC_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_synthetic.json")
     dataset_type = "real"
     user_tree_type = "classifier"
+    # Default storico: partizionamento IID, invariato. Sovrascritti sotto se il
+    # boot config specifica una strategia non-IID per l'esperimento federato.
+    partition_strategy = "iid"
+    federated_alpha = 0.5
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
@@ -101,6 +105,13 @@ def run_baseline():
 
                 dataset_type = boot_cfg.get("dataset_type", "real")
                 user_tree_type = boot_cfg.get("tree_type", "classifier")
+                # Iperparametro dell'ESPERIMENTO (partizionamento tra worker federati),
+                # non del modello: registrato qui nel manifesto così che
+                # provision_local_shards.py / provision_federated_shards.py possano
+                # essere lanciati con la stessa strategia usata per generare la
+                # baseline, invece di doverla ripetere a mano.
+                partition_strategy = boot_cfg.get("partition_strategy", "iid")
+                federated_alpha = boot_cfg.get("alpha", 0.5)
                 if boot_cfg:
                     print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except Exception as e:
@@ -249,7 +260,7 @@ def run_baseline():
                 'n_estimators': [10, 20, 30],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
-                'max_features': ['sqrt', 'log2', 0.5],
+                'max_features': ['sqrt'],
                 'criterion': ['gini', 'entropy'],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [True],
@@ -259,7 +270,7 @@ def run_baseline():
                 'n_estimators': [10, 20, 30],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
-                'max_features': ['sqrt', 'log2', 0.5],
+                'max_features': ['sqrt'],
                 'criterion': ['gini', 'entropy'],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [False],
@@ -302,6 +313,14 @@ def run_baseline():
             "correlation_threshold": CORRELATION_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
+            # Iperparametro dell'ESPERIMENTO federato (non del modello): tenuto
+            # separato da "hyperparameters" perché descrive come i dati vengono
+            # ripartiti tra i worker, non l'algoritmo di training. Va passato
+            # tal quale a provision_local_shards.py / provision_federated_shards.py.
+            "federated_partitioning": {
+                "strategy": partition_strategy,
+                "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
+            },
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),
                 "max_depth": best_params.get("max_depth") ,
@@ -360,6 +379,10 @@ def run_baseline():
             "mode": "distributed",
             "dataset_type": "synthetic",
             "dataset_path": "synthetic",
+            "federated_partitioning": {
+                "strategy": partition_strategy,
+                "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
+            },
             **dataset_gen_params,
             "feature_eliminata": dizionario_feature["eliminate"],
             "feature_selezionate": dizionario_feature["salvate"],
