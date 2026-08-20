@@ -35,7 +35,7 @@ if [ -f "$ENV_FILE" ]; then
   ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
   # Timeout RPC (in secondi) verso i worker: letti dal .env se presenti,
   # altrimenti default identici a quelli finora hardcoded nel codice
-  # dell'orchestratore (600s training, 300s inferenza).
+  # dell'orchestratore (1800s training, 900s inferenza).
   ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
   ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
 
@@ -44,16 +44,16 @@ if [ -f "$ENV_FILE" ]; then
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
   DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
   DETECTED_WORKERS="${ENV_NUM_WORKERS:-2}"
-  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-600}"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-300}"
+  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800s}"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900s}"
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato. Uso parametri di fallback."
   DETECTED_MODE="${1:-centralized}"
   DETECTED_REGION="us-east-1"
   DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
   DETECTED_WORKERS="2"
-  DETECTED_RPC_SYNC_TIMEOUT="600"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="300"
+  DETECTED_RPC_SYNC_TIMEOUT="1800s"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="900s"
 fi
 
 REGION="$DETECTED_REGION"
