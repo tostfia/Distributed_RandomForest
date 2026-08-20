@@ -65,8 +65,18 @@ class CICIDSFeatureSelector:
         tutte_le_feature = [col for col in train_df.columns if col != self.target_column]
         feature_salvate = [col for col in tutte_le_feature if col not in self.columns_to_drop_]
 
+        # "eliminate" resta l'unione di entrambi i criteri (retrocompatibile con
+        # chi legge solo quella chiave), ma teniamo separate le due categorie:
+        # sono concettualmente diverse. La rimozione per varianza zero è
+        # ineccepibile (una feature costante non porta MAI informazione, per
+        # nessun modello). Il filtro per bassa correlazione LINEARE, invece, può
+        # scartare feature predittive solo in interazione/non linearmente — un
+        # Random Forest le sfrutterebbe comunque. Separarle rende l'effetto del
+        # secondo filtro misurabile e ispezionabile a parte.
         self.feature_summary_ = {
             "eliminate": self.columns_to_drop_,
+            "eliminate_varianza_zero": constant_features,
+            "eliminate_bassa_correlazione": low_corr_features,
             "salvate": feature_salvate
         }
 

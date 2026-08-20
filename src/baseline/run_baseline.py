@@ -299,6 +299,7 @@ def run_baseline():
             "mode": "distributed",
             "dataset_type": dataset_type,
             "dataset_path": data_folder if dataset_type == "real" else "synthetic",
+            "correlation_threshold": CORRELATION_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
             "hyperparameters": {
