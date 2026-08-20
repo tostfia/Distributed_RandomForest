@@ -7,7 +7,7 @@ import numpy as np
 from rpyc import Service, ThreadedServer
 import threading
 import time
-import pickle 
+import pickle
 import boto3
 import json
 from botocore.exceptions import ClientError
@@ -20,13 +20,13 @@ _child_y  = None
 
 def _init_child_process(X, y):
     """Inizializza il processo figlio salvando i dati in memoria e isolando i core."""
-    
+
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
-    
+
     global _child_X, _child_y
     _child_X = X
     _child_y = y
@@ -37,7 +37,7 @@ def _train_single_tree_processor(args):
     global _child_X, _child_y
     tree_seed, max_depth, max_samples, bootstrap, tree_class, max_features, min_samples_split, class_weight, criterion = args
     np.random.seed(tree_seed)
-    
+
     # Preleviamo la shape direttamente dalla memoria condivisa del processo figlio
     n_samples = _child_X.shape[0]
 
@@ -56,7 +56,7 @@ def _train_single_tree_processor(args):
         # Senza bootstrap ogni albero vede l'intero training set: non esiste un
         # sottoinsieme "mai visto" su cui stimare l'OOB.
         oob_indices = np.array([], dtype=np.int64)
-   
+
     # max_features attiva il sottocampionamento casuale delle feature ad ogni
     # split: è ciò che decorrela gli alberi tra loro (Breiman, 2001) e
     # distingue un vero Random Forest da un semplice bagging di alberi.
@@ -83,21 +83,21 @@ def _train_single_tree_processor(args):
     tree.oob_sample_indices_ = oob_indices
     return tree
 
-class BaseWorker(Service, ABC): 
+class BaseWorker(Service, ABC):
     def __init__(
-        self, 
-        worker_name: str, 
-        queue_name: str, 
-        tree_class_reference, 
-        url_dataset: str = None, 
-        max_samples=None, 
+        self,
+        worker_name: str,
+        queue_name: str,
+        tree_class_reference,
+        url_dataset: str = None,
+        max_samples=None,
         bootstrap: bool = True
     ):
-        super().__init__() 
+        super().__init__()
         # 1. Carichiamo la configurazione centralizzata dal file .env
         self.cfg = SystemConfig()
         self.environment = self.cfg.env
-        
+
         self.worker_name = worker_name
         self.queue_name = queue_name
         self.url_dataset = url_dataset
@@ -130,7 +130,7 @@ class BaseWorker(Service, ABC):
         # o se siamo su AWS, dobbiamo ascoltare su tutte le interfacce (0.0.0.0)
         if self.environment == "aws" or os.environ.get("RUNNING_IN_DOCKER", "false") == "true":
             return "0.0.0.0"
-        
+
         # Locale puro senza Docker
         return "127.0.0.1"
 
@@ -155,7 +155,7 @@ class BaseWorker(Service, ABC):
             host_to_register = host_to_bind
 
         print(f"[{self.worker_name}] Binding su: {host_to_bind}, Registrazione su Registry come: {host_to_register}:{port}")
-        
+
         # Registrazione del Worker sul Service Registry
         ServiceRegistry.register_worker(worker_name=self.worker_name, host=host_to_register, port=port)
 
@@ -167,7 +167,7 @@ class BaseWorker(Service, ABC):
         protocol_config = {
             'allow_public_attr': True,
             'allow_pickle': True,
-            'sync_request_timeout': 600, 
+            'sync_request_timeout': 600,
             'keepalive': True
         }
 
@@ -191,14 +191,14 @@ class BaseWorker(Service, ABC):
             heartbeat_thread.join(timeout=2)
 
             self.release_index_claim()
-            
+
             if self._cached_pool is not None:
                 self._cached_pool.close()
                 self._cached_pool.join()
                 print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
             try:
                 ServiceRegistry.deregister_worker(self.worker_name)
-                print(f"[+] [{self.worker_name}] Server arrestato e worker rimosso dal Service Registry.") 
+                print(f"[+] [{self.worker_name}] Server arrestato e worker rimosso dal Service Registry.")
             except Exception as e:
                 print(f"[!] [{self.worker_name}] Errore durante la deregistrazione: {str(e)}")
 
@@ -212,7 +212,7 @@ class BaseWorker(Service, ABC):
                 if stop_event.is_set():
                     break
                 time.sleep(1)
-    
+
     def on_connect(self, conn):
         peer_info = "Orchestratore"
         if hasattr(conn, '_config') and 'peer' in conn._config:
@@ -251,32 +251,38 @@ class BaseWorker(Service, ABC):
         tree_class = self._get_tree_class()
 
         # 2. CALCOLO DINAMICO DEI CORE
-        # NOTA: la divisione dei core tra worker deve avvenire ogni volta che più worker
-        # condividono la STESSA macchina fisica, indipendentemente dal fatto che il flag
-        # .env sia "aws" o "local" (quel flag indica solo quale storage/coda usare,
-        # non se i worker sono co-locati). Rileviamo la co-locazione interrogando
-        # sempre il ServiceRegistry; se la query fallisce o c'è un solo worker,
-        # ricadiamo sulla regola N-1 standard.
+        # Su ECS Fargate ogni task worker ha la propria CPU DEDICATA E ISOLATA
+        # (quella assegnata con WORKER_CPU nella task definition in deploy.sh):
+        # non condivide MAI la macchina fisica con gli altri worker del cluster,
+        # indipendentemente da quanti risultano registrati nel ServiceRegistry.
+        # La divisione dei core "per co-locazione" ha senso SOLO in locale/Docker
+        # Compose, dove più container worker girano davvero sulla stessa macchina
+        # fisica e si contendono gli stessi core. Su AWS usiamo quindi sempre
+        # tutta la CPU disponibile localmente al task, senza dividerla per il
+        # numero di worker attivi nel fleet (che sono isolati gli uni dagli altri).
         totale_core_macchina = os.cpu_count() or 1
 
-        try:
-            workers_attivi = ServiceRegistry.get_available_workers(self.environment)
-            num_workers = max(1, len(workers_attivi))
-
-            if num_workers > 1:
-                # Più worker rilevati: dividiamo i core disponibili tra tutti quelli
-                # effettivamente attivi, per evitare sovra-allocazione quando sono
-                # co-locati sulla stessa macchina fisica.
-                core_disponibili_rete = max(1, totale_core_macchina - 1)
-                allocated_cores = max(1, int(core_disponibili_rete / num_workers))
-                print(f"[{self.worker_name}] [LOG] Rilevati {num_workers} worker attivi (ambiente: {self.environment}).")
-                print(f"[{self.worker_name}] [LOG] Allocazione dinamica: {allocated_cores} processi per questo pool.")
-            else:
-                # Un solo worker rilevato: presumibilmente ha la macchina tutta per sé.
-                allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
-        except Exception as e:
-            print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+        if self.environment == "aws":
             allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
+        else:
+            try:
+                workers_attivi = ServiceRegistry.get_available_workers(self.environment)
+                num_workers = max(1, len(workers_attivi))
+
+                if num_workers > 1:
+                    # Più worker rilevati sulla STESSA macchina fisica (locale/Docker
+                    # Compose): dividiamo i core disponibili tra tutti quelli
+                    # effettivamente attivi, per evitare sovra-allocazione.
+                    core_disponibili_rete = max(1, totale_core_macchina - 1)
+                    allocated_cores = max(1, int(core_disponibili_rete / num_workers))
+                    print(f"[{self.worker_name}] [LOG] Rilevati {num_workers} worker attivi (ambiente: {self.environment}).")
+                    print(f"[{self.worker_name}] [LOG] Allocazione dinamica: {allocated_cores} processi per questo pool.")
+                else:
+                    # Un solo worker rilevato: presumibilmente ha la macchina tutta per sé.
+                    allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
+            except Exception as e:
+                print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+                allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
 
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
@@ -297,12 +303,12 @@ class BaseWorker(Service, ABC):
                     self._cached_pool.close()
                     self._cached_pool.join()
                     print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
-                
+
                 pool_size = min(num_trees, allocated_cores)
                 print(f"[WORKER] Creazione nuovo Pool di processi calibrato a {pool_size} processi...")
                 self._cached_pool = Pool(processes=pool_size, initializer=_init_child_process, initargs=(X, y))
                 self._cached_pool_source = source_info
-                
+
             print(f"[WORKER] Pool di processi pronto. Avvio addestramento di {num_trees} alberi...")
             worker_tasks = []
             for i in range(num_trees):
@@ -327,7 +333,7 @@ class BaseWorker(Service, ABC):
             raise
         print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio completato.")
         return serialized_task
-    
+
     def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None, tree_type=None, global_classes=None):
         """
         Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola
@@ -341,7 +347,7 @@ class BaseWorker(Service, ABC):
         1/n_alberi. Per la regressione il comportamento resta invariato (predict).
         """
         print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
-        
+
         # 1. Ricostruiamo gli alberi inviati dal Master
         trees = pickle.loads(serialized_trees)
         print(f"[{self.worker_name}] Decodificati {len(trees)} alberi per il calcolo.")
@@ -387,10 +393,10 @@ class BaseWorker(Service, ABC):
         else:
             print(f"[{self.worker_name}] Avvio inferenza nativa lineare (hard predict) su {len(trees)} alberi...")
             sub_predictions = [tree.predict(X_eval) for tree in trees]
-            
+
         print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
         return pickle.dumps(sub_predictions)
-    
+
 
     def _get_task_storage_paths(self, source_info: str, base_seed: int, num_trees: int):
         """
@@ -400,33 +406,33 @@ class BaseWorker(Service, ABC):
         # Estrazione sicura del job_id dal path del file (funziona sia per S3 che locale)
         filename = os.path.basename(source_info) # es: shared_train_12345.csv
         job_id = filename.replace("shared_train_", "").replace(".csv", "")
-        
+
         local_dir = os.path.join("./.local_storage", "trained_tasks")
         base_name = f"task_{job_id}_seed_{base_seed}_trees_{num_trees}"
         local_meta_path = os.path.join(local_dir, base_name + ".meta.json")
         local_bin_path = os.path.join(local_dir, base_name + ".bin")
-        
+
         s3_bucket = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
         s3_key = f"tasks/{job_id}/task_seed_{base_seed}_trees_{num_trees}.pkl"
-        
+
         return local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key
-    
+
     def _load_task_from_shared_storage(self, source_info: str, base_seed: int, num_trees: int) -> bytes:
         """Tenta di recuperare i byte serializzati dell'INTERO TASK dallo storage condiviso."""
         local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
-        
+
         if self.environment == "local":
             if os.path.exists(local_bin_path):
                 try:
-                    
+
                     with open(local_bin_path, "rb") as f:
                         return f.read()
                 except Exception as e:
                     print(f"[{self.worker_name}] Errore durante la lettura del task binario locale: {e}")
         else:
-                       
+
             try:
-                
+
                 s3_client = boto3.client("s3")
                 response = s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
                 print(f"[{self.worker_name}] [TASK HIT] Trovato task su S3: s3://{s3_bucket}/{s3_key}")
@@ -436,22 +442,22 @@ class BaseWorker(Service, ABC):
                     print(f"[{self.worker_name}] Errore S3 per il task seed {base_seed}: {e}")
             except Exception as e:
                 print(f"[{self.worker_name}] Errore imprevisto nel recupero del task da S3: {e}")
-                
+
         return None
-    
+
     def _save_task_to_shared_storage(self, source_info: str, base_seed: int, num_trees: int, serialized_trees_bytes: bytes):
         """Persiste in modo atomico i byte dell'intero TASK nello storage condiviso."""
         local_dir, local_meta_path, local_bin_path, s3_bucket, s3_key = self._get_task_storage_paths(source_info, base_seed, num_trees)
-        
+
         if self.environment == "local":
             try:
-                
+
                 os.makedirs(local_dir, exist_ok=True)
                 tmp_bin_path = local_bin_path + ".tmp"
                 with open(tmp_bin_path, "wb") as f:
                     f.write(serialized_trees_bytes)
                 os.replace(tmp_bin_path, local_bin_path)
-                
+
                 tmp_meta = local_meta_path + ".tmp"
                 with open(tmp_meta, "w", encoding="utf-8") as f:
                     json.dump({
