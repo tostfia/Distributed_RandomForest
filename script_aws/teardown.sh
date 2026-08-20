@@ -46,34 +46,22 @@ fi
 #   e li lascia lì apposta per riavvii rapidi (vedi messaggio finale):
 #   usa questo flag quando invece vuoi ripulirli definitivamente perché
 #   non riprenderai più quella modalità sullo stesso cluster.
+# --purge-models: elimina anche i modelli salvati su S3
+#   (s3://$BUCKET_NAME/saved_models/). NON attivo di default: sono
+#   l'output vero e proprio dei training e per scelta vanno cancellati
+#   solo esplicitamente, a mano o con questo flag, mai in automatico.
 # ---------------------------------------------------------------------
 PURGE_SHARDS=0
 PURGE_LEGACY_MODE=0
+PURGE_MODELS=0
 for arg in "$@"; do
   case "$arg" in
     --purge-shards) PURGE_SHARDS=1 ;;
     --purge-legacy-mode) PURGE_LEGACY_MODE=1 ;;
+    --purge-models) PURGE_MODELS=1 ;;
   esac
 done
 
-# ---------------------------------------------------------------------
-# Attende la RIMOZIONE REALE (non la stabilizzazione) di un service ECS
-# già colpito da 'delete-service --force'.
-#
-# BUG CORRETTO: la versione precedente chiamava 'aws ecs wait
-# services-stable' sugli stessi service appena eliminati. Quel waiter è
-# pensato per un service che ESISTE ancora e deve raggiungere lo stato a
-# regime (status ACTIVE, runningCount == desiredCount) — su un service in
-# fase di eliminazione lo stato passa per DRAINING e poi sparisce, quindi
-# il waiter fallisce quasi subito con un "terminal failure state" appena
-# osserva DRAINING. Con 'set -e' in testa allo script, quel fallimento
-# interrompeva TUTTO il teardown prima ancora di arrivare alla pulizia di
-# DynamoDB/SQS/S3 più sotto.
-#
-# Qui invece facciamo un polling esplicito sul runningCount del service:
-# consideriamo la pulizia completa quando describe-services non trova più
-# il service (rimosso del tutto) oppure lo trova con runningCount==0.
-# ---------------------------------------------------------------------
 wait_for_service_removal() {
   local svc="$1"
   local max_attempts=60   # 60 tentativi * 10s = 10 minuti di margine
@@ -109,7 +97,7 @@ wait_for_service_removal() {
 
 # ---------------------------------------------------------------------
 # Svuota TUTTI gli item di una tabella DynamoDB, senza cancellare la
-# tabella stessa (schema, throughput, ecc. restano intatte).
+# tabella stessa (schema, throughput, ecc. restano intatti).
 # Richiede 'jq' installato sulla macchina che lancia lo script.
 # ---------------------------------------------------------------------
 purge_dynamodb_table() {
@@ -219,7 +207,7 @@ echo "==> [3/5] Svuotamento stato applicativo su DynamoDB..."
 echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks"
 echo "    Nota: vengono rimossi solo gli ITEM, le tabelle restano intatte."
 
-# Elenco confermato dalla console DynamoDB (6 tabelle totali usate dal sistema)
+# Elenco confermato dalla console DynamoDB (7 tabelle totali usate dal sistema)
 DYNAMO_TABLES=(
   "workers_registry"
   "orchestrators_registry"
@@ -245,10 +233,54 @@ for q in "${QUEUES[@]}"; do
   fi
 done
 
-echo "==> [5/5] Pulizia file temporanei su S3..."
-# Cancella SOLTANTO il contenuto della sottocartella temp/
-aws s3 rm "s3://$BUCKET_NAME/temp/" --recursive --region "$REGION" > /dev/null 2>&1 || echo "    (Nessun file temporaneo da rimuovere)"
-echo "    S3 ripulito: salvaguardati i dati in 'real/' e i modelli in 'models/'."
+# ---------------------------------------------------------------------
+# BUG CORRETTO: il vecchio step [5/5] puliva solo "temp/", un prefisso
+# che in realtà non esiste mai nel bucket (verificato dalla console S3):
+# era quindi un no-op silenzioso, e i veri artefatti di test (job con
+# timestamp nel nome, mai sovrascritti) si accumulavano indefinitamente.
+#
+# Prefissi PULITI ad ogni teardown (dati temporanei/di run, rigenerabili
+# automaticamente al prossimo test):
+#   - distributed_trains/  (chunk di training caricati per il job)
+#   - distributed_tests/   (chunk di test caricati per il job)
+#   - tasks/                (stato/metadati dei singoli task RPC)
+#   - checkpoints/          (normalmente auto-pulito a fine job riuscito,
+#                            qui ripuliamo eventuali orfani da job falliti/interrotti)
+#
+# Prefissi SALVAGUARDATI di default (mai toccati da questo script):
+#   - real/                 dataset sorgente
+#   - federated_shards/     shard federati (rigenerarli richiede risplittare
+#                            il dataset da zero: usa --purge-shards se serve)
+#   - federated_config/     configurazione dello split federato
+#   - saved_models/         output vero e proprio dei training (modelli .pkl):
+#                            cancellazione solo esplicita, a mano o con --purge-models
+#   - metrics/, test_reports/  risultati dei test, servono per i confronti
+# ---------------------------------------------------------------------
+echo "==> [5/5] Pulizia degli artefatti temporanei di test su S3..."
+for prefix in "distributed_trains/" "distributed_tests/" "tasks/" "checkpoints/"; do
+  aws s3 rm "s3://$BUCKET_NAME/$prefix" --recursive --region "$REGION" > /dev/null 2>&1 \
+    && echo "    Ripulito: $prefix" \
+    || echo "    (${prefix}: già vuoto o non presente)"
+done
+
+if [ "$PURGE_SHARDS" -eq 1 ]; then
+  echo "    --purge-shards attivo: rimuovo anche federated_shards/ e federated_config/..."
+  aws s3 rm "s3://$BUCKET_NAME/federated_shards/" --recursive --region "$REGION" > /dev/null 2>&1 \
+    && echo "    Ripulito: federated_shards/" \
+    || echo "    (federated_shards/: già vuoto o non presente)"
+  aws s3 rm "s3://$BUCKET_NAME/federated_config/" --recursive --region "$REGION" > /dev/null 2>&1 \
+    && echo "    Ripulito: federated_config/" \
+    || echo "    (federated_config/: già vuoto o non presente)"
+fi
+
+if [ "$PURGE_MODELS" -eq 1 ]; then
+  echo "    --purge-models attivo: rimuovo anche saved_models/..."
+  aws s3 rm "s3://$BUCKET_NAME/saved_models/" --recursive --region "$REGION" > /dev/null 2>&1 \
+    && echo "    Ripulito: saved_models/" \
+    || echo "    (saved_models/: già vuoto o non presente)"
+fi
+
+echo "    Salvaguardati (default): real/, federated_shards/, federated_config/, saved_models/, metrics/, test_reports/."
 
 echo ""
 echo "========================================================================"
@@ -257,7 +289,7 @@ echo "========================================================================"
 echo "Fatto! AWS Fargate ha rimosso con successo ogni container dal cluster."
 echo "Le tabelle DynamoDB (workers/orchestrators/job) sono state svuotate: il prossimo"
 echo "deploy riparte da una tela pulita, senza job o registrazioni fantasma."
-echo "I dataset in 'real/' e i modelli '.pkl' in 'models/' sono al sicuro."
+echo "I dataset in 'real/' e i modelli in 'saved_models/' sono al sicuro (salvo --purge-models)."
 echo "I servizi restano configurati (task definition, cluster, ECR)"
 echo "ma desired-count=0 significa nessun task Fargate attivo -> nessun costo di compute."
 echo ""
