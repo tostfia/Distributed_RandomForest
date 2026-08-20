@@ -3,6 +3,8 @@ import os
 import subprocess
 import time
 
+import boto3
+
 from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
 from src.testing.scenarios.fault import FaultToleranceScenario
@@ -93,7 +95,14 @@ class TestEngine:
     def _start_local_workers(self):
         docker = os.environ.get("RUNNING_IN_DOCKER")
         if docker == "true":
-            print("[ENGINE] Ambiente DOCKER rilevato: avviati già i worker come container...")
+            # RUNNING_IN_DOCKER=true è corretto sia in Docker Compose locale sia
+            # su AWS/ECS Fargate (i worker girano comunque dentro container), ma
+            # va distinto nel messaggio per non confondere i due ambienti nei log
+            # e nei report di test.
+            if self.env == "aws":
+                print("[ENGINE] Ambiente AWS/ECS rilevato: worker già avviati come task Fargate...")
+            else:
+                print("[ENGINE] Ambiente DOCKER rilevato: avviati già i worker come container...")
             return
         else:
             num_workers = int(os.environ.get("NUM_WORKERS", 2))
@@ -224,9 +233,10 @@ class TestEngine:
         print(json.dumps(self.global_reports, indent=2))
         print("==================================================")
 
-
         exec_mode = os.environ.get("RUNNING_IN_DOCKER", "false")
-        if exec_mode == "true":
+        if self.env == "aws":
+            output_dir = "./test_reports/aws"
+        elif exec_mode == "true":
             output_dir = "./test_reports/docker"
         else:
             output_dir = "./test_reports/local"
@@ -244,16 +254,6 @@ class TestEngine:
         except IOError as e:
             print(f"[ENGINE ERRORE] Impossibile salvare il report su disco: {e}")
 
-        # ------------------------------------------------------------
-        # Upload su S3 (solo ambiente AWS): il task ECS che esegue questo
-        # engine è effimero (run-task one-off via run_test_engine_ecs.sh,
-        # fermato a fine sessione) — il file scritto sopra vive solo nel
-        # filesystem del container e sparirebbe insieme al task. Qui lo
-        # duplichiamo su S3 (stesso bucket dei dataset) così il report
-        # resta consultabile dopo che il task è stato fermato. Fallisce
-        # in modo silenzioso (solo un warning) per non rompere l'engine
-        # se boto3/bucket non sono disponibili per qualche motivo.
-        # ------------------------------------------------------------
         if self.env == "aws":
             self._upload_report_to_s3(output_path, test_name)
 
@@ -263,7 +263,6 @@ class TestEngine:
             print("[ENGINE] [WARN] DATASETS_BUCKET_NAME non impostata: salto l'upload del report su S3.")
             return
         try:
-            import boto3
             region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
             s3_client = boto3.client("s3", region_name=region)
             timestamp = int(time.time())

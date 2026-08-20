@@ -222,6 +222,16 @@ class BaseWorker(Service, ABC):
     def on_disconnect(self, conn):
         print(f"[-] Connessione chiusa dall'Orchestratore.")
 
+    def exposed_ping(self):
+        """
+        Endpoint RPC leggero, senza alcun accesso a dataset/ETL/training:
+        serve esclusivamente a misurare la latenza di rete/RPyC pura tra
+        Orchestratore e Worker (vedi BaseOrchestrator._measure_rpc_ping_stats).
+        A differenza di exposed_train_subset_forest, qui il tempo di risposta
+        riflette SOLO il round-trip RPC, non il tempo di preparazione dati.
+        """
+        return "pong"
+
     @abstractmethod
     def _load_data(self, source_info):
         pass
@@ -480,8 +490,6 @@ class BaseWorker(Service, ABC):
             start_ts = time.time()
             try:
                 s3_client = boto3.client("s3")
-                from boto3.s3.transfer import TransferConfig
-                import io
                 s3_client.put_object(
                     Bucket=s3_bucket,
                     Key=s3_key,

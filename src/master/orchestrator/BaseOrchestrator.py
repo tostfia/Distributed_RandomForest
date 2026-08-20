@@ -2,9 +2,11 @@ from abc import ABC, abstractmethod
 import fcntl
 import json
 import os
+import statistics
 import sys
 import time
 import numpy as np
+import rpyc
 import signal
 import threading
 from src.dataset.metrics_dao import MetricsDAOFactory
@@ -37,7 +39,85 @@ class BaseOrchestrator(ABC):
         except Exception as e:
             print(f"[{self.orchestrator_name.upper()}] Errore inizializzazione servizi: {e}")
             sys.exit(1)
-            
+
+    def _measure_rpc_ping_stats(self, num_probes: int = 5) -> dict:
+        """
+        Misura la latenza RPC PURA (round-trip di exposed_ping, senza alcun
+        ETL/training coinvolto) verso ogni worker attualmente disponibile.
+
+        A differenza delle misure basate su _execute_training_step (che
+        includono sempre l'intero ETL prima di contattare il worker), qui il
+        tempo cronometrato è ESCLUSIVAMENTE quello del round-trip RPyC:
+        apertura già esclusa dal timing (fuori dal ciclo), viene misurato
+        solo request/response di root.ping() per num_probes volte per worker.
+
+        Condiviso da CentralizedOrchestrator e FederatedOrchestrator: usa lo
+        stesso pattern di connessione (ServiceRegistry + rpyc.connect +
+        self.connessioni_lock/self.connessioni_attive) già impiegato nei
+        rispettivi _execute_training_step.
+
+        Ritorna un dizionario con le statistiche aggregate su TUTTI i worker
+        e le probe, più la media per singolo worker (utile per individuare
+        eventuali worker anomali/più lenti degli altri).
+        """
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        per_worker_avg_ms = {}
+        samples_ms = []
+
+        if not available_workers:
+            print(f"[{self.orchestrator_name}] [PING] Nessun worker disponibile per la misura di latenza pura.")
+            return {
+                "samples_ms": [], "min_ms": None, "max_ms": None,
+                "avg_ms": None, "median_ms": None, "per_worker_avg_ms": {},
+            }
+
+        for w_name, w_info in available_workers.items():
+            worker_conn = None
+            worker_samples = []
+            try:
+                worker_conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={'allow_pickle': True, 'sync_request_timeout': 30, 'keepalive': True}
+                )
+                with self.connessioni_lock:
+                    self.connessioni_attive.append(worker_conn)
+
+                for _ in range(num_probes):
+                    t0 = time.perf_counter()
+                    worker_conn.root.ping()
+                    worker_samples.append((time.perf_counter() - t0) * 1000)
+
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [PING] Errore contattando {w_name}: {e}")
+            finally:
+                if worker_conn:
+                    with self.connessioni_lock:
+                        if worker_conn in self.connessioni_attive:
+                            self.connessioni_attive.remove(worker_conn)
+                    try:
+                        worker_conn.close()
+                    except Exception:
+                        pass
+
+            if worker_samples:
+                per_worker_avg_ms[w_name] = round(statistics.mean(worker_samples), 3)
+                samples_ms.extend(worker_samples)
+
+        if not samples_ms:
+            return {
+                "samples_ms": [], "min_ms": None, "max_ms": None,
+                "avg_ms": None, "median_ms": None, "per_worker_avg_ms": per_worker_avg_ms,
+            }
+
+        return {
+            "samples_ms": [round(s, 3) for s in samples_ms],
+            "min_ms": round(min(samples_ms), 3),
+            "max_ms": round(max(samples_ms), 3),
+            "avg_ms": round(statistics.mean(samples_ms), 3),
+            "median_ms": round(statistics.median(samples_ms), 3),
+            "per_worker_avg_ms": per_worker_avg_ms,
+        }
+
     def _track_task(self, task_id, job_id: str, worker_name: str, status: str):
 
         try:

@@ -65,7 +65,17 @@ class NetworkSimulationScenario(BaseTestScenario):
         # run()), lasciato solo per compatibilità con gli helper del ramo locale.
         self.running_in_docker = os.environ.get("RUNNING_IN_DOCKER", "false").lower() == "true"
 
-        if self.running_in_docker:
+        if self.aws_env:
+            # Su AWS il ramo tc non viene mai usato (vedi run(), che fa
+            # short-circuit su _run_aws_measurement_only prima di toccare
+            # self.tc_interface): il messaggio "Docker" qui sarebbe
+            # fuorviante, anche se RUNNING_IN_DOCKER=true è corretto (i
+            # worker girano comunque come task Fargate containerizzati).
+            # default_interface resta comunque definita (valore inerte) per
+            # sicurezza, nel caso questo attributo venga letto altrove in futuro.
+            print("[INFO] Esecuzione su AWS/ECS: tc non applicabile (vedi run()), CAP_NET_ADMIN non disponibile su Fargate.")
+            default_interface = "eth0"
+        elif self.running_in_docker:
             print("[INFO] Esecuzione in Docker: tc senza sudo (capability CAP_NET_ADMIN).")
             default_interface = "eth0"
         else:
@@ -257,6 +267,15 @@ class NetworkSimulationScenario(BaseTestScenario):
             else:
                 print("[INFO] latency_seconds=0 e packet_loss_rate=0: nessuna regola tc applicata.")
 
+            # Ping puro (nessun ETL): con tc_applied=True riflette anche il
+            # delay artificiale iniettato sull'interfaccia, a differenza della
+            # misura sotto (probe_time) che lo annega nel tempo di ETL.
+            pure_ping_stats = self.orchestrator._measure_rpc_ping_stats(num_probes=5)
+            if pure_ping_stats["avg_ms"] is not None:
+                print(f"[PING] Latenza RPC PURA (nessun ETL): "
+                      f"min={pure_ping_stats['min_ms']}ms avg={pure_ping_stats['avg_ms']}ms "
+                      f"median={pure_ping_stats['median_ms']}ms max={pure_ping_stats['max_ms']}ms")
+
             # Misura di riferimento (include ETL, NON è la sola latenza RPC —
             # vedi docstring di _measure_rpc_baseline)
             probe_time = self._measure_rpc_baseline()
@@ -297,6 +316,7 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "execution_mode": "local",
                 "applied_latency_ms": latency_ms if tc_applied else 0,
                 "applied_loss_percent": loss_percentage if tc_applied else 0,
+                "pure_rpc_ping_latency_ms": pure_ping_stats,
                 "probe_job_total_time_ms": round(probe_time * 1000, 2),
                 "duration_seconds": round(duration, 2),
                 "tc_rules_successfully_injected": tc_applied,
@@ -325,6 +345,15 @@ class NetworkSimulationScenario(BaseTestScenario):
               "'fis:ListExperimentTemplates' -> AccessDeniedException). Nessun delay/loss viene "
               "iniettato: questo scenario misura invece la latenza RPC REALE tra i task "
               "(leader<->worker, stessa VPC) su più probe consecutivi.")
+
+        # Ping puro (nessun ETL, solo round-trip RPyC): isola la vera latenza
+        # di rete tra orchestratore e worker, a differenza della misura sotto
+        # (probe_stats) che include comunque l'ETL a partire dal secondo probe.
+        pure_ping_stats = self.orchestrator._measure_rpc_ping_stats(self.AWS_PROBE_COUNT)
+        if pure_ping_stats["avg_ms"] is not None:
+            print(f"[NETWORK AWS] Latenza RPC PURA (ping, nessun ETL): "
+                  f"min={pure_ping_stats['min_ms']}ms avg={pure_ping_stats['avg_ms']}ms "
+                  f"median={pure_ping_stats['median_ms']}ms max={pure_ping_stats['max_ms']}ms")
 
         probe_stats = self._measure_rpc_baseline_stats_aws(self.AWS_PROBE_COUNT)
         print(f"[NETWORK AWS] Latenza RPC osservata (job di probe, ETL incluso dopo il primo): "
@@ -369,6 +398,7 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "(fis:ListExperimentTemplates -> AccessDeniedException per le credenziali "
                 "AWS Academy Learner Lab di questo progetto)."
             ),
+            "pure_rpc_ping_latency_ms": pure_ping_stats,
             "measured_real_rpc_latency_ms": probe_stats,
             "duration_seconds": round(duration, 2),
             "throughput_trees_per_second": round(throughput, 2),
