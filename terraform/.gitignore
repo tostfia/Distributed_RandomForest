@@ -1,0 +1,15 @@
+# State Terraform: contiene ARN, ID di risorse e potenzialmente dati
+# sensibili. Non va MAI condiviso via repository/email.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Variabili personalizzate: puoi tenerlo se non contiene segreti, ma è
+# buona norma escluderlo comunque per evitare di sovrascrivere quello di
+# chi clona il repo.
+terraform.tfvars
+
+*.tfplan
+crash.log
+crash.*.log

@@ -54,6 +54,36 @@ if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; t
   exit 1
 fi
 
+# ---------------------------------------------------------------------
+# [SAFETY NET] Cleanup automatico del task one-off in QUALSIASI scenario
+# di uscita dello script: successo, errore (set -e), Ctrl+C, terminale
+# chiuso (SIGHUP). Senza questo trap, il prompt interattivo di stop a
+# fine script (vedi in fondo) viene raggiunto solo in caso di uscita
+# "pulita" dalla sessione ecs execute-command: un Ctrl+C durante quella
+# sessione, o un qualunque errore nei passi precedenti, lascerebbe il
+# task (sleep infinity, 2 vCPU/8GB) acceso indefinitamente senza che tu
+# te ne accorga.
+#
+# LEAVE_RUNNING viene alzato a 1 SOLO se rispondi esplicitamente "n" al
+# prompt finale: la tua scelta di lasciarlo acceso viene sempre rispettata,
+# il trap non la sovrascrive.
+# ---------------------------------------------------------------------
+TASK_ARN=""
+LEAVE_RUNNING=0
+
+cleanup() {
+  local exit_code=$?
+  if [ -n "$TASK_ARN" ] && [ "$LEAVE_RUNNING" -eq 0 ]; then
+    echo ""
+    echo "[CLEANUP] Fermo il task del test-engine ($TASK_ARN) per evitare costi Fargate inutili..."
+    aws ecs stop-task --cluster "$CLUSTER_NAME" --task "$TASK_ARN" --region "$REGION" > /dev/null 2>&1 \
+      && echo "[CLEANUP] Task fermato." \
+      || echo "[CLEANUP] (task già fermo, non trovato, o stop già eseguito: ok)"
+  fi
+  exit $exit_code
+}
+trap cleanup EXIT INT TERM HUP
+
 echo "===================================================================="
 echo " RUN TEST ENGINE (ECS Exec)  -  forest-cluster ($REGION)"
 echo "===================================================================="
@@ -221,7 +251,9 @@ STOP_ANSWER="${STOP_ANSWER:-Y}"
 if [[ "$STOP_ANSWER" =~ ^[Yy]$ ]]; then
   aws ecs stop-task --cluster "$CLUSTER_NAME" --task "$TASK_ARN" --region "$REGION" > /dev/null
   echo "Task fermato."
+  TASK_ARN=""   # già fermato qui: evita che il trap lo rifermi/ristampi a fine script
 else
-  echo "Task lasciato in esecuzione. Per fermarlo dopo:"
+  LEAVE_RUNNING=1   # scelta esplicita: il trap di sicurezza NON lo ferma
+  echo "Task lasciato in esecuzione (scelta esplicita). Per fermarlo dopo:"
   echo "  aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --region $REGION"
 fi

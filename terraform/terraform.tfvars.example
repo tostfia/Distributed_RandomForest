@@ -1,0 +1,25 @@
+# Copia questo file in terraform.tfvars e personalizza secondo necessità.
+# terraform.tfvars NON va condiviso/committato se contiene dati sensibili
+# (qui non ce ne sono, ma è buona norma).
+
+aws_region   = "us-east-1"
+project_name = "rf-distributed"
+cluster_name = "forest-cluster"
+
+# "centralized" oppure "federated"
+training_mode = "centralized"
+
+num_workers                = 2
+orchestrator_desired_count = 2
+
+# Abbassa questi due durante lo sviluppo/debug per ridurre i costi;
+# alzali solo per i test di performance finali che richiedono parallelismo
+# reale (vedi la relazione: valutazione della scalabilità).
+worker_cpu    = "4096"
+worker_memory = "16384"
+
+orchestrator_cpu    = "2048"
+orchestrator_memory = "8192"
+
+image_tag            = "latest"
+force_image_rebuild  = false
