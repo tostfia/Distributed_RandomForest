@@ -113,3 +113,10 @@ Per uccidere i processi rimasti attivi: pkill -9 -f "Distributed_RandomForest"
 Pacchetto da installare per i test su aws: curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" e in seguiti comando sudo (chiedere ad ia) -o; per verificare: "session-manager-plugin.deb"
 
 Questo su Fedora: sudo dnf install -y ./session-manager-plugin.rpm
+
+Inoltre, bisogna installare Terraform così che applicando Infrastructure as A Code, venga installata tutta l'infrastruttura utilizzata. Su Fedora i comandi sono: 
+
+1. sudo dnf install -y dnf-plugins-core
+2. cd /tmp && curl -O https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+3. unzip terraform_1.9.8_linux_amd64.zip
+4. sudo mv terraform /usr/local/bin/
