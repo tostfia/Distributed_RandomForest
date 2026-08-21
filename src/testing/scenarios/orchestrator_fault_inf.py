@@ -1,4 +1,3 @@
-import subprocess
 import time
 import threading
 import os
@@ -9,6 +8,13 @@ from src.master.orchestrator.centralized import CentralizedOrchestrator
 from src.master.orchestrator.federated import FederatedOrchestrator
 import docker
 
+# ---------------------------------------------------------------------
+# AWS: nomi/tabelle usati per il failover REALE sui 2 task ECS del
+# orchestrator-service già dispiegato (vedi _run_aws_real_failover).
+# ---------------------------------------------------------------------
+_LOCK_TABLE = "OrchestratorLocks"
+_LOCK_KEY = "global_orchestrator_leader_lock"
+
 
 def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
     """
@@ -17,6 +23,10 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
     e simulare il crash mentre 'orch' non ha ancora davvero acquisito la
     leadership (o non l'acquisisce affatto), rendendo il "kill del leader"
     un'operazione su un processo che di fatto non stava facendo nulla.
+
+    Usata SOLO dai rami locale/Docker Compose. Il ramo AWS (vedi
+    _run_aws_real_failover) non la usa: lì Leader e Standby sono già due
+    task ECS reali, sempre attivi, indipendenti dal test-engine.
     """
     lock_key = orch._get_lock_key()
     waited = 0.0
@@ -53,6 +63,12 @@ def _count_checkpoint_workers(checkpoint_path: str) -> int:
     Gestisce entrambe le strutture possibili del checkpoint:
       - federato: dict {worker_index: {...}}  -> len(dict)
       - centralizzato: list di chunk          -> len(list)
+
+    Usata SOLO dai rami locale/Docker Compose (checkpoint su bind mount
+    condiviso). Il ramo AWS usa _count_completed_worker_tasks_aws, che legge
+    lo stesso tipo di segnale da DynamoDB (tabella WorkerTasks) invece che
+    da un file locale — su Fargate non esiste alcun filesystem condiviso
+    tra il test-engine e i task reali di orchestrator-service.
     """
     if not os.path.exists(checkpoint_path) or os.path.getsize(checkpoint_path) == 0:
         return 0
@@ -95,6 +111,10 @@ def _wait_for_inference_in_progress(job_id, timeout=60, interval=0.2,
       - marcatore 'inference_started_{job_id}.marker' — solo come segnale di
         "inferenza avviata", usato quando require_partial=False.
 
+    Usata SOLO dai rami locale/Docker Compose. Il ramo AWS usa l'analogo
+    _wait_for_inference_in_progress_aws, basato su query DynamoDB (tabella
+    WorkerTasks, GSI job_id-index) invece che su file locali.
+
     Ritorna i secondi attesi al raggiungimento della condizione, o -1.0 se scade
     il timeout. Con require_partial=True il timeout include anche il caso in cui
     l'inferenza è passata da 0 a "tutti i worker" senza mai essere osservata in
@@ -115,6 +135,54 @@ def _wait_for_inference_in_progress(job_id, timeout=60, interval=0.2,
         else:
             # Modalità "inferenza avviata": basta un segnale qualsiasi.
             if n_done >= min_workers or os.path.exists(marker_path):
+                return waited
+
+        time.sleep(interval)
+        waited += interval
+    return -1.0
+
+
+def _count_completed_worker_tasks_aws(state_manager, job_id: str) -> int:
+    """
+    Equivalente AWS di _count_checkpoint_workers: conta quanti task worker
+    risultano COMPLETED per questo job_id, leggendo la tabella DynamoDB
+    WorkerTasks tramite il suo GSI 'job_id-index' (stesso meccanismo già
+    usato in produzione da AwsStateManager.are_all_workers_done). Sia
+    centralized.py che federated.py chiamano _track_task(status="COMPLETED")
+    per ogni worker anche durante l'inferenza (non solo il training), quindi
+    il segnale è valido per questo scenario.
+    """
+    try:
+        response = state_manager._db.query_by_index(
+            table_name="WorkerTasks", index_name="job_id-index",
+            key_name="job_id", key_value=job_id
+        )
+        items = response.get("Items", [])
+        return len([t for t in items if t.get("status") == "COMPLETED"])
+    except Exception:
+        return 0
+
+
+def _wait_for_inference_in_progress_aws(state_manager, job_id, timeout=60, interval=1.0,
+                                         min_workers=1, expected_workers=None,
+                                         require_partial=False) -> float:
+    """
+    Equivalente AWS di _wait_for_inference_in_progress: stessa logica di
+    attesa di una finestra di ripresa parziale, ma il conteggio dei worker
+    già completati arriva da DynamoDB (WorkerTasks) invece che da un
+    checkpoint pickle locale, perché su Fargate non c'è alcun filesystem
+    condiviso tra il test-engine e i task reali del orchestrator-service.
+    """
+    waited = 0.0
+    while waited < timeout:
+        n_done = _count_completed_worker_tasks_aws(state_manager, job_id)
+
+        if require_partial:
+            upper_ok = (expected_workers is None) or (n_done < expected_workers)
+            if n_done >= min_workers and upper_ok:
+                return waited
+        else:
+            if n_done >= min_workers:
                 return waited
 
         time.sleep(interval)
@@ -173,11 +241,58 @@ def _resolve_leader_container(client, lock_dir="./.local_storage"):
     return None
 
 
+def _get_current_leader_name_aws(state_manager):
+    """
+    Legge il nome dell'orchestratore che detiene ATTUALMENTE il lock di
+    leadership su DynamoDB (tabella OrchestratorLocks, chiave 'lock_key' =
+    'global_orchestrator_leader_lock', campo 'leader' — vedi
+    AwsDynamoDB.try_acquire_lock in dynamodb_aws.py per lo schema esatto).
+    Ritorna None se il lock non esiste o la lettura fallisce.
+    """
+    try:
+        item = state_manager._db.get_item(_LOCK_TABLE, _LOCK_KEY)
+        return item.get("Item", {}).get("leader")
+    except Exception as e:
+        print(f"[TEST ERRORE] Lettura del lock di leadership da DynamoDB fallita: {e}")
+        return None
+
+
+def _resolve_ecs_task_arn_by_ip(ecs_client, cluster, service_name, ip_dashed):
+    """
+    Trova, tra i task RUNNING del service ECS indicato, quello il cui IP
+    privato (formato Fargate awsvpc, es. '172.31.70.125') corrisponde al
+    frammento 'ip-172-31-70-125' estratto dal nome interno dell'orchestratore
+    (che include l'hostname Fargate, identico al pattern già usato per i
+    worker). Ritorna l'ARN del task, o None se non trovato.
+    """
+    task_arns = ecs_client.list_tasks(
+        cluster=cluster, serviceName=service_name, desiredStatus="RUNNING"
+    ).get("taskArns", [])
+    if not task_arns:
+        return None
+
+    details = ecs_client.describe_tasks(cluster=cluster, tasks=task_arns).get("tasks", [])
+    for t in details:
+        for att in t.get("attachments", []):
+            for d in att.get("details", []):
+                if d.get("name") == "privateIPv4Address":
+                    ip = d.get("value", "")
+                    if ip and ip.replace(".", "-") == ip_dashed:
+                        return t.get("taskArn")
+    return None
+
+
 class InferenceOrchestratorFaultScenario(BaseTestScenario):
     """
     Copre lo Scenario: Failover dell'Orchestratore durante la fase di inferenza.
-    Usa l'orchestratore nativo del TestEngine come Leader (Master-1) e 
-    istanzia un secondo orchestratore di Standby (Master-2) per il subentro.
+
+    Su locale/Docker Compose: usa l'orchestratore nativo del TestEngine come
+    Leader (Master-1) e istanzia un secondo orchestratore di Standby
+    (Master-2) per il subentro — invariato rispetto alla versione originale.
+
+    Su AWS: NON istanzia nulla in-process. Usa il vero orchestrator-service
+    già dispiegato (2 task ECS, Leader+Standby sempre attivi) — vedi
+    _run_aws_real_failover per il dettaglio.
     """
 
     def run(self) -> dict:
@@ -190,6 +305,12 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
 
         orch_leader = self.orchestrator
+        environment = getattr(orch_leader, "environment", "local")
+
+        # AWS: percorso completamente separato, vedi _run_aws_real_failover.
+        if environment == "aws":
+            return self._run_aws_real_failover(orch_leader, ft_cfg, target_trees)
+
         print(f"\n--- [TEST] Failover dell'Orchestratore durante l'inferenza ' ---")
         orchestrator_type = os.environ.get("SYS_MODE", "centralized")
         target_queue = orch_leader.queue_name
@@ -241,18 +362,18 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         payload = {
             "job_id": job_id,
             "dataset_type": self.config["dataset_type"],
-            "dataset_path": self.config["dataset_path"],  
+            "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
 
         try:
             self._reuse_dataset_if_available(payload, seed=123)
             orch_leader._execute_training_step(payload, 0, target_trees, 123)
-            
+
         except Exception as e:
             print(f"[TEST ERRORE] Setup fallito: {e}")
             return {"status": "FAILED", "duration_seconds": 0}
-        
+
         payload_inference = {
             "request_type": "INFERENCE",
             "job_id": job_id,
@@ -261,7 +382,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "hyperparameters": hp,
         }
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}'...")
-        
+
         try:
             orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name, message_dict=payload_inference)
         except Exception as e_inner:
@@ -287,7 +408,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             if not signaled:
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
             print(f"[TEST KILLER] Lascio lavorare il leader per {kill_delay} secondi prima del crash...")
-            
+
             print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO DI {orch_leader.orchestrator_name.upper()} !!!")
 
             # Blocchiamo l'heartbeat PRIMA di toccare il lock: se lo rimuovessimo
@@ -457,12 +578,12 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         max_trees_built_seen = 0  # tiene il massimo, perché al COMPLETED il campo può azzerarsi
         elapsed = 0
         check_interval = 3
-        
+
         print(f"[TEST] Monitoraggio dello stato del Job (timeout: {max_timeout}s)...")
         while elapsed < max_timeout:
             time.sleep(check_interval)
             elapsed += check_interval
-            
+
             try:
                 state = orch_standby.state_manager.obtain_request(job_id)
                 if state:
@@ -471,9 +592,9 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                     trees_built = item_data.get("alberi_addestrati", 0)
                     max_trees_built_seen = max(max_trees_built_seen, trees_built)
                     current_owner = item_data.get("orchestrator_id") or item_data.get("last_orchestrator")
-                    
+
                     print(f"[TEST MONITOR] Stato: {status} | Alberi a checkpoint: {trees_built} | Gestore Attuale: {current_owner}")
-                    
+
                     if status == "COMPLETED":
                         job_completed = True
                         completed_by = current_owner
@@ -497,10 +618,6 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
         # Il modello viene sempre salvato come "model_{job_id}.pkl" in entrambe le
         # modalità (vedi _resolve_model_path in centralized.py e federated.py).
-        # NIENTE fallback glob "file più recente in ./saved_models/": in una
-        # sessione di test con più job può facilmente esistere un modello
-        # PIÙ RECENTE ma di un job completamente estraneo, che farebbe
-        # dichiarare SUCCESS un failover che in realtà non è mai avvenuto.
         path_modello_dinamico = f"./saved_models/model_{job_id}.pkl"
 
         if job_completed and not completed_by_killed_leader:
@@ -514,8 +631,193 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
         return {
             "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
-            "status": test_status, 
-            "original_leader": orch_leader.orchestrator_name, 
-            "recovered_by": completed_by if (job_completed and not completed_by_killed_leader) else "None", 
+            "status": test_status,
+            "original_leader": orch_leader.orchestrator_name,
+            "recovered_by": completed_by if (job_completed and not completed_by_killed_leader) else "None",
             "duration_seconds": duration
+        }
+
+    # ------------------------------------------------------------------ #
+    # AWS: failover REALE sui 2 task ECS del orchestrator-service         #
+    # ------------------------------------------------------------------ #
+
+    def _run_aws_real_failover(self, orch_leader, ft_cfg, target_trees) -> dict:
+        """
+        Failover REALE durante l'inferenza sui due task ECS del
+        orchestrator-service già dispiegato. Setup (generazione del modello
+        preliminare) fatto in-process via chiamata diretta, ESATTAMENTE come
+        fanno già fault_inf.py/network.py — non richiede failover, serve solo
+        a produrre il .pkl su S3. La richiesta di INFERENZA vera e propria
+        invece passa da SQS, così la reclama il leader reale su ECS.
+
+        Per la finestra di ripresa parziale, il segnale non può più venire da
+        un checkpoint locale (nessun filesystem condiviso col test-engine su
+        Fargate): usiamo invece la tabella DynamoDB WorkerTasks (GSI
+        job_id-index), popolata da _track_task() anche durante l'inferenza
+        (vedi centralized.py/federated.py) — stesso principio, fonte diversa.
+
+        Nessuna scorciatoia su lock/lease: il recovery si affida al TTL
+        naturale, come nella versione training (vedi _run_aws_real_failover
+        in orchestrator_fault.py per il dettaglio del meccanismo).
+        """
+        import boto3
+
+        cluster = os.environ.get("CLUSTER_NAME", "forest-cluster")
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        service_name = "orchestrator-service"
+
+        print(f"\n--- [TEST] Failover REALE dell'Orchestratore durante l'inferenza su ECS "
+              f"('{service_name}', cluster '{cluster}') ---")
+
+        job_id = f"test_inference_orch_failover_aws_{int(time.time())}"
+        if self.config.get("selected_task") == "classifier":
+            hp = self.config.get("hyperparameters_class", {})
+        else:
+            hp = self.config.get("hyperparameters_regre", {})
+        payload = {
+            "job_id": job_id,
+            "dataset_type": self.config["dataset_type"],
+            "dataset_path": self.config["dataset_path"],
+            "hyperparameters": hp,
+        }
+
+        print(f"\n[TEST] Setup: addestramento preliminare in-process (nessun failover in questa fase, "
+              f"serve solo a produrre il modello su S3)...")
+        try:
+            self._reuse_dataset_if_available(payload, seed=123)
+            orch_leader._execute_training_step(payload, 0, target_trees, 123)
+        except Exception as e:
+            print(f"[TEST ERRORE] Setup fallito: {e}")
+            return {"status": "FAILED", "duration_seconds": 0}
+
+        payload_inference = {
+            "request_type": "INFERENCE",
+            "job_id": job_id,
+            "data_path": self.config["dataset_path"],
+            "dataset_type": self.config["dataset_type"],
+            "hyperparameters": hp,
+        }
+        print(f"[TEST] Invio della richiesta di INFERENZA per il Job {job_id[:8]} alla coda "
+              f"'{orch_leader.queue_name}' (la reclamerà il leader reale su ECS)...")
+        try:
+            orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name, message_dict=payload_inference)
+        except Exception as e_inner:
+            print(f"[TEST ERRORE CRITICO] Impossibile inviare il messaggio: {e_inner}")
+            return {"status": "FAILED", "trees_built": 0, "duration_seconds": 0}
+
+        start_time = time.perf_counter()
+
+        # Attendi la finestra di ripresa parziale (1..N-1 worker completati),
+        # con fallback su "almeno 1 completato" se la finestra è troppo stretta.
+        wait_timeout = ft_cfg.get("max_wait_for_inference_start_seconds", 60)
+        expected_workers = getattr(orch_leader, "num_workers", None) or orch_leader._get_active_worker_count()
+        poll_interval = ft_cfg.get("inference_poll_interval_seconds", 0.5)
+
+        waited = _wait_for_inference_in_progress_aws(
+            orch_leader.state_manager, job_id, timeout=wait_timeout, interval=poll_interval,
+            min_workers=1, expected_workers=expected_workers, require_partial=True
+        )
+        if waited >= 0:
+            print(f"[TEST KILLER] Finestra di ripresa parziale rilevata dopo {waited:.1f}s "
+                  f"(>=1 worker completato su DynamoDB, non ancora tutti). Simulo il crash.")
+        else:
+            waited = _wait_for_inference_in_progress_aws(
+                orch_leader.state_manager, job_id, timeout=wait_timeout, interval=poll_interval,
+                min_workers=1, require_partial=False
+            )
+            if waited >= 0:
+                print(f"[TEST KILLER] [WARN] Finestra parziale non colta: il crash cade su "
+                      f"'inferenza avviata' dopo {waited:.1f}s. Failover comunque testato, ma la "
+                      f"ripresa PARZIALE potrebbe non essere esercitata.")
+            else:
+                kill_delay = ft_cfg.get("docker_kill_delay_seconds", 2)
+                print(f"[TEST KILLER] [WARN] Nessun segnale di inferenza entro {wait_timeout}s: "
+                      f"ripiego su un ritardo fisso di {kill_delay}s. Verificare il risultato.")
+                time.sleep(kill_delay)
+
+        # Identifica e ferma il leader reale (rilettura al momento del kill,
+        # può differire da un'eventuale lettura precedente).
+        killed_leader_name = _get_current_leader_name_aws(orch_leader.state_manager)
+        if not killed_leader_name:
+            print(f"[TEST ERRORE] Nessun leader trovato sul lock '{_LOCK_KEY}': impossibile simulare il crash.")
+            return {"status": "FAILED", "duration_seconds": round(time.perf_counter() - start_time, 2),
+                    "error": "Nessun leader eletto su OrchestratorLocks."}
+
+        ip_match = re.search(r"ip-(\d+-\d+-\d+-\d+)\.ec2\.internal", killed_leader_name)
+        stopped = False
+        if ip_match:
+            ip_dashed = f"ip-{ip_match.group(1)}"
+            try:
+                ecs = boto3.client("ecs", region_name=region)
+                target_arn = _resolve_ecs_task_arn_by_ip(ecs, cluster, service_name, ip_dashed)
+                if target_arn:
+                    print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO: fermo il task ECS del leader "
+                          f"'{killed_leader_name}' ({target_arn.split('/')[-1]}) !!!")
+                    ecs.stop_task(cluster=cluster, task=target_arn,
+                                  reason="[TEST] Simulazione crash orchestratore leader durante inferenza (failover scenario)")
+                    stopped = True
+                else:
+                    print(f"[TEST ERRORE] Nessun task ECS di '{service_name}' corrisponde all'IP del leader "
+                          f"'{killed_leader_name}': impossibile fermarlo.")
+            except Exception as e:
+                print(f"[TEST ERRORE] Impossibile fermare il task ECS del leader: {e}")
+        else:
+            print(f"[TEST ERRORE] Formato nome leader inatteso ('{killed_leader_name}'): impossibile estrarne l'IP.")
+
+        if not stopped:
+            return {"status": "FAILED", "duration_seconds": round(time.perf_counter() - start_time, 2),
+                    "error": "Impossibile identificare/fermare il task ECS del leader.",
+                    "original_leader": killed_leader_name}
+
+        # Monitoraggio fino al completamento — nessuna scorciatoia su lock/lease.
+        failover_detection_margin = ft_cfg.get("failover_detection_margin_seconds", 90)
+        max_timeout = ft_cfg.get("max_monitor_timeout_seconds", failover_detection_margin + 360)
+        job_completed = False
+        completed_by = None
+        elapsed = 0
+        check_interval = 3
+
+        print(f"[TEST] Monitoraggio dello stato del Job (timeout: {max_timeout}s)...")
+        while elapsed < max_timeout:
+            time.sleep(check_interval)
+            elapsed += check_interval
+            try:
+                state = orch_leader.state_manager.obtain_request(job_id)
+                if state:
+                    item_data = state.get("Item", state)
+                    status = item_data.get("status")
+                    current_owner = item_data.get("last_orchestrator") or item_data.get("orchestrator_id")
+                    print(f"[TEST MONITOR] Stato: {status} | Gestore Attuale: {current_owner}")
+                    if status == "COMPLETED":
+                        job_completed = True
+                        completed_by = current_owner
+                        break
+            except Exception as e:
+                print(f"[TEST MONITOR WARNING] Errore lettura stato: {e}")
+
+        duration = time.perf_counter() - start_time
+
+        completed_by_killed_leader = bool(
+            completed_by and killed_leader_name and completed_by == killed_leader_name
+        )
+        if completed_by_killed_leader:
+            print(f"[TEST WARN] Il job risulta completato dallo stesso leader fermato ({completed_by}): "
+                  f"il crash è probabilmente caduto a inferenza già conclusa. Failover NON esercitato.")
+
+        if job_completed and not completed_by_killed_leader:
+            test_status = "SUCCESS"
+            print(f"\n[TEST PASSED] Failover reale completato! Job chiuso dallo standby subentrato ({completed_by}).")
+        else:
+            test_status = "FAILED"
+            print(f"\n[TEST FAILED] Failover reale non verificato "
+                  f"({'completato dal leader fermato' if completed_by_killed_leader else 'job non arrivato a COMPLETED entro il timeout'}).")
+
+        return {
+            "scenario_description": "Test di Failover REALE dell'Orchestratore durante l'inferenza sui 2 task ECS "
+                                     "di orchestrator-service (leader fermato con ecs:StopTask, nessuna scorciatoia "
+                                     "sul lock: recovery affidato al TTL naturale).",
+            "status": test_status,
+            "original_leader": killed_leader_name,
+            "recovered_by": completed_by if (job_completed and not completed_by_killed_leader) else "None",
+            "duration_seconds": round(duration, 2)
         }
