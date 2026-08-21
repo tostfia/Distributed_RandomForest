@@ -533,8 +533,12 @@ class BaseOrchestrator(ABC):
                 if receipt_handle:
                     self.sqs_queue.delete_message(receipt_handle)
                 self._clean_checkpoint(job_id)
-
-                self._generate_performance_report(job_id, t_dist, current_alberi)
+                partitioning_info = {
+                    "strategy": payload.get("partition_strategy", "iid"),
+                    "alpha": payload.get("partition_alpha"),
+                }
+                self._generate_performance_report(job_id, t_dist, current_alberi, partitioning_info=partitioning_info)
+                
                 print(f"[{self.orchestrator_name}] Job {job_id[:8]} completato con successo.")
             except MessageOwnershipLostError as ownership_error:
                 print(f"[{self.orchestrator_name}] [ABORT] {ownership_error}")
@@ -644,7 +648,8 @@ class BaseOrchestrator(ABC):
             return db_val
         return db_val
     
-    def _generate_performance_report(self, job_id: str, t_dist: float, alberi_addestrati: int = None):
+    def _generate_performance_report(self, job_id: str, t_dist: float, alberi_addestrati: int = None,
+                                      partitioning_info: dict = None):
         num_workers = self._get_active_worker_count()
         print("\n" + "═" * 75)
         print(f"  REPORT PRESTAZIONALE DISTRIBUITO - JOB {job_id[:8]}")
@@ -659,14 +664,18 @@ class BaseOrchestrator(ABC):
         # l'inferenza, quindi finisce automaticamente in ./.local_storage/metrics
         # se environment == "local", o su s3://BUCKET_NAME/metrics/... se == "aws".
         mode = self.__class__.__name__.replace("Orchestrator", "").lower()
-        self._save_metrics(job_id, "training", {
+        metrics_entry = {
             "job_id": job_id,
             "mode": mode,
             "phase": "training",
             "timings": {"total_training_time": t_dist},
             "worker_count": num_workers,
             "alberi_addestrati": alberi_addestrati,
-        })
+        }
+        
+        if partitioning_info is not None:
+            metrics_entry["federated_partitioning"] = partitioning_info
+        self._save_metrics(job_id, "training", metrics_entry)
     
     def _get_active_worker_count(self):
         workers = ServiceRegistry.get_available_workers(self.environment)

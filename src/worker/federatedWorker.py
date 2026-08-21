@@ -572,3 +572,39 @@ class FederatedWorker(BaseWorker):
     
     def exposed_get_local_sample_count(self) -> int:
         return self.local_sample_count
+
+    def exposed_get_local_shard_size(self) -> int:
+        """
+        Numero di righe nel training-shard locale, letto direttamente dal CSV
+        su disco SENZA preprocessing/feature-selection. Serve all'Orchestratore
+        PRIMA di avviare un round di training, per allocare il budget di alberi
+        in proporzione alla quantità di dati posseduti da ciascun worker invece
+        che in parti uguali — indispensabile con partizionamento non-IID
+        (dirichlet/by_day), dove gli shard possono avere dimensioni molto
+        diverse tra loro; con partizionamento IID il risultato è comunque
+        praticamente identico alla vecchia ripartizione equa.
+
+        Approssimazione voluta: il conteggio grezzo (righe prima della pulizia
+        NaN/inf) è una stima sufficiente ai fini di un'allocazione di risorse
+        (la pulizia tipicamente rimuove una frazione minima delle righe) ed
+        evita di dover rieseguire l'intero preprocessing solo per contare i
+        campioni, prima ancora di sapere se il worker verrà davvero usato in
+        questo round.
+
+        Per dataset_type='synthetic' il file non esiste ancora a questo punto
+        (i dati sintetici vengono generati pigramente al primo training, non
+        al boot): ritorniamo 0, e l'Orchestratore ricade sulla ripartizione
+        equa storica quando NESSUN worker restituisce una dimensione nota.
+        """
+        train_path = os.path.join(self.local_cache_dir, "train_shard.csv")
+        if not os.path.exists(train_path):
+            print(f"[{self.worker_name}] [INFO] Shard locale non ancora presente in {train_path} "
+                  f"(probabile dataset sintetico): ritorno dimensione 0.")
+            return 0
+        try:
+            with open(train_path, "r", encoding="utf-8", errors="ignore") as f:
+                n_lines = sum(1 for _ in f)
+            return max(0, n_lines - 1)  # -1 per l'header, mai negativo
+        except Exception as e:
+            print(f"[{self.worker_name}] [WARN] Errore nel conteggio righe di {train_path}: {e}. Ritorno 0.")
+            return 0

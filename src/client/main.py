@@ -30,6 +30,34 @@ def get_input(prompt: str, default: str = "") -> str:
     return user_input if user_input else default
 
 
+def load_federated_partitioning(dataset_type: str = "real") -> dict:
+    """
+    Legge la sezione 'federated_partitioning' dal manifesto della baseline
+    (outputs_baseline/config_{dataset_type}.json) — la STESSA fonte usata per
+    generare gli shard via provision_local_shards.py / provision_federated_shards.py.
+
+    Letta da qui (dal manifesto) invece che da './.local_storage/config.json'
+    (il boot config), per garantire che il job effettivamente inviato sia
+    sempre coerente con l'ULTIMO manifesto realmente generato da
+    run_baseline(), non con un valore di boot config potenzialmente più
+    vecchio o diverso (es. se la baseline non è stata rilanciata dopo aver
+    cambiato il boot config).
+
+    Ritorna sempre {"strategy": "iid", "alpha": None} come fallback sicuro
+    se il manifesto non esiste o non contiene la sezione (es. dataset
+    sintetico, o manifesto generato con una versione precedente dello script).
+    """
+    config_path = os.path.join("outputs_baseline", f"config_{dataset_type}.json")
+    if not os.path.exists(config_path):
+        return {"strategy": "iid", "alpha": None}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("federated_partitioning", {"strategy": "iid", "alpha": None})
+    except (json.JSONDecodeError, IOError):
+        return {"strategy": "iid", "alpha": None}
+
+
 def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> Hyperparameters:
     config_path = (
         os.path.join("outputs_baseline", "config_synthetic.json")
@@ -259,13 +287,31 @@ def handle_inference():
         tree_type = "classifier" if tree_type_raw == "1" else "regressor"
         hp_obj = Hyperparameters(n_estimators=100, tree_type=tree_type)
 
+    # Recupero indipendente (non legato a come hp_obj è stato risolto sopra)
+    # della strategia/alpha di partizionamento usati per il TRAINING di questo
+    # job, per taggare coerentemente le metriche di inferenza. Il server
+    # (state_manager.get_job_details) potrebbe non conservare questi campi
+    # per job più vecchi: lo storico locale resta il fallback più affidabile.
+    training_entry_for_job = next(
+        (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
+        None,
+    )
+    inference_partition_strategy = (
+        training_entry_for_job.get("partition_strategy", "iid") if training_entry_for_job else "iid"
+    )
+    inference_partition_alpha = (
+        training_entry_for_job.get("partition_alpha") if training_entry_for_job else None
+    )
+
     # 4. Validazione tramite il modello Pydantic InferenceRequest
     try:
         inference_request = InferenceRequest(
             job_id=job_id,
             data_url=data_url, 
             environment=cfg.env,
-            hyperparameters=hp_obj
+            hyperparameters=hp_obj,
+            partition_strategy=inference_partition_strategy,
+            partition_alpha=inference_partition_alpha
         )
     except Exception as e:
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA INFERENZA]: {e}")
@@ -279,11 +325,7 @@ def handle_inference():
         print(f"\n[OK] Richiesta di inferenza {inference_request.inference_id[:8]} inviata con successo alla coda '{target_queue}'!")
         print(f"[INFO] L'orchestratore riceverà il messaggio e coordinerà i worker via RPC.")
 
-        matched_training = next(
-            (h for h in load_history() if h.get("type") == "training" and h.get("id") == job_id),
-            None,
-        )
-        dataset_type = matched_training.get("dataset_type") if matched_training else None
+        dataset_type = training_entry_for_job.get("dataset_type") if training_entry_for_job else None
 
         append_history_entry({
             "type": "inference",
@@ -293,6 +335,8 @@ def handle_inference():
             "environment": inference_request.environment,
             "dataset_type": dataset_type,
             "tree_type": hp_obj.tree_type,
+            "partition_strategy": inference_request.partition_strategy,
+            "partition_alpha": inference_request.partition_alpha,
         })
     except Exception as e:
         print(f"[ERRORE] Impossibile inviare la richiesta di inferenza su SQS: {e}")
@@ -540,6 +584,19 @@ def handle_training():
     except Exception as e:
         print(f"\n[ERRORE] Impossibile configurare gli iperparametri: {e}")
         return
+
+    # Rilevante SOLO per il training federato su dataset reale: il centralizzato
+    # non partiziona mai i dati, e il sintetico non ha un manifesto di
+    # partizionamento (ogni worker genera il proprio shard al boot).
+    if mode == "federated" and dataset_type == "real":
+        partitioning_info = load_federated_partitioning(dataset_type)
+        partition_strategy = partitioning_info.get("strategy", "iid")
+        partition_alpha = partitioning_info.get("alpha")
+        print(f"  [OK] Partizionamento federato dichiarato nel manifesto: {partition_strategy.upper()}"
+              + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else ""))
+    else:
+        partition_strategy = "iid"
+        partition_alpha = None
             
     # 5. Validazione Pydantic
     try:
@@ -548,7 +605,9 @@ def handle_training():
             mode=mode,
             dataset_path=dataset_path,
             dataset_type=dataset_type,
-            hyperparameters=hp_obj
+            hyperparameters=hp_obj,
+            partition_strategy=partition_strategy,
+            partition_alpha=partition_alpha
         )
     except Exception as e:
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA DATI]: {e}")
@@ -590,6 +649,8 @@ def handle_training():
             "dataset_type": request.dataset_type,
             "tree_type": request.hyperparameters.tree_type,
             "hyperparameters": request.hyperparameters.model_dump(),
+            "partition_strategy": request.partition_strategy,
+            "partition_alpha": request.partition_alpha,
         })
         
     except Exception as e:
@@ -616,13 +677,51 @@ def handle_baseline_selection():
         task_choice = get_input("  Scelta [Default: 1]: ", "1")
         selected_tree_type = "classifier" if task_choice == "1" else "regressor"
 
+    # Strategia di partizionamento tra i worker FEDERATI (irrilevante per il
+    # centralizzato, che non partiziona mai i dati). Chiesta solo per il
+    # dataset reale: quello sintetico non ha provisioning di shard su disco
+    # (ogni worker genera il proprio al boot), quindi non c'è nulla da
+    # partizionare qui.
+    partition_strategy = "iid"
+    federated_alpha = 0.5
+    if dtype == "real":
+        print("\n  Strategia di partizionamento tra i worker per il training FEDERATO")
+        print("  (nessun effetto sul centralizzato, che non partiziona i dati):")
+        print("    [1] IID (comportamento storico, shard casuali equilibrati)")
+        print("    [2] Dirichlet (eterogeneità sintetica controllata da alpha)")
+        print("    [3] By day (partizionamento naturale per file/giorno di origine)")
+        partition_choice = get_input("  Scelta [Default: 1]: ", "1")
+        partition_strategy = {"1": "iid", "2": "dirichlet", "3": "by_day"}.get(partition_choice, "iid")
+
+        if partition_strategy == "dirichlet":
+            alpha_raw = get_input(
+                "  alpha (piccolo = eterogeneità estrema, es. 0.1; grande = quasi-IID, es. 10) [Default: 0.5]: ",
+                "0.5",
+            )
+            try:
+                federated_alpha = float(alpha_raw)
+            except ValueError:
+                print(f"  [ATTENZIONE] Valore non valido ('{alpha_raw}'), uso il default 0.5.")
+                federated_alpha = 0.5
+
+        print(f"  [INFO] Partizionamento federato: {partition_strategy.upper()}"
+              + (f" (alpha={federated_alpha})" if partition_strategy == "dirichlet" else ""))
+        print("  [ATTENZIONE] Questa scelta va replicata ANCHE nello script di provisioning degli shard "
+              "(script_local/provision_local_shards.py o script_aws/provision_federated_shards.py), "
+              "che è uno script separato e non legge questa configurazione automaticamente. "
+              "Usa gli stessi valori: --partition-strategy e --alpha (o le variabili d'ambiente "
+              "PARTITION_STRATEGY/ALPHA), con --force se stai cambiando strategia rispetto a un run precedente.")
+
     boot_config = {
         "dataset_type": dtype,
-        "tree_type": selected_tree_type
+        "tree_type": selected_tree_type,
+        "partition_strategy": partition_strategy,
+        "alpha": federated_alpha,
     }
     
     save_local_state_section("baseline_boot", boot_config)
-    print(f"[OK] Boot configuration registrata: {dtype.upper()} | TASK: {selected_tree_type.upper()}")
+    print(f"[OK] Boot configuration registrata: {dtype.upper()} | TASK: {selected_tree_type.upper()}"
+          + (f" | PARTIZIONAMENTO: {partition_strategy.upper()}" if dtype == "real" else ""))
         
     run_baseline()
 

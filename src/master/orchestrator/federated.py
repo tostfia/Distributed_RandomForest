@@ -163,6 +163,116 @@ class FederatedOrchestrator(BaseOrchestrator):
             return str(dataset_type).strip().lower()
         return "real"
 
+    def _fetch_worker_shard_sizes(self, worker_names: list, available_workers: dict) -> dict:
+        """
+        Interroga in parallelo ogni worker per la dimensione del proprio shard di
+        training locale (exposed_get_local_shard_size), PRIMA di allocare il
+        budget di alberi del round: è il prerequisito per una ripartizione
+        proporzionale alla quantità di dati posseduti, invece che equa a
+        prescindere (fondamentale con partizionamento non-IID). Timeout breve
+        per singola chiamata: è solo un conteggio righe su un file già locale,
+        non deve competere in durata con le RPC di training vere e proprie.
+        Un worker che non risponde in tempo viene semplicemente OMESSO dal
+        dizionario risultato (non con size=0): la gestione del fallback per i
+        worker "senza dimensione nota" è delegata a _allocate_tree_quotas.
+        """
+        sizes = {}
+        lock = threading.Lock()
+
+        def _probe(w_name):
+            w_info = available_workers.get(w_name)
+            if not w_info:
+                return
+            conn = None
+            try:
+                conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={"allow_pickle": True, "sync_request_timeout": 30}
+                )
+                size = int(obtain(conn.root.exposed_get_local_shard_size()))
+                with lock:
+                    sizes[w_name] = size
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile ottenere la dimensione dello "
+                      f"shard da '{w_name}' ({e}): riceverà una quota di fallback.")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        threads = [threading.Thread(target=_probe, args=(w,)) for w in worker_names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=35)
+        return sizes
+
+    def _allocate_tree_quotas(self, total_step_trees: int, worker_names: list, worker_shard_sizes: dict) -> dict:
+        """
+        Alloca il budget di alberi da addestrare in QUESTO round proporzionalmente
+        alla dimensione dello shard locale di ciascun worker (metodo dei resti
+        più grandi: garantisce che la somma delle quote sia ESATTAMENTE
+        total_step_trees, senza doverla clampare a valle come nella vecchia
+        ripartizione a CHUNK_SIZE fisso).
+
+        Con partizionamento IID gli shard sono quasi uguali per costruzione,
+        quindi il risultato è praticamente indistinguibile dalla vecchia
+        ripartizione equa. Con partizionamento non-IID (dirichlet/by_day),
+        dove le dimensioni possono differire di molto, evita di addestrare
+        tanti alberi quanto un worker "ricco di dati" su uno shard minuscolo:
+        alberi ad alta varianza che, nel soft voting finale, peserebbero
+        comunque quanto tutti gli altri.
+
+        Worker senza dimensione nota (RPC fallita) ricevono la dimensione
+        MEDIA dei worker noti come stima di fallback, invece di 0 (che li
+        escluderebbe implicitamente dal round). Se NESSUN worker ha una
+        dimensione nota (es. dataset_type='synthetic', dove lo shard non
+        esiste ancora sul disco a questo punto), si ricade sulla ripartizione
+        equa storica.
+        """
+        sizes = dict(worker_shard_sizes)
+        # IMPORTANTE: "sconosciuto" (RPC fallita) è diverso da "noto e pari a
+        # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
+        # non assegna alcuna riga di quella classe a quel worker). Solo il
+        # primo caso va coperto con una stima di fallback; il secondo va
+        # rispettato così com'è — un worker con shard vuoto deve ricevere
+        # quota 0, non una quota "media" che lo manderebbe in errore al primo
+        # bootstrap su un array senza campioni.
+        missing = [w for w in worker_names if w not in sizes]
+        known = [w for w in worker_names if w in sizes]
+
+        if missing and known and sum(sizes[w] for w in known) > 0:
+            fallback_size = max(1, int(np.mean([sizes[w] for w in known])))
+            for w in missing:
+                sizes[w] = fallback_size
+            print(f"[{self.orchestrator_name}] [WARN] Dimensione shard non disponibile per {missing}: "
+                  f"uso la media dei worker noti ({fallback_size}) come stima di fallback.")
+        elif not known or sum(sizes[w] for w in known) <= 0:
+            print(f"[{self.orchestrator_name}] [WARN] Nessuna dimensione di shard rilevata per alcun "
+                  f"worker (probabile dataset sintetico): ricado sulla ripartizione EQUA storica.")
+            sizes = {w: 1 for w in worker_names}
+
+        total_size = sum(sizes.get(w, 0) for w in worker_names)
+        if total_size <= 0:
+            sizes = {w: 1 for w in worker_names}
+            total_size = len(worker_names)
+
+        raw_quotas = {w: total_step_trees * sizes[w] / total_size for w in worker_names}
+        quotas = {w: int(np.floor(q)) for w, q in raw_quotas.items()}
+        remainder = total_step_trees - sum(quotas.values())
+
+        # Distribuiamo l'arrotondamento residuo ai worker con la parte
+        # frazionaria più alta (metodo dei resti più grandi / Hamilton).
+        by_fraction_desc = sorted(worker_names, key=lambda w: raw_quotas[w] - quotas[w], reverse=True)
+        for w in by_fraction_desc[:remainder]:
+            quotas[w] += 1
+
+        print(f"[{self.orchestrator_name}] Allocazione alberi proporzionale alla dimensione dello shard: " +
+              ", ".join(f"{w}={quotas[w]} (size={sizes.get(w, '?')})" for w in worker_names))
+        return quotas
+
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Invia la richiesta a ciascun worker attivo per il proprio shard locale.
@@ -238,8 +348,32 @@ class FederatedOrchestrator(BaseOrchestrator):
             hp = payload.get("hyperparameters", {})
             tree_type = hp.get("tree_type", "classifier")
 
-            CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
-            print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
+            # Iperparametro dell'ESPERIMENTO (non del modello): come sono stati
+            # ripartiti i dati tra i worker in fase di provisioning. Letto qui
+            # solo per tracciabilità nei log/nelle metriche — la ripartizione
+            # vera e propria è già avvenuta offline (provision_*_shards.py); qui
+            # ne teniamo semplicemente traccia per poter correlare i risultati
+            # del job con la strategia/alpha usati per generare gli shard.
+            # Campi PIATTI su TrainingRequest (non nidificati sotto
+            # "hyperparameters"), popolati da main.py leggendo il manifesto:
+            # sopravvivono al giro completo client -> SQS -> qui.
+            partitioning_info = {
+                "strategy": payload.get("partition_strategy", "iid"),
+                "alpha": payload.get("partition_alpha"),
+            }
+            print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
+                  f"strategy='{partitioning_info.get('strategy', 'iid')}'"
+                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "") + ".")
+
+            # Allocazione del budget di alberi PROPORZIONALE alla dimensione reale
+            # dello shard di ciascun worker (vedi _fetch_worker_shard_sizes /
+            # _allocate_tree_quotas), non più equa a prescindere: con
+            # partizionamento non-IID gli shard possono avere dimensioni molto
+            # diverse, e allenare lo stesso numero di alberi su uno shard minuscolo
+            # produrrebbe alberi ad alta varianza pesati quanto tutti gli altri nel
+            # soft voting finale.
+            worker_shard_sizes = self._fetch_worker_shard_sizes(worker_names, available_workers)
+            tree_quotas = self._allocate_tree_quotas(total_step_trees, worker_names, worker_shard_sizes)
 
             assigned_tasks = {}
             sub_start = start_alberi
@@ -249,9 +383,12 @@ class FederatedOrchestrator(BaseOrchestrator):
             # il thread dedicato smette di ritentare la RPC e resta in attesa che quello
             # stesso worker ricompaia nel ServiceRegistry, poi riprova lo stesso task.
             for w_name in worker_names:
-                if sub_start >= target_alberi:
-                    break
-                sub_end = min(sub_start + CHUNK_SIZE, target_alberi)
+                quota_chunk = tree_quotas.get(w_name, 0)
+                if quota_chunk <= 0:
+                    print(f"[{self.orchestrator_name}] [SKIP] '{w_name}' non riceve alberi in questo round "
+                          f"(quota proporzionale = 0).")
+                    continue
+                sub_end = sub_start + quota_chunk
                 task_seed = seed + sub_start
                 assigned_tasks[w_name] = (task_id_counter, sub_start, sub_end, task_seed)
                 task_id_counter += 1
@@ -396,6 +533,16 @@ class FederatedOrchestrator(BaseOrchestrator):
         job_id = payload.get("job_id")
         hyperparameters = payload.get("hyperparameters", {})
         tree_type = hyperparameters.get("tree_type", "classifier")
+        # Stesso iperparametro dell'esperimento letto in fase di training: qui
+        # serve solo per taggare le metriche salvate, non cambia il comportamento
+        # dell'inferenza (che è comunque agnostica alla strategia di sharding
+        # usata a monte, valuta semplicemente il modello globale già assemblato).
+        # Campi piatti su InferenceRequest, popolati da main.py a partire dallo
+        # storico locale del job di training corrispondente.
+        partitioning_info = {
+            "strategy": payload.get("partition_strategy", "iid"),
+            "alpha": payload.get("partition_alpha"),
+        }
 
         # Marcatore di "inferenza avviata": l'inferenza federata calcola tutto in
         # RAM e via RPC, senza salvare il checkpoint chunk-per-chunk che invece
@@ -629,6 +776,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "federated", "phase": "inference",
             "tree_type": tree_type, "testing_set_size": total_samples_ref[0],
+            "federated_partitioning": partitioning_info,
             "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
             "metrics": metrics
         })

@@ -34,8 +34,10 @@ for DIR in "${TARGET_DIRS[@]}"; do
 
     echo "Svuotamento dei contenuti in: $DIR"
 
-    find "$DIR" -mindepth 1 \
+        find "$DIR" -mindepth 1 \
         ! -name ".gitkeep" \
+        ! -path "$PROJECT_ROOT/.local_storage/metrics" \
+        ! -path "$PROJECT_ROOT/.local_storage/metrics/*" \
         -exec rm -rf {} +
 
     echo "  [OK] Contenuto di $DIR svuotato (struttura radice e .gitkeep preservati)."
