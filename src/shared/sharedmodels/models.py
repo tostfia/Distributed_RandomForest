@@ -60,6 +60,13 @@ class TrainingRequest(BaseModel):
     dataset_type: DatasetType
     hyperparameters: Hyperparameters
     seed: int = 123
+    # Iperparametro dell'ESPERIMENTO (come i dati sono ripartiti tra i worker
+    # federati), non del modello: tenuto deliberatamente FUORI da
+    # Hyperparameters, che è condiviso anche con InferenceRequest dove questo
+    # campo non avrebbe senso. Default "iid" per compatibilità con richieste
+    # già serializzate (storico locale, job in coda) prima di questa modifica.
+    partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
+    partition_alpha: Optional[float] = None
 
 
 class TrainingRequestWorker(BaseModel):
@@ -79,3 +86,12 @@ class InferenceRequest(BaseModel):
     data_url: Optional[str] = None
     environment: Environment
     hyperparameters: Hyperparameters
+    # Stesso significato di TrainingRequest.partition_strategy/alpha: qui
+    # servono SOLO per etichettare le metriche di inferenza salvate con la
+    # stessa strategia/alpha usati per addestrare il modello che si sta
+    # valutando (recuperati dallo storico locale del job di training
+    # corrispondente). Non influenzano in alcun modo il calcolo
+    # dell'inferenza, che è agnostico rispetto a come i dati di training
+    # furono partizionati.
+    partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
+    partition_alpha: Optional[float] = None

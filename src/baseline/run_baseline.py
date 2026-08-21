@@ -72,7 +72,7 @@ def run_baseline():
     user_tree_type = "classifier"
     # Default storico: partizionamento IID, invariato. Sovrascritti sotto se il
     # boot config specifica una strategia non-IID per l'esperimento federato.
-    partition_strategy = "iid"
+    partition_strategy = "dirichlet"
     federated_alpha = 0.5
     
     sys_cfg = SystemConfig()
