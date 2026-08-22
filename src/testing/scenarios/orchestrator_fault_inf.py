@@ -291,9 +291,14 @@ def _resolve_ecs_task_arn_by_ip(ecs_client, cluster, service_name, ip_dashed):
     """
     Trova, tra i task RUNNING del service ECS indicato, quello il cui IP
     privato (formato Fargate awsvpc, es. '172.31.70.125') corrisponde al
-    frammento 'ip-172-31-70-125' estratto dal nome interno dell'orchestratore
+    frammento '172-31-70-125' estratto dal nome interno dell'orchestratore
     (che include l'hostname Fargate, identico al pattern già usato per i
     worker). Ritorna l'ARN del task, o None se non trovato.
+
+    NOTA 'ip_dashed': deve essere SENZA il prefisso 'ip-' (es. '172-31-70-125'),
+    perché va confrontato con 'ip.replace(".", "-")' qui sotto, che produce un
+    IP puro senza prefisso. Passare un valore con il prefisso 'ip-' fa fallire
+    SEMPRE il confronto, anche quando il task cercato esiste davvero.
     """
     task_arns = ecs_client.list_tasks(
         cluster=cluster, serviceName=service_name, desiredStatus="RUNNING"
@@ -774,7 +779,9 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         ip_match = re.search(r"ip-(\d+-\d+-\d+-\d+)\.ec2\.internal", killed_leader_name)
         stopped = False
         if ip_match:
-            ip_dashed = f"ip-{ip_match.group(1)}"
+            # SENZA prefisso 'ip-': vedi nota in _resolve_ecs_task_arn_by_ip
+            # sul formato atteso per il confronto con l'IP letto da ECS.
+            ip_dashed = ip_match.group(1)
             try:
                 ecs = boto3.client("ecs", region_name=region)
                 target_arn = _resolve_ecs_task_arn_by_ip(ecs, cluster, service_name, ip_dashed)
