@@ -1,8 +1,11 @@
 {
+  "_NOTE_ruolo_di_questo_file": "Configurazione del BANCO DI PROVA: cosa testare, con quali soglie e contro quale infrastruttura. NON descrive più il modello: iperparametri e ricetta del dataset vivono nel manifesto della baseline (outputs_baseline/config_synthetic.json o config_real.json), che è la fonte di verità condivisa fra run_baseline(), il client e il cluster. Vedi BaseTestScenario._resolve_hyperparameters.",
+
   "selected_task": "regressor",
   "dataset_type": "synthetic",
   "dataset_path": "synthetic/synthetic_dataset.csv",
-  "scenarios_enabled": ["performance", "scalability", "network", "fault"],
+
+  "_NOTE_iperparametri": "I due blocchi qui sotto NON sono più la fonte primaria: valgono solo (a) come fallback quando il manifesto della baseline non esiste ancora su questa macchina, e (b) quando 'use_local_hyperparameters' è true. Se differiscono dal manifesto e vengono effettivamente usati, gli scenari lo dichiarano nei log con una riga [TEST CONFIG].",
   "hyperparameters_class": {
     "n_estimators": 30,
     "tree_type": "classifier"
@@ -12,31 +15,40 @@
     "tree_type": "regressor",
     "max_depth": 15
   },
+
+  "_NOTE_use_local_hyperparameters": "Impostare a true SOLO per un esperimento deliberatamente diverso dalla baseline (es. più alberi per dare al cluster abbastanza lavoro da ammortizzare l'overhead nei test di scalabilità). Con true, i tempi e le metriche del run NON sono confrontabili con T_seq/T_1node prodotti da run_baseline(): la scelta va quindi dichiarata anche in relazione.",
+  "use_local_hyperparameters": false,
+
   "scalability_test": {
+    "_NOTE": "I valori maggiori del numero di worker realmente registrati vengono scartati da ScalabilityScenario. Su AWS il tetto è il desired-count del worker-service: per testare 5 o 7 va prima scalato il service, altrimenti la curva di speedup resta a due soli punti.",
     "worker_counts_to_test": [1, 3, 5, 7]
   },
+
   "network_simulation": {
+    "_NOTE": "Delay artificiale iniettato con tc netem, applicabile SOLO in locale/Docker. Su AWS lo scenario 3 non inietta nulla (CAP_NET_ADMIN non disponibile su Fargate, AWS FIS non accessibile con le credenziali Academy) e si limita a misurare la latenza RPC reale: i due risultati vanno presentati come esperimenti distinti.",
     "latency_seconds": 1.5,
     "packet_loss_rate": 0.0
   },
+
   "fault_tolerance": {
-    "kill_worker_after_seconds": 10,
-    "kill_orchestrator_after_seconds": 80
-  },
-  "inference_worker_fault": {
+    "_NOTE": "Scenario 4 - guasto del worker durante l'addestramento. Il guasto non scatta mai prima che sia stato inviato un chunk reale, né prima che siano trascorsi kill_worker_after_seconds totali.",
     "kill_worker_after_seconds": 10
   },
-  "inference_orchestrator_fault": {
-    "kill_orchestrator_after_seconds": 80
+
+  "inference_worker_fault": {
+    "_NOTE": "Scenario 5 - guasto del worker durante l'inferenza. Stessa logica a due fasi dello scenario 4.",
+    "kill_worker_after_seconds": 10
   },
 
-  "_NOTE_chiavi_orchestrator_failover": "orchestrator_fault.py legge 'orchestrator_failover' e orchestrator_fault_inf.py legge 'inference_orchestrator_failover' (non 'inference_orchestrator_fault', che è un'altra chiave già presente sopra e usata solo come nome, mai letta dagli scenari 6/7): senza queste due chiavi, prima di questa modifica, gli scenari di failover dell'orchestrator giravano sempre sui default hardcoded nel codice (400/90/300s), ignorando qualunque valore qui. Aggiunte qui sotto per renderle configurabili davvero, sia in locale che su AWS.",
   "orchestrator_failover": {
+    "_NOTE": "Scenario 6 - failover dell'orchestratore durante l'addestramento. Su AWS il leader viene fermato davvero con ecs:StopTask e il recupero è affidato ai TTL naturali dei lock (leadership 180s, job lease 300s): max_monitor_timeout_seconds deve coprirli entrambi nel caso peggiore.",
     "max_wait_for_training_start_seconds": 400,
     "failover_detection_margin_seconds": 90,
     "max_monitor_timeout_seconds": 790
   },
+
   "inference_orchestrator_failover": {
+    "_NOTE": "Scenario 7 - failover dell'orchestratore durante l'inferenza. È la chiave letta da orchestrator_fault_inf.py; il vecchio blocco 'inference_orchestrator_fault' era un doppione che nessuno leggeva ed è stato rimosso.",
     "kill_orchestrator_after_seconds": 5,
     "max_wait_for_inference_start_seconds": 60,
     "docker_kill_delay_seconds": 1,
@@ -45,14 +57,14 @@
   },
 
   "aws": {
-    "_NOTE": "Sezione letta da run_test_aws.sh / aws_ecs_utils.py per identificare cluster e region. Le credenziali AWS Academy (chiavi/token) restano SOLO nel .env, MAI qui.",
+    "_NOTE": "Sezione letta dagli scenari per individuare cluster, region e nomi dei service ECS. Le credenziali AWS restano SOLO in ~/.aws/credentials e nel ruolo IAM dei task, MAI qui.",
     "ecs_cluster_name": "forest-cluster",
     "region": "us-east-1",
     "orchestrator_service_name": "orchestrator-service",
     "worker_service_name_centralized": "worker-service",
     "worker_service_name_federated_prefix": "worker-service-",
 
-    "_NOTE_timeouts": "Su AWS il ciclo ETL/RPC reale (S3 + rete tra task Fargate) e il tempo di ecs.stop_task() sono più lenti del kill istantaneo locale/Docker: qui sotto override consigliati (più prudenti) per gli scenari di guasto, da copiare sopra al posto dei valori 'locali' se i test AWS falliscono per timeout troppo stretti.",
+    "_NOTE_timeouts": "Su AWS l'ETL/RPC reale (S3 più rete tra task Fargate) e il tempo di ecs.stop_task() sono più lenti del kill istantaneo locale/Docker. Questi override vengono applicati AUTOMATICAMENTE quando environment == 'aws' (vedi _merge_aws_overrides nei file degli scenari di guasto): non vanno più copiati a mano sopra i valori locali.",
     "suggested_overrides": {
       "fault_tolerance": {
         "kill_worker_after_seconds": 45
@@ -69,8 +81,7 @@
         "kill_orchestrator_after_seconds": 10,
         "docker_kill_delay_seconds": 5,
         "failover_detection_margin_seconds": 120,
-        "max_monitor_timeout_seconds": 550,
-        "_NOTE": "docker_kill_delay_seconds qui è il ritardo fisso usato anche dal ramo AWS (kill_aws_leader_target), non solo da quello Docker: vedi limitazione documentata in orchestrator_fault_inf.py sul checkpoint di inferenza S3 non ancora confermato."
+        "max_monitor_timeout_seconds": 550
       }
     }
   }

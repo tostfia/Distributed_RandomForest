@@ -67,6 +67,12 @@ DEFAULT_ALPHA = 0.5
 
 BASE_CACHE_DIR = "./workers_cache"
 
+# Cartella predefinita del dataset reale. Stesso nome di variabile d'ambiente
+# usato da run_baseline.py, così le due parti del sistema si configurano allo
+# stesso modo invece di usare tre nomi diversi ('dataset_path' inesistente su
+# SystemConfig, 'DATASET_PATH' qui, nessuno nella baseline).
+DEFAULT_DATA_FOLDER = "./dataset_cache"
+
 
 def _worker_shard_dir(base_cache_dir: str, index_one_based: int) -> str:
     """
@@ -102,13 +108,38 @@ def _shards_already_present(num_workers: int, base_cache_dir: str = BASE_CACHE_D
 
 def _resolve_data_folder(data_folder: str) -> str:
     """
-    Stessa risoluzione della sorgente dati usata a runtime: se il valore passato
-    è assente, inesistente o il placeholder './data', ripiega su './dataset_cache'
-    quando presente, altrimenti './data'.
+    Cartella sorgente del dataset reale.
+
+    La versione precedente era:
+
+        if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
+            return "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
+
+    cioè, in caso di percorso mancante o inesistente, ripiegava in silenzio su
+    './data'. Quel fallback è stato rimosso, qui come in run_baseline.py, per
+    due motivi:
+
+      1) './data' non contiene il dataset reale ma è la cartella dove, per
+         ragioni storiche, potevano trovarsi CSV estranei: RawCSVDataLoader li
+         avrebbe raccolti e trattati come traffico CICIDS, generando shard
+         sbagliati senza alcun errore;
+
+      2) un fallback silenzioso su una cartella arbitraria fa fallire il
+         provisioning in modo invisibile — i worker ricevono comunque degli
+         shard, solo costruiti dai dati sbagliati.
+
+    Ora un percorso assente o inesistente è un errore esplicito.
     """
-    if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
-        return "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
-    return data_folder
+    resolved = data_folder or os.environ.get("DATASET_LOCAL_PATH", DEFAULT_DATA_FOLDER)
+    if not os.path.exists(resolved):
+        raise FileNotFoundError(
+            f"Cartella del dataset reale non trovata: '{resolved}'. "
+            f"Posiziona lì i CSV del CICIDS, oppure indica un percorso diverso con "
+            f"--data-folder o con la variabile d'ambiente DATASET_LOCAL_PATH. "
+            f"(Nessun fallback automatico: generare gli shard da una cartella non "
+            f"prevista produrrebbe worker addestrati su dati sbagliati.)"
+        )
+    return resolved
 
 
 def provision(num_workers: int, data_folder: str, dataset_type: str = "real", force: bool = False,
@@ -166,7 +197,11 @@ def main() -> None:
                     "(gemello locale di provision_federated_shards.py)."
     )
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("NUM_WORKERS", 3)))
-    parser.add_argument("--data-folder", type=str, default=os.environ.get("DATASET_PATH", "./dataset_cache"))
+    # Allineato a run_baseline.py: stessa variabile d'ambiente DATASET_LOCAL_PATH.
+    # Prima il default leggeva 'DATASET_PATH', un terzo nome diverso sia da quello
+    # usato dalla baseline sia dall'attributo (inesistente) cercato su SystemConfig.
+    parser.add_argument("--data-folder", type=str,
+                        default=os.environ.get("DATASET_LOCAL_PATH", DEFAULT_DATA_FOLDER))
     parser.add_argument("--dataset-type", type=str, default=os.environ.get("DATASET_TYPE", "real"),
                         choices=["real", "synthetic"])
     parser.add_argument("--force", action="store_true",
