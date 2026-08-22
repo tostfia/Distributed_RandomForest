@@ -1,0 +1,9 @@
+{
+  "fault_tolerance": {
+    "scenario_description": "Crash improvviso Worker su thread/processi Python locali.",
+    "execution_mode": "centralized",
+    "status": "SUCCESS",
+    "trees_built": 100,
+    "duration_seconds": 68.67
+  }
+}

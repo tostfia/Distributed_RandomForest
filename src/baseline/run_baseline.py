@@ -121,27 +121,31 @@ def run_baseline():
         print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
     if dataset_type == "synthetic":
-        if not os.path.exists(REAL_CONFIG_PATH):
-            raise FileNotFoundError(
-                f"Per eseguire la baseline sintetica serve aver già eseguito il tuning sul "
-                f"dataset reale: '{REAL_CONFIG_PATH}' non trovato. Eseguire prima la baseline "
-                f"sul dataset reale (opzione 1)."
-            )
+        # Il tuning sul dataset reale serve SOLO al task sintetico di
+        # CLASSIFICAZIONE (stesso algoritmo e stesso tipo di problema, quindi
+        # ereditarne gli iperparametri è metodologicamente difendibile). Per il
+        # REGRESSOR non viene mai usato — si va su SYNTHETIC_REGRESSOR_REFERENCE_HP
+        # — quindi pretenderlo bloccava la baseline di regressione senza motivo.
+        #
+        # La versione precedente sollevava FileNotFoundError se il file NON
+        # esisteva e, nel ramo 'else' (cioè quando ESISTEVA), stampava
+        # "non trovato" assegnando un fallback che veniva comunque sovrascritto
+        # due righe dopo: messaggio fuorviante e codice irraggiungibile.
+        best_hp_reale = None
+        if user_tree_type == "classifier":
+            if not os.path.exists(REAL_CONFIG_PATH):
+                raise FileNotFoundError(
+                    f"Per eseguire la baseline sintetica di CLASSIFICAZIONE serve aver già "
+                    f"eseguito il tuning sul dataset reale: '{REAL_CONFIG_PATH}' non trovato. "
+                    f"Eseguire prima la baseline sul dataset reale (opzione 1)."
+                )
+            with open(REAL_CONFIG_PATH, "r") as f:
+                real_config = json.load(f)
+            best_hp_reale = real_config["hyperparameters"]
+            print(f" [INFO] Iperparametri di riferimento caricati dal tuning sul reale: '{REAL_CONFIG_PATH}'")
         else:
-            print(f" [INFO] '{REAL_CONFIG_PATH}' non trovato. Uso iperparametri di fallback di default.")
-            best_hp_reale = {
-                "n_estimators": 10,
-                "max_depth": 10,
-                "min_samples_split": 2,
-                "max_features": "sqrt",
-                "criterion": "gini",
-                "bootstrap": True,
-                "max_samples": 1.0
-            }
-        with open(REAL_CONFIG_PATH, "r") as f:
-            real_config = json.load(f)
-        best_hp_reale = real_config["hyperparameters"]
-        print(f" [INFO] Iperparametri di riferimento caricati dal tuning sul reale: '{REAL_CONFIG_PATH}'")
+            print(" [INFO] Task REGRESSOR: il tuning sul dataset reale non è richiesto "
+                  "(si usa la configurazione di riferimento fissa dichiarata a inizio file).")
 
         if os.path.exists(SYNTHETIC_CONFIG_PATH):
             with open(SYNTHETIC_CONFIG_PATH, "r") as f:
@@ -154,25 +158,43 @@ def run_baseline():
         else:
             tmp_cfg = {}
         
-        target_col = "Target"
-        n_samples = tmp_cfg.get("n_samples", 500000)
+        # Stessa convenzione di CentralizedOrchestrator._prepare_data
+        # ("Target" per la regressione, "Label" per la classificazione). Prima
+        # era fissa a "Target" anche in classificazione, quindi baseline e
+        # cluster producevano CSV con la colonna target chiamata diversamente.
+        target_col = "Target" if user_tree_type == "regressor" else "Label"
+
+        # Default allineato a SyntheticDataLoader (n_samples=300000). Prima qui
+        # il default era 500000: in assenza di un manifesto la baseline generava
+        # un dataset 1.67x più grande di quello del cluster, e i tempi di
+        # addestramento non erano confrontabili.
+        n_samples = tmp_cfg.get("n_samples", 300000)
         n_features = tmp_cfg.get("n_features", 30)
         n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
         noise = tmp_cfg.get("noise", 10.0)
 
-        # Conserviamo TUTTI i parametri di generazione già presenti nel file
-        # (inclusi quelli usati solo per la classificazione, es. n_informative,
-        # n_redundant...) in modo da poterli riscrivere intatti a fine run,
-        # dato che ora config_synthetic.json è l'unica fonte di verità sia
-        # per l'input (ricetta dataset) sia per l'output (manifesto).
+        # Registriamo i parametri EFFETTIVAMENTE usati per generare il dataset,
+        # non quelli riletti dal file di input. Prima il dizionario veniva
+        # costruito filtrando 'tmp_cfg': al primo run il manifesto non esiste,
+        # tmp_cfg è vuoto e quindi n_samples/n_features non venivano MAI
+        # persistiti. Il manifesto restava privo della ricetta, SyntheticDataLoader
+        # continuava a usare i propri default e le due parti non convergevano
+        # mai su una configurazione comune.
+        # I parametri specifici della classificazione vengono invece conservati
+        # da tmp_cfg, perché in quel ramo è il loader a risolverli dal manifesto.
         dataset_gen_params = {
             k: v for k, v in tmp_cfg.items()
-            if k in (
-                "n_samples", "n_features", "n_informative", "n_redundant",
-                "n_clusters_per_class", "flip_y", "weight",
-                "n_informative_reg", "noise",
-            )
+            if k in ("n_informative", "n_redundant", "n_clusters_per_class", "flip_y", "weight")
         }
+        dataset_gen_params.update({
+            "n_samples": n_samples,
+            "n_features": n_features,
+            "target_column": target_col,
+            "random_seed": RANDOM_SEED,
+        })
+        if user_tree_type == "regressor":
+            dataset_gen_params["n_informative_reg"] = n_informative_reg
+            dataset_gen_params["noise"] = noise
 
         task_str = "regression" if user_tree_type == "regressor" else "classification"
         print(f" • Tipo Dataset: Sintetico (Stress Test Task - {user_tree_type.upper()})")
@@ -186,19 +208,61 @@ def run_baseline():
             n_informative_reg=n_informative_reg,
             noise=noise,
         )
+        # Generazione e split cronometrati come I/O + ETL. Prima erano azzerati
+        # (io_time = etl_time = 0.0): la baseline sintetica dichiarava zero costo
+        # di preparazione dati mentre il lato distribuito conteggia l'intero
+        # _prepare_data (30-40s su AWS per via di S3), quindi un confronto sui
+        # tempi TOTALI risultava sistematicamente sfavorevole al cluster.
+        io_start_time = time.perf_counter()
         df_clean = loader.load()
+        io_time = time.perf_counter() - io_start_time
+        print(f"[OK] Generazione dataset sintetico completata in {io_time:.4f} secondi.")
 
-        train_df, test_df = train_test_split(df_clean, test_size=TEST_SIZE, random_state=RANDOM_SEED)
-        io_time = 0.0 
-        etl_time = 0.0
+        preprocess_start_time = time.perf_counter()
+        if user_tree_type == "regressor":
+            train_df, test_df = train_test_split(df_clean, test_size=TEST_SIZE, random_state=RANDOM_SEED)
+        else:
+            # Split STRATIFICATO come in _prepare_data: sul sintetico di
+            # classificazione le classi sono sbilanciate (weights [0.9, 0.1]),
+            # quindi uno split non stratificato darebbe alla baseline una
+            # ripartizione train/test diversa da quella vista dal cluster.
+            train_df, test_df = StratifiedDataSplitter(
+                target_column=target_col, test_size=TEST_SIZE, random_state=RANDOM_SEED
+            ).split(df_clean)
+        etl_time = time.perf_counter() - preprocess_start_time
     else:
-        data_folder = getattr(sys_cfg, "dataset_path", None)
-        
-        if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
-            if os.path.exists("./dataset_cache"):
-                data_folder = "./dataset_cache"
-            else:
-                data_folder = "./data"
+        # Cartella sorgente del dataset REALE.
+        #
+        # La versione precedente era:
+        #     data_folder = getattr(sys_cfg, "dataset_path", None)
+        #     if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
+        #         data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
+        # con due difetti indipendenti:
+        #
+        # 1) SystemConfig non espone alcun attributo 'dataset_path' (vedi
+        #    config.py: definisce solo mode, env, aws_region, le due code SQS e
+        #    s3_bucket_name). Quindi il getattr restituiva SEMPRE None, la prima
+        #    condizione era SEMPRE vera e nessun percorso configurato veniva mai
+        #    onorato: la configurazione dava l'illusione di essere letta.
+        #
+        # 2) Il fallback finale su './data' faceva puntare RawCSVDataLoader a
+        #    una cartella che poteva contenere CSV estranei (è lì che si trovava
+        #    'sintetic_data.csv', un dataset SINTETICO): sarebbero stati
+        #    ingeriti e processati dal CICIDSPreprocessor come se fossero
+        #    traffico di rete reale, corrompendo la baseline in silenzio.
+        #
+        # Ora il percorso è configurabile davvero, tramite DATASET_LOCAL_PATH,
+        # e in assenza della cartella si fallisce subito con un errore
+        # esplicito invece di ripiegare su una directory arbitraria.
+        data_folder = os.environ.get("DATASET_LOCAL_PATH", "./dataset_cache")
+        if not os.path.exists(data_folder):
+            raise FileNotFoundError(
+                f"Cartella del dataset reale non trovata: '{data_folder}'. "
+                f"Posiziona lì i CSV del CICIDS, oppure indica un percorso diverso "
+                f"con la variabile d'ambiente DATASET_LOCAL_PATH. "
+                f"(Nessun fallback automatico: leggere CSV da una cartella non "
+                f"prevista produrrebbe una baseline sbagliata senza segnalarlo.)"
+            )
 
         print(f" • Cartella sorgente identificata per dati reali: '{data_folder}'")
         print(f" • Tipo Dataset: Reale (Campionamento probabilistico 1%, Seed: {RANDOM_SEED})")
@@ -394,10 +458,24 @@ def run_baseline():
             }
         }
 
+        # 'config_synthetic.json' è il manifesto ATTIVO: è quello letto sia da
+        # SyntheticDataLoader (ricetta del dataset) sia dal client
+        # (load_hyperparameters_from_config). Essendo unico, un run di
+        # classificazione sovrascrive quello di regressione e viceversa — ma la
+        # traccia richiede ENTRAMBI i task. Ne salviamo quindi anche una copia
+        # per-task, così i due esperimenti restano documentati e ricostruibili
+        # (il .pkl del modello era già differenziato per tree_type, il manifesto no).
         config_path_synthetic = os.path.join(OUTPUT_DIR, "config_synthetic.json")
         with open(config_path_synthetic, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
-        print(f"[OK] Manifesto sintetico ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+        print(f"[OK] Manifesto sintetico ATTIVO ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+
+        config_path_synthetic_task = os.path.join(OUTPUT_DIR, f"config_synthetic_{user_tree_type}.json")
+        with open(config_path_synthetic_task, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+        print(f"[OK] Copia per-task archiviata in: '{config_path_synthetic_task}'")
+        print(f"[NOTA] Il cluster legge SEMPRE '{config_path_synthetic}': per passare all'altro "
+              f"task sintetico va rilanciata la baseline, non basta avere la copia per-task.")
 
     # ---------------------------------------------------------
     # FASE 4: ADDESTRAMENTO FINALE & INFERENZA LOCALE
@@ -434,6 +512,40 @@ def run_baseline():
     tree_clf.fit(X_train, y_train)
     t_seq = time.perf_counter() - start_train_finale
     print(f"[OK] Fitting completato. T_seq ottenuto: {t_seq:.4f} secondi.")
+
+    # ---------------------------------------------------------
+    # SECONDA BASELINE: stessa macchina, TUTTI i core (n_jobs=-1)
+    #
+    # Perché serve: T_seq è monocore (n_jobs=1), mentre ogni worker del cluster
+    # addestra i propri alberi con un Pool multiprocesso (BaseWorker:
+    # allocated_cores = cpu_count-1 su AWS). Se in relazione si presenta
+    # T_seq / T_distribuito come "speedup della distribuzione", quel numero
+    # include anche il guadagno del semplice multicore locale, che con
+    # l'architettura distribuita non c'entra nulla.
+    #
+    # Con entrambi i riferimenti l'analisi diventa onesta e più ricca:
+    #  • T_seq          -> speedup ed efficienza confrontabili con la teoria;
+    #  • T_1node_par    -> "quanto guadagno DAVVERO distribuendo, rispetto a
+    #                       usare al meglio una macchina sola?"
+    # ---------------------------------------------------------
+    cpu_disponibili = os.cpu_count() or 1
+    print(f"\n>>> FASE 4b: Baseline su singola macchina MULTICORE ({cpu_disponibili} core logici, n_jobs=-1)...")
+    rf_kwargs_par = dict(rf_kwargs)
+    rf_kwargs_par["n_jobs"] = -1
+    if user_tree_type == "classifier":
+        tree_clf_par = RandomForestClassifier(**rf_kwargs_par)
+    else:
+        tree_clf_par = RandomForestRegressor(**rf_kwargs_par)
+
+    start_train_par = time.perf_counter()
+    tree_clf_par.fit(X_train, y_train)
+    t_1node_parallel = time.perf_counter() - start_train_par
+    speedup_multicore = (t_seq / t_1node_parallel) if t_1node_parallel > 0 else 1.0
+    print(f"[OK] Fitting multicore completato: {t_1node_parallel:.4f} s "
+          f"(speedup del solo multicore locale: {speedup_multicore:.2f}x)")
+    # Il modello usato per le metriche resta quello sequenziale: n_jobs cambia
+    # solo COME viene calcolato il fit, non il risultato (stesso random_state),
+    # quindi tree_clf_par serve unicamente da riferimento temporale.
 
     print("\n[LOCAL] Calcolo delle predizioni e latenza sul Test Set indipendente...")
     start_inferenza = time.perf_counter()
@@ -480,12 +592,30 @@ def run_baseline():
     metadata_pipeline = {
         "modello_addestrato": tree_clf,
         "features_mappate": list(X_train.columns),
+        # Scomposizione completa dei tempi: senza io_time/etl_time non è
+        # possibile confrontare correttamente con il cluster, il cui tempo
+        # totale include sempre la preparazione dati (vedi
+        # CentralizedOrchestrator.last_etl_seconds).
         "baseline_tempi_locali": {
             "tempo_totale_cv": tempo_tuning,
             "tempo_medio_fold": tempo_medio_fold_tuning,
+            "io_time": io_time,
+            "etl_time": etl_time,
             "t_seq": t_seq,
+            "t_1node_parallel": t_1node_parallel,
+            "speedup_multicore_locale": speedup_multicore,
+            "cpu_count": cpu_disponibili,
             "tempo_inferenza_totale": tempo_inferenza_totale
         },
+        # Dimensioni effettive: servono a verificare a colpo d'occhio che
+        # baseline e cluster abbiano lavorato sullo stesso volume di dati.
+        "dataset_shape": {
+            "train": list(X_train.shape),
+            "test": list(X_test.shape),
+            "dataset_type": dataset_type,
+            "tree_type": user_tree_type,
+        },
+        "iperparametri_usati": dict(hp),
         "metriche_test": metriche_test
     }
 
@@ -553,8 +683,21 @@ def run_baseline():
     print(f"  • Tempo Medio per Singolo Fold (CV)    : {tempo_medio_fold_tuning:8.4f} s")
     print(f"  • Tempo di Caricamento Dati (I/O)      : {io_time:8.4f} s")
     print(f"  • Tempo di Trasformazione (Process)    : {etl_time:8.4f} s")
-    print(f"  • Tempo Totale di Addestramento (Training Set)  : {t_seq:8.4f} s")
+    print(f"  • T_seq  - Addestramento MONOCORE (n_jobs=1)   : {t_seq:8.4f} s")
+    print(f"  • T_1node - Addestramento MULTICORE (n_jobs=-1): {t_1node_parallel:8.4f} s  "
+          f"[{cpu_disponibili} core, speedup locale {speedup_multicore:.2f}x]")
     print(f"  • Tempo Totale di Inferenza (Testing Set) : {tempo_inferenza_totale:8.4f} s")
+    print(f"  • Volume dati: train={X_train.shape}  test={X_test.shape}")
+
+    print(f"\n5. COME CONFRONTARE QUESTI NUMERI COL CLUSTER")
+    print(LINEA_SINGOLA)
+    print("  ▸ Confronta il tempo di ADDESTRAMENTO del cluster al NETTO dell'ETL")
+    print("    (CentralizedOrchestrator.last_etl_seconds) contro T_seq / T_1node:")
+    print("    il totale del cluster include sempre la preparazione dati, la baseline no.")
+    print("  ▸ Usa T_seq per speedup ed efficienza 'da manuale', T_1node per rispondere")
+    print("    alla domanda pratica 'conviene distribuire invece di usare una macchina sola?'.")
+    print("  ▸ Verifica che 'Volume dati' qui sopra coincida con lo shape stampato dal cluster:")
+    print("    se differiscono, il confronto NON è valido (controlla config_synthetic.json).")
 
 if __name__ == "__main__":
     run_baseline()

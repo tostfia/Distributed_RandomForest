@@ -1,6 +1,6 @@
 import uuid
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 Environment = Literal["local", "aws"]
 Mode = Literal["centralized", "federated"]
@@ -16,6 +16,16 @@ class Hyperparameters(BaseModel):
     bootstrap: bool = True
     tree_type: Literal["classifier", "regressor"] = "classifier"
     target_column: Optional[str] = None
+    # Aggiunti per allineare il cluster alla baseline locale: senza questi due
+    # campi il manifesto (outputs_baseline/config_*.json) poteva dichiarare
+    # criterion='entropy' o un max_features non standard, ma il valore veniva
+    # scartato qui e l'Orchestratore ricadeva sui propri default — quindi la
+    # baseline e il cluster addestravano modelli DIVERSI senza alcun segnale.
+    # Union[str, float] perché sklearn accetta sia le stringhe ('sqrt', 'log2')
+    # sia una frazione (es. 1/3, usata per il regressore). In Pydantic v2 la
+    # smart union preserva il tipo originale, quindi 0.333 non diventa "0.333".
+    max_features: Optional[Union[str, float]] = None
+    criterion: Optional[str] = None
 
     @field_validator("n_estimators")
     @classmethod

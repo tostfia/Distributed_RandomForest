@@ -241,7 +241,8 @@ class BaseWorker(Service, ABC):
         pass
 
     def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None,
-                                     min_samples_split=2, class_weight=None, criterion=None):
+                                     min_samples_split=2, class_weight=None, criterion=None,
+                                     bootstrap=None, max_samples=None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
@@ -252,6 +253,20 @@ class BaseWorker(Service, ABC):
         # Forest invece che su None (= tutte le feature ad ogni split).
         if max_features is None:
             max_features = "sqrt" if not self.is_regression() else (1 / 3)
+
+        # bootstrap/max_samples: fino ad ora venivano presi ESCLUSIVAMENTE dai
+        # valori di boot del worker (self.bootstrap / self.max_samples), quindi
+        # qualunque cosa dichiarasse il manifesto o la TrainingRequest veniva
+        # ignorata — inclusa la forzatura bootstrap=False della modalità
+        # federata, che di fatto non aveva alcun effetto sugli alberi.
+        # Ora sono parametri OPZIONALI: None = "non specificato dal chiamante",
+        # e in quel caso si mantengono i valori di boot, quindi il
+        # comportamento di qualunque chiamante esistente resta identico a prima.
+        effective_bootstrap = self.bootstrap if bootstrap is None else bootstrap
+        effective_max_samples = self.max_samples if max_samples is None else max_samples
+        print(f"[{self.worker_name}] Campionamento: bootstrap={effective_bootstrap}, "
+              f"max_samples={effective_max_samples} "
+              f"({'da richiesta' if bootstrap is not None else 'da configurazione di boot'}).")
         cached_task_bytes = self._load_task_from_shared_storage(source_info, base_seed, num_trees)
         if cached_task_bytes is not None:
             print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Restituisco i byte.")
@@ -297,7 +312,7 @@ class BaseWorker(Service, ABC):
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:
             print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Esecuzione diretta senza Pool.")
-            direct_task  = (base_seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features,
+            direct_task  = (base_seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
                             min_samples_split, class_weight, criterion)
 
             global _child_X, _child_y
@@ -323,7 +338,7 @@ class BaseWorker(Service, ABC):
             worker_tasks = []
             for i in range(num_trees):
                 seed = base_seed + i
-                worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, max_features,
+                worker_tasks.append((seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
                                       min_samples_split, class_weight, criterion))
             local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
 

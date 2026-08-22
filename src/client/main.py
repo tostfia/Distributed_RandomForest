@@ -73,7 +73,9 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     if not raw_hp:
         raise ValueError("La sezione 'hyperparameters' è mancante o vuota nel file di configurazione della baseline.")
 
-    known_fields = {"n_estimators", "max_depth", "min_samples_split", "class_weight", "max_samples", "bootstrap", "tree_type", "target_column"}
+    known_fields = {"n_estimators", "max_depth", "min_samples_split", "class_weight",
+                    "max_samples", "bootstrap", "tree_type", "target_column",
+                    "max_features", "criterion"}
     hp_data = {k: v for k, v in raw_hp.items() if k in known_fields}
     if mode == "federated":
         hp_data["bootstrap"] = False

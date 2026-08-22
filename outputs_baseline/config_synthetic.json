@@ -1,0 +1,29 @@
+{
+  "mode": "distributed",
+  "dataset_type": "synthetic",
+  "dataset_path": "synthetic",
+
+  "n_samples": 100000,
+  "n_features": 10,
+  "n_informative": 5,
+  "n_redundant": 1,
+  "n_clusters_per_class": 2,
+  "flip_y": 0.01,
+  "weight": [0.9, 0.1],
+  "n_informative_reg": 3,
+  "noise": 10.0,
+
+  "feature_eliminata": [],
+  "feature_selezionate": [],
+  "hyperparameters": {
+    "n_estimators": 100,
+    "max_depth": null,
+    "min_samples_split": 2,
+    "bootstrap": true,
+    "max_samples": 1.0,
+    "tree_type": "regressor",
+    "target_column": "Target",
+    "random_state": 123
+  }
+  
+}

@@ -1,0 +1,86 @@
+{
+  "scalability": {
+    "scenario_description": "Strong scaling test completato per Addestramento ed Inferenza. Carico fisso di 100 alberi per ciascuna configurazione di worker testata.",
+    "execution_mode": "local",
+    "scaling_type": "strong",
+    "baseline_worker_count": 1,
+    "metrics_per_scale": {
+      "workers_1": {
+        "training": {
+          "duration_seconds": 326.56,
+          "throughput_trees_per_s": 0.31,
+          "speedup": 1.0
+        },
+        "inference": {
+          "duration_seconds": 236.94,
+          "throughput_samples_per_s": 84.41,
+          "speedup": 1.0
+        },
+        "accuracy_metrics": {
+          "mse": 126.29966492792666,
+          "rmse": 11.238312370099287,
+          "mae": 8.78140646927323,
+          "r2": 0.9873432882780585,
+          "testing_set_size": 20000
+        }
+      },
+      "workers_3": {
+        "training": {
+          "duration_seconds": 70.39,
+          "throughput_trees_per_s": 1.42,
+          "speedup": 4.64
+        },
+        "inference": {
+          "duration_seconds": 68.97,
+          "throughput_samples_per_s": 289.96,
+          "speedup": 3.44
+        },
+        "accuracy_metrics": {
+          "mse": 126.29966492792666,
+          "rmse": 11.238312370099287,
+          "mae": 8.78140646927323,
+          "r2": 0.9873432882780585,
+          "testing_set_size": 20000
+        }
+      },
+      "workers_5": {
+        "training": {
+          "duration_seconds": 58.33,
+          "throughput_trees_per_s": 1.71,
+          "speedup": 5.6
+        },
+        "inference": {
+          "duration_seconds": 39.55,
+          "throughput_samples_per_s": 505.72,
+          "speedup": 5.99
+        },
+        "accuracy_metrics": {
+          "mse": 126.29966492792666,
+          "rmse": 11.238312370099287,
+          "mae": 8.781406469273232,
+          "r2": 0.9873432882780585,
+          "testing_set_size": 20000
+        }
+      },
+      "workers_7": {
+        "training": {
+          "duration_seconds": 50.2,
+          "throughput_trees_per_s": 1.99,
+          "speedup": 6.51
+        },
+        "inference": {
+          "duration_seconds": 20.33,
+          "throughput_samples_per_s": 983.76,
+          "speedup": 11.65
+        },
+        "accuracy_metrics": {
+          "mse": 126.29966492792666,
+          "rmse": 11.238312370099287,
+          "mae": 8.781406469273232,
+          "r2": 0.9873432882780585,
+          "testing_set_size": 20000
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "performance_and_metrics": {
+    "scenario_description": "Valutazione delle prestazioni pure di addestramento in esecuzione locale.",
+    "status": "SUCCESS",
+    "execution_mode": "local",
+    "duration_seconds": 74.4802,
+    "trees_built": 100,
+    "throughput_trees_per_sec": 1.3426,
+    "model_accuracy_metrics": {
+      "mse": 4301.805547446598,
+      "rmse": 65.5881509683464,
+      "mae": 51.65231520920913,
+      "r2": 0.5499669702485098,
+      "testing_set_size": 100002
+    }
+  }
+}

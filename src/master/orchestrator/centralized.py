@@ -35,6 +35,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.test_data_path = None
         self.chunk_sent_event = threading.Event()
         self._trees_cache = {}
+        # Durata dell'ultima fase di preparazione dati (ETL). Serve agli scenari
+        # di test per scomporre il tempo totale in "preparazione dati" +
+        # "addestramento distribuito": la baseline locale misura t_seq sul solo
+        # fit, quindi confrontarla con un totale che include l'ETL (30-40s su
+        # AWS per via di S3) penalizzerebbe sistematicamente il cluster.
+        # 0.0 quando l'ETL viene saltata grazie allo SHORT-CIRCUIT.
+        self.last_etl_seconds = 0.0
         
         super().__init__(
             orchestrator_name=name,
@@ -145,7 +152,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
             dao = DatasetDAOFactory.get_dao(self.environment)
             dao.save_dataset(path=train_data_path, df=train_df)
             dao.save_dataset(path=test_data_path, df=test_df)
-            print(f"[DEBUG TIMING] _prepare_data completato in {time.perf_counter() - t0:.2f}s")
+            self.last_etl_seconds = time.perf_counter() - t0
+            print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
             print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
@@ -171,6 +179,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             dao = DatasetDAOFactory.get_dao(self.environment)
             if dao.exists(expected_train) and dao.exists(expected_test):
                 print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT ETL] Dataset già presente nello storage condiviso. Salto la fase ETL.")
+                self.last_etl_seconds = 0.0
                 self.train_data_path = expected_train
                 self.test_data_path = expected_test
                 self.current_job_id = expected_job_id
@@ -236,7 +245,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # per i regressori, ma evitiamo di forzarlo se il payload non lo prevede.
         class_weight = hp.get("class_weight", None)
         criterion = hp.get("criterion", None)
-        
+        # Inoltrati esplicitamente al worker: prima non venivano trasmessi
+        # affatto e ogni albero usava i valori di boot del worker
+        # (self.bootstrap / self.max_samples), rendendo di fatto inerte quanto
+        # dichiarato nel manifesto della baseline. None = "non specificato",
+        # e il worker mantiene i propri valori di boot (comportamento storico).
+        bootstrap = hp.get("bootstrap", None)
+        max_samples = hp.get("max_samples", None)
+        print(f"[{self.orchestrator_name}] Iperparametri effettivi -> n_estimators(step)={total_step_trees}, "
+              f"max_depth={max_depth}, max_features={max_features}, min_samples_split={min_samples_split}, "
+              f"criterion={criterion}, bootstrap={bootstrap}, max_samples={max_samples}")
+
         # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
@@ -334,7 +353,9 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 max_features=max_features,
                                 min_samples_split=min_samples_split,
                                 class_weight=class_weight,
-                                criterion=criterion
+                                criterion=criterion,
+                                bootstrap=bootstrap,
+                                max_samples=max_samples
                             )
                             
                             # Deserializzazione sicura dei byte trasmessi via rete
