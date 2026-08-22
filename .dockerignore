@@ -1,6 +1,24 @@
 # Cache pesanti e dataset (I colpevoli principali)
 dataset_cache/
-outputs_baseline/
+
+# outputs_baseline: escludiamo il CONTENUTO PESANTE (i .pkl delle pipeline
+# baseline) ma NON i manifesti JSON.
+#
+# PERCHE': SyntheticDataLoader legge 'outputs_baseline/config_synthetic.json'
+# A RUNTIME, dentro il container, per ricavare la ricetta del dataset
+# (n_samples, n_features, noise...). Con la regola precedente
+# ('outputs_baseline/' escluso in blocco) quel file non entrava mai
+# nell'immagine: nel container os.path.exists() falliva, config restava vuoto
+# e il loader ricadeva sui propri default hardcoded (n_samples=300000).
+# Risultato: qualunque cosa scrivesse la baseline nel manifesto veniva
+# ignorata su AWS, e baseline e cluster non potevano convergere sullo stesso
+# dataset nemmeno in linea di principio.
+#
+# Anche il client (load_hyperparameters_from_config) legge i config_*.json da
+# qui, quindi la stessa eccezione serve se lo si esegue in container.
+outputs_baseline/*
+!outputs_baseline/*.json
+
 synthetic/
 saved_models/
 workers_cache/
@@ -28,5 +46,11 @@ test_reports/
 **/*.pyc
 **/*.pyo
 **/*.pyd
-.pytest_cache/.env
+# Era '.pytest_cache/.env' per un a capo perso: quel pattern matcha soltanto un
+# file .env DENTRO la cache di pytest, quindi la cartella finiva nell'immagine.
+.pytest_cache/
+
+# === SEGRETI: non devono MAI entrare nell'immagine ===
+# (deploy.sh verifica questa esclusione al passo [0/10])
 .env
+aws_creds.sh
