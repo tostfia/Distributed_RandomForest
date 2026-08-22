@@ -316,6 +316,8 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp
             }
+        if orchestrator_type == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
 
 
         # 4. Invio del Job sulla coda standard gestita da Sofia
@@ -614,6 +616,11 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
+        # isinstance su orch_leader (non os.environ): questo metodo può essere
+        # invocato con l'orchestratore già istanziato dal chiamante, senza
+        # garanzia che SYS_MODE rifletta lo stesso valore in questo processo.
+        if isinstance(orch_leader, FederatedOrchestrator):
+            payload = self._augment_payload_with_partitioning(payload)
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}' "
               f"(lo reclamerà il leader reale su ECS)...")
         try:

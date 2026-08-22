@@ -209,50 +209,67 @@ class FederatedOrchestrator(BaseOrchestrator):
             t.join(timeout=35)
         return sizes
 
-    def _allocate_tree_quotas(self, total_step_trees: int, worker_names: list, worker_shard_sizes: dict) -> dict:
+    def _allocate_tree_quotas(self, total_step_trees: int, worker_names: list, worker_shard_sizes: dict,
+                               strategy: str = "proportional") -> dict:
         """
-        Alloca il budget di alberi da addestrare in QUESTO round proporzionalmente
-        alla dimensione dello shard locale di ciascun worker (metodo dei resti
-        più grandi: garantisce che la somma delle quote sia ESATTAMENTE
-        total_step_trees, senza doverla clampare a valle come nella vecchia
-        ripartizione a CHUNK_SIZE fisso).
+        Alloca il budget di alberi da addestrare in QUESTO round tra i worker
+        (metodo dei resti più grandi: garantisce che la somma delle quote sia
+        ESATTAMENTE total_step_trees, senza doverla clampare a valle come
+        nella vecchia ripartizione a CHUNK_SIZE fisso).
 
-        Con partizionamento IID gli shard sono quasi uguali per costruzione,
-        quindi il risultato è praticamente indistinguibile dalla vecchia
+        strategy="proportional" (default): pesa ogni worker in base alla
+        dimensione del proprio shard locale — corrisponde alla formula di
+        FedAvg n_k/n applicata al numero di alberi anziché ai pesi del
+        modello. Con partizionamento IID gli shard sono quasi uguali per
+        costruzione, quindi il risultato è praticamente indistinguibile dalla
         ripartizione equa. Con partizionamento non-IID (dirichlet/by_day),
         dove le dimensioni possono differire di molto, evita di addestrare
         tanti alberi quanto un worker "ricco di dati" su uno shard minuscolo:
         alberi ad alta varianza che, nel soft voting finale, peserebbero
         comunque quanto tutti gli altri.
 
-        Worker senza dimensione nota (RPC fallita) ricevono la dimensione
-        MEDIA dei worker noti come stima di fallback, invece di 0 (che li
-        escluderebbe implicitamente dal round). Se NESSUN worker ha una
-        dimensione nota (es. dataset_type='synthetic', dove lo shard non
-        esiste ancora sul disco a questo punto), si ricade sulla ripartizione
-        equa storica.
-        """
-        sizes = dict(worker_shard_sizes)
-        # IMPORTANTE: "sconosciuto" (RPC fallita) è diverso da "noto e pari a
-        # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
-        # non assegna alcuna riga di quella classe a quel worker). Solo il
-        # primo caso va coperto con una stima di fallback; il secondo va
-        # rispettato così com'è — un worker con shard vuoto deve ricevere
-        # quota 0, non una quota "media" che lo manderebbe in errore al primo
-        # bootstrap su un array senza campioni.
-        missing = [w for w in worker_names if w not in sizes]
-        known = [w for w in worker_names if w in sizes]
+        strategy="equal": stessa quota a tutti i worker indipendentemente
+        dalla dimensione dello shard (comportamento storico). Utile come
+        confronto controllato: con partizionamento non-IID estremo, pesare
+        per dimensione può ridurre la rappresentazione nella foresta finale
+        di un worker che detiene un pattern raro ma prezioso (es. una classe
+        minoritaria concentrata su quel worker) — "equal" garantisce a quel
+        worker la stessa voce in capitolo degli altri, a scapito di dedicare
+        più alberi a shard piccoli e ad alta varianza.
 
-        if missing and known and sum(sizes[w] for w in known) > 0:
-            fallback_size = max(1, int(np.mean([sizes[w] for w in known])))
-            for w in missing:
-                sizes[w] = fallback_size
-            print(f"[{self.orchestrator_name}] [WARN] Dimensione shard non disponibile per {missing}: "
-                  f"uso la media dei worker noti ({fallback_size}) come stima di fallback.")
-        elif not known or sum(sizes[w] for w in known) <= 0:
-            print(f"[{self.orchestrator_name}] [WARN] Nessuna dimensione di shard rilevata per alcun "
-                  f"worker (probabile dataset sintetico): ricado sulla ripartizione EQUA storica.")
+        Worker senza dimensione nota (RPC fallita, solo rilevante per
+        "proportional") ricevono la dimensione MEDIA dei worker noti come
+        stima di fallback, invece di 0 (che li escluderebbe implicitamente
+        dal round). Se NESSUN worker ha una dimensione nota (es.
+        dataset_type='synthetic', dove lo shard non esiste ancora sul disco a
+        questo punto), si ricade comunque sulla ripartizione equa.
+        """
+        if strategy == "equal":
             sizes = {w: 1 for w in worker_names}
+            print(f"[{self.orchestrator_name}] Allocazione alberi EQUA (tree_allocation_strategy='equal'): "
+                  f"ogni worker riceve la stessa quota indipendentemente dalla dimensione del proprio shard.")
+        else:
+            sizes = dict(worker_shard_sizes)
+            # IMPORTANTE: "sconosciuto" (RPC fallita) è diverso da "noto e pari a
+            # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
+            # non assegna alcuna riga di quella classe a quel worker). Solo il
+            # primo caso va coperto con una stima di fallback; il secondo va
+            # rispettato così com'è — un worker con shard vuoto deve ricevere
+            # quota 0, non una quota "media" che lo manderebbe in errore al primo
+            # bootstrap su un array senza campioni.
+            missing = [w for w in worker_names if w not in sizes]
+            known = [w for w in worker_names if w in sizes]
+
+            if missing and known and sum(sizes[w] for w in known) > 0:
+                fallback_size = max(1, int(np.mean([sizes[w] for w in known])))
+                for w in missing:
+                    sizes[w] = fallback_size
+                print(f"[{self.orchestrator_name}] [WARN] Dimensione shard non disponibile per {missing}: "
+                      f"uso la media dei worker noti ({fallback_size}) come stima di fallback.")
+            elif not known or sum(sizes[w] for w in known) <= 0:
+                print(f"[{self.orchestrator_name}] [WARN] Nessuna dimensione di shard rilevata per alcun "
+                      f"worker (probabile dataset sintetico): ricado sulla ripartizione EQUA storica.")
+                sizes = {w: 1 for w in worker_names}
 
         total_size = sum(sizes.get(w, 0) for w in worker_names)
         if total_size <= 0:
@@ -269,7 +286,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         for w in by_fraction_desc[:remainder]:
             quotas[w] += 1
 
-        print(f"[{self.orchestrator_name}] Allocazione alberi proporzionale alla dimensione dello shard: " +
+        label = "EQUA" if strategy == "equal" else "proporzionale alla dimensione dello shard"
+        print(f"[{self.orchestrator_name}] Allocazione alberi {label}: " +
               ", ".join(f"{w}={quotas[w]} (size={sizes.get(w, '?')})" for w in worker_names))
         return quotas
 
@@ -360,20 +378,25 @@ class FederatedOrchestrator(BaseOrchestrator):
             partitioning_info = {
                 "strategy": payload.get("partition_strategy", "iid"),
                 "alpha": payload.get("partition_alpha"),
+                "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
             }
             print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
                   f"strategy='{partitioning_info.get('strategy', 'iid')}'"
-                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "") + ".")
+                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "")
+                  + f" | tree_allocation='{partitioning_info.get('tree_allocation')}'.")
 
-            # Allocazione del budget di alberi PROPORZIONALE alla dimensione reale
-            # dello shard di ciascun worker (vedi _fetch_worker_shard_sizes /
-            # _allocate_tree_quotas), non più equa a prescindere: con
-            # partizionamento non-IID gli shard possono avere dimensioni molto
-            # diverse, e allenare lo stesso numero di alberi su uno shard minuscolo
-            # produrrebbe alberi ad alta varianza pesati quanto tutti gli altri nel
-            # soft voting finale.
-            worker_shard_sizes = self._fetch_worker_shard_sizes(worker_names, available_workers)
-            tree_quotas = self._allocate_tree_quotas(total_step_trees, worker_names, worker_shard_sizes)
+            # Allocazione del budget di alberi tra i worker, secondo la strategia
+            # dichiarata (vedi _fetch_worker_shard_sizes / _allocate_tree_quotas).
+            # Con "equal" saltiamo del tutto la probe RPC delle dimensioni: non
+            # serve, e risparmia un giro di rete per ogni round di training.
+            tree_allocation_strategy = partitioning_info["tree_allocation"]
+            if tree_allocation_strategy == "equal":
+                worker_shard_sizes = {}
+            else:
+                worker_shard_sizes = self._fetch_worker_shard_sizes(worker_names, available_workers)
+            tree_quotas = self._allocate_tree_quotas(
+                total_step_trees, worker_names, worker_shard_sizes, strategy=tree_allocation_strategy
+            )
 
             assigned_tasks = {}
             sub_start = start_alberi
@@ -542,6 +565,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         partitioning_info = {
             "strategy": payload.get("partition_strategy", "iid"),
             "alpha": payload.get("partition_alpha"),
+            "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
         }
 
         # Marcatore di "inferenza avviata": l'inferenza federata calcola tutto in

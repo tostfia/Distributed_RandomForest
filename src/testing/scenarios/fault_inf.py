@@ -36,7 +36,7 @@ def _resolve_aws_infra(config: dict):
     return cluster, region, worker_service_centralized, worker_service_federated_prefix
 
 
-def _kill_one_ecs_worker_task(mode: str, config: dict):
+def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
     """
     Simula il crash improvviso di UN worker Fargate fermando fisicamente il suo
     task ECS (ecs:StopTask) — l'equivalente AWS del 'docker kill worker-1' usato
@@ -45,11 +45,14 @@ def _kill_one_ecs_worker_task(mode: str, config: dict):
     quella del container del test-engine (ogni worker ha la propria ENI/IP): né
     il ramo Docker né quello 'lsof sulla porta locale' possono funzionare qui.
 
-    Colpisce sempre il "worker 1" (worker-service in centralized, worker-service-1
-    in federated), analogamente a come il ramo Docker punta sempre al container
-    'worker-1' — non serve individuare quale worker specifico stia processando
-    l'inferenza: qualunque worker fermato esercita comunque il path di
-    fault-tolerance (redistribuzione del chunk sui worker superstiti).
+    In centralized il worker scelto è arbitrario (sono intercambiabili per
+    design) e worker_index viene ignorato: si colpisce sempre 'worker-service'.
+    In federated, worker_index (1-based) viene scelto dal chiamante (vedi
+    BaseTestScenario._pick_worker_index_with_real_work) invece di essere
+    sempre fisso a 1: con l'allocazione proporzionale degli alberi
+    (FederatedOrchestrator._allocate_tree_quotas), un worker con shard
+    piccolo/vuoto (tipico con partizionamento Dirichlet ad alpha basso)
+    potrebbe non avere ricevuto alcun lavoro reale da redistribuire.
 
     Se il worker-service ha desired-count > 0 (sempre, salvo teardown), ECS
     pianifica automaticamente un task di rimpiazzo: è l'equivalente Fargate del
@@ -65,7 +68,7 @@ def _kill_one_ecs_worker_task(mode: str, config: dict):
         return
 
     cluster, region, worker_service_centralized, worker_service_federated_prefix = _resolve_aws_infra(config)
-    service_name = worker_service_centralized if mode == "centralized" else f"{worker_service_federated_prefix}1"
+    service_name = worker_service_centralized if mode == "centralized" else f"{worker_service_federated_prefix}{worker_index}"
 
     try:
         ecs = boto3.client("ecs", region_name=region)
@@ -140,23 +143,34 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
             mode = os.environ.get("SYS_MODE", "centralized")
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
+
+            # In centralized qualunque worker va bene. In federated, "sempre
+            # worker 1" rischiava di colpire un worker che con l'allocazione
+            # proporzionale degli alberi non ha ricevuto lavoro reale (shard
+            # piccolo/vuoto, tipico con Dirichlet ad alpha basso) — vedi
+            # BaseTestScenario._pick_worker_index_with_real_work.
+            target_worker_index = 1
+            if mode == "federated":
+                target_worker_index = self._pick_worker_index_with_real_work(environment, default_index=1)
+
             try:
                 if environment == "aws":
                     # RUNNING_IN_DOCKER=true è settato anche su AWS/ECS Fargate,
                     # ma qui non c'è né un docker.sock raggiungibile né un
                     # processo worker locale sulla porta 18861: va sempre presa
                     # la via ECS (ecs:StopTask), indipendentemente da is_docker.
-                    _kill_one_ecs_worker_task(mode, self.config)
+                    _kill_one_ecs_worker_task(mode, self.config, worker_index=target_worker_index)
                 elif is_docker:
                     import docker
                     client = docker.from_env()
                     containers = client.containers.list(filters={"label": "com.docker.compose.service=worker"})
+                    target_name_fragment = f"worker-{target_worker_index}"
                     for c in containers:
-                        if "worker-1" in c.name:
+                        if target_name_fragment in c.name:
                             c.kill()
                             break
                 else:
-                    worker_port = 18861
+                    worker_port = 18861 + target_worker_index - 1
                     cmd_out = os.popen(f"lsof -t -i:{worker_port} 2>/dev/null || fuser {worker_port}/tcp 2>/dev/null").read().strip()
                     if cmd_out:
                         pids = cmd_out.split()
@@ -209,9 +223,12 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         # con run_baseline() (vedi BaseTestScenario._resolve_hyperparameters).
         hp = self._resolve_hyperparameters()
 
-        return {
+        payload = {
             "job_id": f"test_inference_fault_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
+        if os.environ.get("SYS_MODE", "centralized") == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
+        return payload

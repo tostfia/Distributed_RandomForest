@@ -304,6 +304,9 @@ def handle_inference():
     inference_partition_alpha = (
         training_entry_for_job.get("partition_alpha") if training_entry_for_job else None
     )
+    inference_tree_allocation_strategy = (
+        training_entry_for_job.get("tree_allocation_strategy", "proportional") if training_entry_for_job else "proportional"
+    )
 
     # 4. Validazione tramite il modello Pydantic InferenceRequest
     try:
@@ -313,7 +316,8 @@ def handle_inference():
             environment=cfg.env,
             hyperparameters=hp_obj,
             partition_strategy=inference_partition_strategy,
-            partition_alpha=inference_partition_alpha
+            partition_alpha=inference_partition_alpha,
+            tree_allocation_strategy=inference_tree_allocation_strategy
         )
     except Exception as e:
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA INFERENZA]: {e}")
@@ -339,6 +343,7 @@ def handle_inference():
             "tree_type": hp_obj.tree_type,
             "partition_strategy": inference_request.partition_strategy,
             "partition_alpha": inference_request.partition_alpha,
+            "tree_allocation_strategy": inference_request.tree_allocation_strategy,
         })
     except Exception as e:
         print(f"[ERRORE] Impossibile inviare la richiesta di inferenza su SQS: {e}")
@@ -594,11 +599,14 @@ def handle_training():
         partitioning_info = load_federated_partitioning(dataset_type)
         partition_strategy = partitioning_info.get("strategy", "iid")
         partition_alpha = partitioning_info.get("alpha")
+        tree_allocation_strategy = partitioning_info.get("tree_allocation", "proportional")
         print(f"  [OK] Partizionamento federato dichiarato nel manifesto: {partition_strategy.upper()}"
-              + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else ""))
+              + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else "")
+              + f" | Allocazione alberi: {tree_allocation_strategy.upper()}")
     else:
         partition_strategy = "iid"
         partition_alpha = None
+        tree_allocation_strategy = "proportional"
             
     # 5. Validazione Pydantic
     try:
@@ -609,7 +617,8 @@ def handle_training():
             dataset_type=dataset_type,
             hyperparameters=hp_obj,
             partition_strategy=partition_strategy,
-            partition_alpha=partition_alpha
+            partition_alpha=partition_alpha,
+            tree_allocation_strategy=tree_allocation_strategy
         )
     except Exception as e:
         print(f"\n [ERRORE VALIDAZIONE STRUTTURA DATI]: {e}")
@@ -653,6 +662,7 @@ def handle_training():
             "hyperparameters": request.hyperparameters.model_dump(),
             "partition_strategy": request.partition_strategy,
             "partition_alpha": request.partition_alpha,
+            "tree_allocation_strategy": request.tree_allocation_strategy,
         })
         
     except Exception as e:
@@ -686,6 +696,7 @@ def handle_baseline_selection():
     # partizionare qui.
     partition_strategy = "iid"
     federated_alpha = 0.5
+    tree_allocation_strategy = "proportional"
     if dtype == "real":
         print("\n  Strategia di partizionamento tra i worker per il training FEDERATO")
         print("  (nessun effetto sul centralizzato, che non partiziona i dati):")
@@ -714,11 +725,19 @@ def handle_baseline_selection():
               "Usa gli stessi valori: --partition-strategy e --alpha (o le variabili d'ambiente "
               "PARTITION_STRATEGY/ALPHA), con --force se stai cambiando strategia rispetto a un run precedente.")
 
+        print("\n  Allocazione del budget di alberi tra i worker federati:")
+        print("    [1] Proporzionale alla dimensione dello shard (default, formula FedAvg n_k/n)")
+        print("    [2] Equa (stessa quota a tutti i worker, indipendentemente dai dati posseduti)")
+        allocation_choice = get_input("  Scelta [Default: 1]: ", "1")
+        tree_allocation_strategy = {"1": "proportional", "2": "equal"}.get(allocation_choice, "proportional")
+        print(f"  [INFO] Allocazione alberi: {tree_allocation_strategy.upper()}")
+
     boot_config = {
         "dataset_type": dtype,
         "tree_type": selected_tree_type,
         "partition_strategy": partition_strategy,
         "alpha": federated_alpha,
+        "tree_allocation_strategy": tree_allocation_strategy,
     }
     
     save_local_state_section("baseline_boot", boot_config)

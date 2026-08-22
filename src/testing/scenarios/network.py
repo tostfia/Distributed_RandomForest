@@ -417,12 +417,15 @@ class NetworkSimulationScenario(BaseTestScenario):
         # perché serve a misurare la latenza, non a produrre un modello
         # confrontabile.
         hp = self._resolve_hyperparameters()
-        return {
+        payload = {
             "job_id": f"test_network_{tag}_{int(time.time() * 1000)}",
             "dataset_type": self.config.get("dataset_type", "synthetic"),
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
+        if os.environ.get("SYS_MODE", "centralized") == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
+        return payload
 
     def _run_inference_and_get_metrics(self, payload, task_type):
         """

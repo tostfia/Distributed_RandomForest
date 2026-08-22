@@ -2,6 +2,7 @@
   "mode": "distributed",
   "dataset_type": "real",
   "dataset_path": "./dataset_cache",
+  "correlation_threshold": 0.05,
   "feature_eliminata": [
     "Bwd PSH Flags",
     "Bwd URG Flags",
@@ -83,13 +84,20 @@
     "Idle Max",
     "Idle Min"
   ],
+  "federated_partitioning": {
+    "strategy": "dirichlet",
+    "alpha": 0.5,
+    "tree_allocation": "proportional"
+  },
   "hyperparameters": {
     "n_estimators": 30,
     "max_depth": 25,
     "min_samples_split": 10,
-    "class_weight": "balanced",
+    "max_features": "sqrt",
+    "criterion": "entropy",
+    "class_weight": null,
     "bootstrap": true,
-    "max_samples": 0.5,
+    "max_samples": 0.8,
     "tree_type": "classifier",
     "target_column": "Label",
     "random_state": 123

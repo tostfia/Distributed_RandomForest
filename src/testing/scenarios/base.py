@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import json
 import os
+import re
 import shutil
 
 # Cartella dei manifesti prodotti da run_baseline(): sono la fonte di verità
@@ -145,6 +146,145 @@ class BaseTestScenario(ABC):
 
         self._resolved_hp = dict(manifest_hp)
         return dict(self._resolved_hp)
+
+    def _resolve_federated_partitioning(self) -> dict:
+        """
+        Strategia/alpha di partizionamento e allocazione alberi dichiarati nel
+        manifesto della baseline ('federated_partitioning', vedi
+        run_baseline.py e main.py::load_federated_partitioning) — STESSA fonte
+        di verità già usata da _resolve_hyperparameters.
+
+        Irrilevante per il centralizzato (non partiziona mai i dati) e per il
+        dataset sintetico (nessun manifesto di partizionamento). In quei casi,
+        e in generale se il manifesto manca/è illeggibile, ritorna il default
+        sicuro {"strategy": "iid", "alpha": None, "tree_allocation": "proportional"}.
+
+        Senza questo, i payload costruiti direttamente dagli scenari (che
+        bypassano TrainingRequest/InferenceRequest e quindi main.py) non
+        porterebbero mai questi campi: federated.py userebbe comunque i propri
+        fallback sicuri e NON andrebbe in errore, ma le metriche/i log
+        etichetterebbero sempre "iid"/"proportional" anche quando gli shard
+        sul disco sono stati provisionati con Dirichlet/equal — un
+        disallineamento silenzioso tra ciò che è stato davvero testato e ciò
+        che viene riportato.
+        """
+        default = {"strategy": "iid", "alpha": None, "tree_allocation": "proportional"}
+
+        dataset_type = self.config.get("dataset_type", "real")
+        if dataset_type != "real":
+            return default
+
+        manifest_path = os.path.join(BASELINE_MANIFEST_DIR, "config_real.json")
+        if not os.path.exists(manifest_path):
+            return default
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f) or {}
+        except (json.JSONDecodeError, OSError):
+            return default
+
+        partitioning = manifest.get("federated_partitioning") or {}
+        return {
+            "strategy": partitioning.get("strategy", "iid"),
+            "alpha": partitioning.get("alpha"),
+            "tree_allocation": partitioning.get("tree_allocation", "proportional"),
+        }
+
+    def _augment_payload_with_partitioning(self, payload: dict) -> dict:
+        """
+        Da chiamare all'interno di ogni _build_payload() PRIMA di ritornare il
+        dizionario, per i soli scenari in modalità federata: aggiunge i tre
+        campi piatti che federated.py legge davvero (partition_strategy,
+        partition_alpha, tree_allocation_strategy — vedi
+        FederatedOrchestrator._execute_training_step/_execute_inference_step),
+        speculare a come main.py li ricava con load_federated_partitioning()
+        prima di costruire una TrainingRequest/InferenceRequest.
+        """
+        info = self._resolve_federated_partitioning()
+        payload["partition_strategy"] = info["strategy"]
+        payload["partition_alpha"] = info["alpha"]
+        payload["tree_allocation_strategy"] = info["tree_allocation"]
+        return payload
+
+    def _pick_worker_index_with_real_work(self, environment: str, default_index: int = 1) -> int:
+        """
+        Determina, per la modalità FEDERATA, quale worker conviene colpire per
+        simulare un crash realistico: interroga ogni worker registrato per la
+        dimensione del proprio shard locale (RPC exposed_get_local_shard_size,
+        vedi FederatedWorker) e ritorna l'indice (1-based, stesso schema di
+        naming Worker-Locale-NN / worker-service-N) di quello con lo shard
+        PIÙ GRANDE.
+
+        Perché non "sempre worker 1" (comportamento storico): con
+        l'allocazione proporzionale (FederatedOrchestrator._allocate_tree_quotas,
+        strategy="proportional", il default), un worker con uno shard piccolo
+        o vuoto — tipico con partizionamento Dirichlet ad alpha basso — può
+        ricevere pochissimi alberi o addirittura zero in un dato round.
+        Ucciderlo non eserciterebbe alcuna redistribuzione di lavoro reale: il
+        test dichiarerebbe SUCCESS senza aver davvero testato il path di
+        fault-tolerance, proprio negli scenari non-IID più interessanti.
+
+        Euristica: lo shard più grande è, sotto allocazione proporzionale,
+        quasi certamente quello con la quota di alberi più alta — la scelta
+        più sicura senza dover intercettare lo stato interno
+        dell'orchestratore (che vive in un altro processo/task).
+
+        Ritorna default_index (comportamento storico) se non è possibile
+        determinarlo: nessun worker raggiungibile, RPC fallite, o
+        ServiceRegistry/rpyc non disponibili in questo contesto.
+        """
+        try:
+            import rpyc
+            from src.shared.binding.serviceregistry import ServiceRegistry
+        except ImportError:
+            return default_index
+
+        try:
+            available_workers = ServiceRegistry.get_available_workers(environment)
+        except Exception as e:
+            print(f"[TEST WARN] Impossibile leggere ServiceRegistry per la selezione del worker "
+                  f"da colpire ({e}): ricado sull'indice di default ({default_index}).")
+            return default_index
+
+        if not available_workers:
+            return default_index
+
+        best_index = default_index
+        best_size = -1
+        for worker_name, w_info in available_workers.items():
+            conn = None
+            try:
+                conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={"allow_pickle": True, "sync_request_timeout": 15}
+                )
+                size = int(conn.root.exposed_get_local_shard_size())
+            except Exception:
+                continue
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            match = re.search(r"(\d+)\s*$", worker_name)
+            if not match:
+                continue
+            idx = int(match.group(1))
+
+            if size > best_size:
+                best_size = size
+                best_index = idx
+
+        if best_size < 0:
+            print(f"[TEST WARN] Nessun worker ha risposto alla probe della dimensione shard: "
+                  f"ricado sull'indice di default ({default_index}).")
+            return default_index
+
+        print(f"[TEST] Worker selezionato per la simulazione del crash: indice {best_index} "
+              f"(shard più grande osservato tra quelli raggiungibili: {best_size} campioni).")
+        return best_index
 
     def _resolve_target_trees(self, default: int = 100) -> int:
         """

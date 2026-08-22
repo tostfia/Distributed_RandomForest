@@ -1,9 +1,9 @@
 {
   "_NOTE_ruolo_di_questo_file": "Configurazione del BANCO DI PROVA: cosa testare, con quali soglie e contro quale infrastruttura. NON descrive più il modello: iperparametri e ricetta del dataset vivono nel manifesto della baseline (outputs_baseline/config_synthetic.json o config_real.json), che è la fonte di verità condivisa fra run_baseline(), il client e il cluster. Vedi BaseTestScenario._resolve_hyperparameters.",
 
-  "selected_task": "regressor",
-  "dataset_type": "synthetic",
-  "dataset_path": "synthetic/synthetic_dataset.csv",
+  "selected_task": "classifier",
+  "dataset_type": "real",
+  "dataset_path": "dataset_cache/",
 
   "_NOTE_iperparametri": "I due blocchi qui sotto NON sono più la fonte primaria: valgono solo (a) come fallback quando il manifesto della baseline non esiste ancora su questa macchina, e (b) quando 'use_local_hyperparameters' è true. Se differiscono dal manifesto e vengono effettivamente usati, gli scenari lo dichiarano nei log con una riga [TEST CONFIG].",
   "hyperparameters_class": {

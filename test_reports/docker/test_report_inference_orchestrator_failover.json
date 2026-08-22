@@ -1,0 +1,9 @@
+{
+  "inference_orchestrator_failover": {
+    "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
+    "status": "SUCCESS",
+    "original_leader": "orchestrator-federato-testing",
+    "recovered_by": "Orchestrator-local-federated-4310f1fcf3d0-1",
+    "duration_seconds": 168.2384726929995
+  }
+}

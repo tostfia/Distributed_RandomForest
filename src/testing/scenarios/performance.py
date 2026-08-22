@@ -1,3 +1,4 @@
+import os
 import time
 from src.testing.scenarios.base import BaseTestScenario
 
@@ -66,12 +67,15 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         # confrontabili i tempi e le metriche di questo scenario con T_seq /
         # T_1node prodotti da run_baseline().
         hp = self._resolve_hyperparameters()
-        return {
+        payload = {
             "job_id": f"test_perf_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", "synthetic/synthetic_dataset.csv"),
             "hyperparameters": hp
         }
+        if os.environ.get("SYS_MODE", "centralized") == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
+        return payload
 
     def _run_inference_and_get_metrics(self, payload, task_type):
         """

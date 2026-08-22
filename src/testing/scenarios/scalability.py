@@ -1,5 +1,6 @@
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.testing.scenarios.base import BaseTestScenario
+import os
 import time
 import random
 
@@ -183,12 +184,15 @@ class ScalabilityScenario(BaseTestScenario):
         # Vedi BaseTestScenario._resolve_hyperparameters: fonte unica condivisa
         # con la baseline locale.
         hp = self._resolve_hyperparameters()
-        return {
+        payload = {
             "job_id": f"test_scal_{worker_count}_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
+        if os.environ.get("SYS_MODE", "centralized") == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
+        return payload
 
     def _run_inference_and_get_metrics(self, payload, task_type):
         """

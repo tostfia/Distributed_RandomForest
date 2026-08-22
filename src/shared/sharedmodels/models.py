@@ -16,14 +16,6 @@ class Hyperparameters(BaseModel):
     bootstrap: bool = True
     tree_type: Literal["classifier", "regressor"] = "classifier"
     target_column: Optional[str] = None
-    # Aggiunti per allineare il cluster alla baseline locale: senza questi due
-    # campi il manifesto (outputs_baseline/config_*.json) poteva dichiarare
-    # criterion='entropy' o un max_features non standard, ma il valore veniva
-    # scartato qui e l'Orchestratore ricadeva sui propri default — quindi la
-    # baseline e il cluster addestravano modelli DIVERSI senza alcun segnale.
-    # Union[str, float] perché sklearn accetta sia le stringhe ('sqrt', 'log2')
-    # sia una frazione (es. 1/3, usata per il regressore). In Pydantic v2 la
-    # smart union preserva il tipo originale, quindi 0.333 non diventa "0.333".
     max_features: Optional[Union[str, float]] = None
     criterion: Optional[str] = None
 
@@ -70,13 +62,9 @@ class TrainingRequest(BaseModel):
     dataset_type: DatasetType
     hyperparameters: Hyperparameters
     seed: int = 123
-    # Iperparametro dell'ESPERIMENTO (come i dati sono ripartiti tra i worker
-    # federati), non del modello: tenuto deliberatamente FUORI da
-    # Hyperparameters, che è condiviso anche con InferenceRequest dove questo
-    # campo non avrebbe senso. Default "iid" per compatibilità con richieste
-    # già serializzate (storico locale, job in coda) prima di questa modifica.
     partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
     partition_alpha: Optional[float] = None
+    tree_allocation_strategy: Literal["proportional", "equal"] = "proportional"
 
 
 class TrainingRequestWorker(BaseModel):
@@ -96,12 +84,6 @@ class InferenceRequest(BaseModel):
     data_url: Optional[str] = None
     environment: Environment
     hyperparameters: Hyperparameters
-    # Stesso significato di TrainingRequest.partition_strategy/alpha: qui
-    # servono SOLO per etichettare le metriche di inferenza salvate con la
-    # stessa strategia/alpha usati per addestrare il modello che si sta
-    # valutando (recuperati dallo storico locale del job di training
-    # corrispondente). Non influenzano in alcun modo il calcolo
-    # dell'inferenza, che è agnostico rispetto a come i dati di training
-    # furono partizionati.
     partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
     partition_alpha: Optional[float] = None
+    tree_allocation_strategy: Literal["proportional", "equal"] = "proportional"

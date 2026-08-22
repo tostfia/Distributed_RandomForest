@@ -398,6 +398,8 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
+        if orchestrator_type == "federated":
+            payload = self._augment_payload_with_partitioning(payload)
 
         try:
             self._reuse_dataset_if_available(payload, seed=123)
@@ -414,6 +416,8 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "dataset_type": self.config["dataset_type"],
             "hyperparameters": hp,
         }
+        if orchestrator_type == "federated":
+            payload_inference = self._augment_payload_with_partitioning(payload_inference)
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}'...")
 
         try:
@@ -710,6 +714,12 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
+        # isinstance su orch_leader (non os.environ): questo metodo, come in
+        # orchestrator_fault.py, non ha garanzia che SYS_MODE rifletta lo
+        # stesso valore usato per istanziare l'orchestratore ricevuto.
+        is_federated = isinstance(orch_leader, FederatedOrchestrator)
+        if is_federated:
+            payload = self._augment_payload_with_partitioning(payload)
 
         print(f"\n[TEST] Setup: addestramento preliminare in-process (nessun failover in questa fase, "
               f"serve solo a produrre il modello su S3)...")
@@ -727,6 +737,8 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "dataset_type": self.config["dataset_type"],
             "hyperparameters": hp,
         }
+        if is_federated:
+            payload_inference = self._augment_payload_with_partitioning(payload_inference)
         print(f"[TEST] Invio della richiesta di INFERENZA per il Job {job_id[:8]} alla coda "
               f"'{orch_leader.queue_name}' (la reclamerà il leader reale su ECS)...")
         try:

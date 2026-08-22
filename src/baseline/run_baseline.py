@@ -72,8 +72,12 @@ def run_baseline():
     user_tree_type = "classifier"
     # Default storico: partizionamento IID, invariato. Sovrascritti sotto se il
     # boot config specifica una strategia non-IID per l'esperimento federato.
-    partition_strategy = "dirichlet"
+    partition_strategy = "iid"
     federated_alpha = 0.5
+    # Default: allocazione proporzionale alla dimensione dello shard (formula
+    # di FedAvg n_k/n applicata al numero di alberi). Irrilevante per il
+    # centralizzato, sovrascritta sotto se il boot config specifica "equal".
+    tree_allocation_strategy = "proportional"
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
@@ -112,6 +116,7 @@ def run_baseline():
                 # baseline, invece di doverla ripetere a mano.
                 partition_strategy = boot_cfg.get("partition_strategy", "iid")
                 federated_alpha = boot_cfg.get("alpha", 0.5)
+                tree_allocation_strategy = boot_cfg.get("tree_allocation_strategy", "proportional")
                 if boot_cfg:
                     print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except Exception as e:
@@ -361,6 +366,7 @@ def run_baseline():
             "federated_partitioning": {
                 "strategy": partition_strategy,
                 "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
+                "tree_allocation": tree_allocation_strategy,
             },
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),
@@ -423,6 +429,7 @@ def run_baseline():
             "federated_partitioning": {
                 "strategy": partition_strategy,
                 "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
+                "tree_allocation": tree_allocation_strategy,
             },
             **dataset_gen_params,
             "feature_eliminata": dizionario_feature["eliminate"],

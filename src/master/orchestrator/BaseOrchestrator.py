@@ -536,6 +536,7 @@ class BaseOrchestrator(ABC):
                 partitioning_info = {
                     "strategy": payload.get("partition_strategy", "iid"),
                     "alpha": payload.get("partition_alpha"),
+                    "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
                 }
                 self._generate_performance_report(job_id, t_dist, current_alberi, partitioning_info=partitioning_info)
                 
