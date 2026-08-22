@@ -1,4 +1,3 @@
-import os
 import time
 from src.testing.scenarios.base import BaseTestScenario
 
@@ -11,10 +10,10 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         print(f"[PERFORMANCE] Esecuzione in ambiente '{execution_mode.upper()}'...")
         task_type = self.config.get("selected_task", "classifier")
         payload = self._build_payload()
-        if task_type == "classifier":
-            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-        else:
-            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+        # Ricavato dal payload stesso (che ora nasce dal manifesto della
+        # baseline): leggerlo separatamente da test_config.json permetteva di
+        # chiedere N alberi mentre il payload ne dichiarava M.
+        target_trees = self._resolve_target_trees()
 
         start_time = time.perf_counter()
         self._reuse_dataset_if_available(payload, seed=123)
@@ -35,10 +34,11 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "model_accuracy_metrics": accuracy_metrics
         }
     def _build_payload(self):
-        if self.config.get("selected_task") == "classifier":
-            hp = self.config.get("hyperparameters_class", {})
-        else:
-            hp = self.config.get("hyperparameters_regre", {})
+        # Iperparametri dal manifesto della baseline (vedi
+        # BaseTestScenario._resolve_hyperparameters): è ciò che rende
+        # confrontabili i tempi e le metriche di questo scenario con T_seq /
+        # T_1node prodotti da run_baseline().
+        hp = self._resolve_hyperparameters()
         return {
             "job_id": f"test_perf_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),

@@ -96,11 +96,10 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
     def run(self) -> dict:
         ft_cfg = _merge_aws_overrides(self.config, "inference_worker_fault")
         kill_delay = ft_cfg.get("kill_worker_after_seconds")
-        task_type = self.config.get("selected_task", "classifier")
-        if task_type == "classifier":
-            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-        else:
-            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+        # Numero di alberi dal manifesto della baseline (vedi
+        # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
+        # quindi non si puo' piu' chiedere N alberi dichiarandone M ai worker.
+        target_trees = self._resolve_target_trees()
         payload = self._build_payload()
 
         print(f"\n[TEST] Caricamento/Generazione modello preliminare per Job: {payload['job_id']}...")
@@ -206,10 +205,9 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         }
 
     def _build_payload(self):
-        if self.config.get("selected_task") == "classifier":
-            hp = self.config.get("hyperparameters_class", {})
-        else:
-            hp = self.config.get("hyperparameters_regre", {})
+        # Iperparametri dal manifesto della baseline: fonte unica condivisa
+        # con run_baseline() (vedi BaseTestScenario._resolve_hyperparameters).
+        hp = self._resolve_hyperparameters()
 
         return {
             "job_id": f"test_inference_fault_{int(time.time())}",

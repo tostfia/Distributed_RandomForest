@@ -104,11 +104,10 @@ class FaultToleranceScenario(BaseTestScenario):
 
         mode = os.environ.get("SYS_MODE", "centralized")
 
-        task_type = self.config.get("selected_task", "classifier")
-        if task_type == "classifier":
-            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-        else:
-            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+        # Numero di alberi dal manifesto della baseline (vedi
+        # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
+        # quindi non si puo' piu' chiedere N alberi dichiarandone M ai worker.
+        target_trees = self._resolve_target_trees()
         def kill_worker_local():
             # Rispettiamo entrambi gli intenti: il guasto non scatta MAI prima che
             # sia stato inviato almeno un chunk reale (altrimenti staremmo testando
@@ -180,10 +179,9 @@ class FaultToleranceScenario(BaseTestScenario):
         }
 
     def _build_payload(self):
-        if self.config.get("selected_task") == "classifier":
-            hp = self.config.get("hyperparameters_class", {})
-        else:
-            hp = self.config.get("hyperparameters_regre", {})
+        # Iperparametri dal manifesto della baseline: fonte unica condivisa
+        # con run_baseline() (vedi BaseTestScenario._resolve_hyperparameters).
+        hp = self._resolve_hyperparameters()
         return {
             "job_id": f"test_fault_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),

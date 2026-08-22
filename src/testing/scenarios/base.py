@@ -1,6 +1,14 @@
 from abc import ABC, abstractmethod
+import json
 import os
 import shutil
+
+# Cartella dei manifesti prodotti da run_baseline(): sono la fonte di verità
+# condivisa fra baseline locale, client e cluster (vedi
+# main.py::load_hyperparameters_from_config e SyntheticDataLoader, che da qui
+# ricava la ricetta del dataset).
+BASELINE_MANIFEST_DIR = "outputs_baseline"
+
 
 class BaseTestScenario(ABC):
     """Classe base astratta per tutti gli scenari di test."""
@@ -24,11 +32,133 @@ class BaseTestScenario(ABC):
     def __init__(self, config: dict, orchestrator):
         self.config = config
         self.orchestrator = orchestrator
+        # Cache di istanza: _resolve_hyperparameters() viene chiamata più volte
+        # nello stesso scenario (per il payload e per il numero di alberi) e
+        # senza cache ristamperebbe la stessa diagnostica a ogni invocazione.
+        self._resolved_hp = None
 
     @abstractmethod
     def run(self) -> dict:
         """Esegue lo scenario e restituisce un dizionario con i risultati/metriche."""
         pass
+
+    # ------------------------------------------------------------------ #
+    # Iperparametri: fonte di verità condivisa con la baseline            #
+    # ------------------------------------------------------------------ #
+
+    def _local_hyperparameters(self) -> dict:
+        """
+        Blocco iperparametri definito in test_config.json, scelto in base a
+        'selected_task'. Usato come fallback e quando l'override esplicito è
+        attivo (vedi _resolve_hyperparameters).
+        """
+        if self.config.get("selected_task") == "classifier":
+            return dict(self.config.get("hyperparameters_class", {}) or {})
+        return dict(self.config.get("hyperparameters_regre", {}) or {})
+
+    def _resolve_hyperparameters(self) -> dict:
+        """
+        Iperparametri del job da eseguire.
+
+        FONTE DI VERITÀ: il manifesto della baseline
+        ('outputs_baseline/config_synthetic.json' oppure 'config_real.json'),
+        lo stesso file già letto dal client
+        (main.py::load_hyperparameters_from_config) e — per la ricetta del
+        dataset — da SyntheticDataLoader.
+
+        PERCHÉ NON test_config.json: la baseline locale addestra con gli
+        iperparametri del manifesto. Se gli scenari usassero i propri
+        ('hyperparameters_class'/'hyperparameters_regre'), il confronto
+        baseline-cluster richiesto dalla traccia metterebbe a paragone due
+        modelli DIVERSI — ad esempio 40 alberi a profondità illimitata contro
+        100 alberi a profondità 15. È una differenza che non produce alcun
+        errore e si nota solo confrontando i log a mano.
+
+        OVERRIDE ESPLICITO: impostando "use_local_hyperparameters": true in
+        test_config.json si tornano a usare i valori locali. Serve per gli
+        esperimenti deliberatamente diversi dalla baseline (es. più alberi per
+        dare al cluster abbastanza lavoro da ammortizzare l'overhead nei test
+        di scalabilità), ma va dichiarato: così la scelta è visibile nel
+        config e nei log, invece di essere un disallineamento silenzioso.
+
+        FALLBACK: se il manifesto manca o è illeggibile si usano comunque i
+        valori locali, così il comportamento resta quello storico su una
+        macchina dove run_baseline() non è mai stata eseguita.
+        """
+        if self._resolved_hp is not None:
+            return dict(self._resolved_hp)
+
+        local_hp = self._local_hyperparameters()
+
+        if self.config.get("use_local_hyperparameters"):
+            print("[TEST CONFIG] Override attivo ('use_local_hyperparameters'): uso gli "
+                  "iperparametri di test_config.json. ATTENZIONE: tempi e metriche di questo "
+                  "run NON sono confrontabili con la baseline locale, che addestra con quelli "
+                  "del manifesto.")
+            self._resolved_hp = local_hp
+            return dict(local_hp)
+
+        dataset_type = self.config.get("dataset_type", "real")
+        manifest_name = "config_synthetic.json" if dataset_type == "synthetic" else "config_real.json"
+        manifest_path = os.path.join(BASELINE_MANIFEST_DIR, manifest_name)
+
+        if not os.path.exists(manifest_path):
+            print(f"[TEST CONFIG] [WARN] Manifesto '{manifest_path}' non trovato: uso gli "
+                  f"iperparametri di test_config.json. Il confronto con la baseline non sarà "
+                  f"valido finché non si esegue run_baseline() per questo dataset.")
+            self._resolved_hp = local_hp
+            return dict(local_hp)
+
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest_hp = (json.load(f) or {}).get("hyperparameters", {}) or {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[TEST CONFIG] [WARN] Manifesto '{manifest_path}' illeggibile ({e}): uso gli "
+                  f"iperparametri di test_config.json.")
+            self._resolved_hp = local_hp
+            return dict(local_hp)
+
+        if not manifest_hp:
+            print(f"[TEST CONFIG] [WARN] Sezione 'hyperparameters' assente o vuota in "
+                  f"'{manifest_path}': uso gli iperparametri di test_config.json.")
+            self._resolved_hp = local_hp
+            return dict(local_hp)
+
+        # Coerenza del task: un manifesto generato per un tipo di albero diverso
+        # da quello selezionato nei test renderebbe il confronto privo di senso
+        # (es. baseline di classificazione contro cluster di regressione).
+        # Il manifesto sintetico è UNO SOLO per entrambi i task, quindi la
+        # situazione si verifica banalmente lanciando la baseline per un task e
+        # i test per l'altro: meglio gridarlo che lasciarlo passare.
+        manifest_tree_type = manifest_hp.get("tree_type")
+        selected_task = self.config.get("selected_task")
+        if manifest_tree_type and selected_task and manifest_tree_type != selected_task:
+            print(f"[TEST CONFIG] [ATTENZIONE] Il manifesto '{manifest_path}' è stato generato per "
+                  f"tree_type='{manifest_tree_type}', ma test_config.json dichiara "
+                  f"selected_task='{selected_task}'. Rilancia run_baseline() per il task corretto: "
+                  f"altrimenti baseline e cluster addestrano modelli di tipo diverso.")
+
+        print(f"[TEST CONFIG] Iperparametri letti dal manifesto della baseline '{manifest_path}' -> "
+              f"n_estimators={manifest_hp.get('n_estimators')}, max_depth={manifest_hp.get('max_depth')}, "
+              f"max_features={manifest_hp.get('max_features')}, criterion={manifest_hp.get('criterion')}, "
+              f"bootstrap={manifest_hp.get('bootstrap')}, max_samples={manifest_hp.get('max_samples')}")
+
+        self._resolved_hp = dict(manifest_hp)
+        return dict(self._resolved_hp)
+
+    def _resolve_target_trees(self, default: int = 100) -> int:
+        """
+        Numero di alberi che lo scenario deve far costruire.
+
+        Deriva dallo STESSO blocco restituito da _resolve_hyperparameters
+        invece di essere riletto per conto proprio da test_config.json: in
+        caso contrario si potrebbe chiedere al cluster di costruire 100 alberi
+        mentre il payload inviato ai worker ne dichiara 40.
+        """
+        try:
+            return int(self._resolve_hyperparameters().get("n_estimators", default))
+        except (TypeError, ValueError):
+            return default
 
     def _dataset_signature(self, payload: dict, seed: int) -> tuple:
         hp = payload.get("hyperparameters", {})

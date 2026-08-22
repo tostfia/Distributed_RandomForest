@@ -36,10 +36,11 @@ class ScalabilityScenario(BaseTestScenario):
                 "requested_worker_counts": scal_cfg.get("worker_counts_to_test", []),
             }
 
-        if task_type == "classifier":
-            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-        else:
-            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+        # Carico fisso per ogni configurazione di worker, preso dal manifesto
+        # della baseline: così lo strong scaling misura lo STESSO lavoro che la
+        # baseline ha cronometrato in sequenziale, e lo speedup rispetto a
+        # T_seq è confrontabile.
+        target_trees = self._resolve_target_trees()
         rng = random.Random(123)
         worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
@@ -139,10 +140,9 @@ class ScalabilityScenario(BaseTestScenario):
         }
 
     def _build_payload(self, worker_count):
-        if self.config.get("selected_task") == "classifier":
-            hp = self.config.get("hyperparameters_class", {})
-        else:
-            hp = self.config.get("hyperparameters_regre", {})
+        # Vedi BaseTestScenario._resolve_hyperparameters: fonte unica condivisa
+        # con la baseline locale.
+        hp = self._resolve_hyperparameters()
         return {
             "job_id": f"test_scal_{worker_count}_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),

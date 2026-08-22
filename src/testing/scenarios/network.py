@@ -284,10 +284,10 @@ class NetworkSimulationScenario(BaseTestScenario):
             # Training reale
             task_type = self.config.get("selected_task", "classifier")
             payload = self._build_payload("network_test")
-            if task_type == "classifier":
-                target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-            else:
-                target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+            # Numero di alberi dal manifesto della baseline (vedi
+            # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
+            # quindi non si puo' piu' chiedere N alberi dichiarandone M ai worker.
+            target_trees = self._resolve_target_trees()
 
             t0 = time.perf_counter()
             self._reuse_dataset_if_available(payload, seed=123)
@@ -362,10 +362,10 @@ class NetworkSimulationScenario(BaseTestScenario):
 
         task_type = self.config.get("selected_task", "classifier")
         payload = self._build_payload("network_test_aws")
-        if task_type == "classifier":
-            target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
-        else:
-            target_trees = self.config.get("hyperparameters_regre", {}).get("n_estimators", 100)
+        # Numero di alberi dal manifesto della baseline (vedi
+        # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
+        # quindi non si puo' piu' chiedere N alberi dichiarandone M ai worker.
+        target_trees = self._resolve_target_trees()
 
         t0 = time.perf_counter()
         self._reuse_dataset_if_available(payload, seed=123)
@@ -411,10 +411,12 @@ class NetworkSimulationScenario(BaseTestScenario):
 
     def _build_payload(self, tag: str) -> dict:
         net_cfg = self.config.get("network_simulation", {})
-        if self.config.get("selected_task") == "classifier":
-            hp = self.config.get("hyperparameters_class", {})
-        else:
-            hp = self.config.get("hyperparameters_regre", {})
+        # Vedi BaseTestScenario._resolve_hyperparameters: fonte unica condivisa
+        # con la baseline locale. NOTA: il payload di probe costruito in
+        # _measure_rpc_baseline resta volutamente separato e con 1 solo albero,
+        # perché serve a misurare la latenza, non a produrre un modello
+        # confrontabile.
+        hp = self._resolve_hyperparameters()
         return {
             "job_id": f"test_network_{tag}_{int(time.time() * 1000)}",
             "dataset_type": self.config.get("dataset_type", "synthetic"),
