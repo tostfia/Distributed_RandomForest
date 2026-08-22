@@ -16,6 +16,36 @@ _LOCK_TABLE = "OrchestratorLocks"
 _LOCK_KEY = "global_orchestrator_leader_lock"
 
 
+def _merge_aws_overrides(config: dict, key: str) -> dict:
+    """
+    Unisce il blocco di config 'key' (es. 'inference_orchestrator_failover')
+    con l'eventuale override AWS-specifico in
+    config['aws']['suggested_overrides'][key] — quest'ultimo, se presente,
+    vince sui valori "locali". Su AWS il ciclo ETL/RPC reale e il tempo di
+    ecs.stop_task() sono più lenti del kill istantaneo locale/Docker, quindi
+    i timeout tarati per il locale possono essere troppo stretti. Filtra le
+    chiavi di solo commento (es. '_NOTE') presenti nel JSON di config.
+    """
+    merged = dict(config.get(key, {}) or {})
+    if (config.get("aws", {}) or {}).get("suggested_overrides", {}).get(key):
+        overrides = config["aws"]["suggested_overrides"][key]
+        merged.update({k: v for k, v in overrides.items() if not k.startswith("_")})
+    return merged
+
+
+def _resolve_aws_infra(config: dict):
+    """
+    Cluster/region/nome service ECS: letti da config['aws'] quando presente
+    (stessa sezione già usata da run_test_aws.sh/aws_ecs_utils.py, vedi
+    test_config.json), altrimenti fallback su env var/default fisso.
+    """
+    aws_cfg = config.get("aws", {}) or {}
+    cluster = aws_cfg.get("ecs_cluster_name") or os.environ.get("CLUSTER_NAME", "forest-cluster")
+    region = aws_cfg.get("region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    orch_service = aws_cfg.get("orchestrator_service_name", "orchestrator-service")
+    return cluster, region, orch_service
+
+
 def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
     """
     Attende (con timeout) che 'orch' risulti effettivamente leader, prima di
@@ -297,7 +327,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
     def run(self) -> dict:
 
-        ft_cfg = self.config.get("inference_orchestrator_failover", {})
+        ft_cfg = _merge_aws_overrides(self.config, "inference_orchestrator_failover")
         task_type = self.config.get("selected_task", "classifier")
         if task_type == "classifier":
             target_trees = self.config.get("hyperparameters_class", {}).get("n_estimators", 30)
@@ -662,9 +692,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         """
         import boto3
 
-        cluster = os.environ.get("CLUSTER_NAME", "forest-cluster")
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-        service_name = "orchestrator-service"
+        cluster, region, service_name = _resolve_aws_infra(self.config)
 
         print(f"\n--- [TEST] Failover REALE dell'Orchestratore durante l'inferenza su ECS "
               f"('{service_name}', cluster '{cluster}') ---")

@@ -5,7 +5,38 @@ import os
 from src.testing.scenarios.base import BaseTestScenario
 
 
-def _kill_one_ecs_worker_task(mode: str):
+def _merge_aws_overrides(config: dict, key: str) -> dict:
+    """
+    Unisce il blocco di config 'key' (es. 'inference_worker_fault') con
+    l'eventuale override AWS-specifico in
+    config['aws']['suggested_overrides'][key] — quest'ultimo, se presente,
+    vince sui valori "locali". Su AWS l'ETL/RPC reale è più lento del kill
+    istantaneo locale/Docker (l'ETL da solo impiega spesso 30-40s), quindi un
+    kill_worker_after_seconds tarato per il locale scatterebbe troppo presto.
+    Filtra le chiavi di solo commento (es. '_NOTE') presenti nel JSON di config.
+    """
+    merged = dict(config.get(key, {}) or {})
+    if (config.get("aws", {}) or {}).get("suggested_overrides", {}).get(key):
+        overrides = config["aws"]["suggested_overrides"][key]
+        merged.update({k: v for k, v in overrides.items() if not k.startswith("_")})
+    return merged
+
+
+def _resolve_aws_infra(config: dict):
+    """
+    Cluster/region/nomi service ECS: letti da config['aws'] quando presente
+    (stessa sezione già usata da run_test_aws.sh/aws_ecs_utils.py, vedi
+    test_config.json), altrimenti fallback su env var/default fisso.
+    """
+    aws_cfg = config.get("aws", {}) or {}
+    cluster = aws_cfg.get("ecs_cluster_name") or os.environ.get("CLUSTER_NAME", "forest-cluster")
+    region = aws_cfg.get("region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    worker_service_centralized = aws_cfg.get("worker_service_name_centralized", "worker-service")
+    worker_service_federated_prefix = aws_cfg.get("worker_service_name_federated_prefix", "worker-service-")
+    return cluster, region, worker_service_centralized, worker_service_federated_prefix
+
+
+def _kill_one_ecs_worker_task(mode: str, config: dict):
     """
     Simula il crash improvviso di UN worker Fargate fermando fisicamente il suo
     task ECS (ecs:StopTask) — l'equivalente AWS del 'docker kill worker-1' usato
@@ -24,10 +55,8 @@ def _kill_one_ecs_worker_task(mode: str):
     pianifica automaticamente un task di rimpiazzo: è l'equivalente Fargate del
     supervisor locale che fa restart/backoff del processo worker ucciso.
 
-    CLUSTER_NAME non è oggi passato come env var ai task (deploy.sh lo tiene
-    solo come variabile bash): usiamo lo stesso pattern di fallback già in uso
-    altrove nel progetto per BUCKET_NAME, con default 'forest-cluster' (il nome
-    fisso usato da deploy.sh/teardown.sh).
+    Cluster/region/nome service letti da config['aws'] (vedi _resolve_aws_infra),
+    con fallback su env var/default fisso se quella sezione manca.
     """
     try:
         import boto3
@@ -35,9 +64,8 @@ def _kill_one_ecs_worker_task(mode: str):
         print("[TEST ERRORE] Pacchetto 'boto3' non disponibile: impossibile fermare un task ECS.")
         return
 
-    cluster = os.environ.get("CLUSTER_NAME", "forest-cluster")
-    service_name = "worker-service" if mode == "centralized" else "worker-service-1"
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    cluster, region, worker_service_centralized, worker_service_federated_prefix = _resolve_aws_infra(config)
+    service_name = worker_service_centralized if mode == "centralized" else f"{worker_service_federated_prefix}1"
 
     try:
         ecs = boto3.client("ecs", region_name=region)
@@ -66,7 +94,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
     """ Copre lo Scenario: Failover del Worker durante la fase di inferenza."""
 
     def run(self) -> dict:
-        ft_cfg = self.config.get("inference_worker_fault", {})
+        ft_cfg = _merge_aws_overrides(self.config, "inference_worker_fault")
         kill_delay = ft_cfg.get("kill_worker_after_seconds")
         task_type = self.config.get("selected_task", "classifier")
         if task_type == "classifier":
@@ -92,9 +120,22 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             }
 
         def kill_worker_local():
+            # Stessa logica a due fasi di fault.py: il guasto non scatta MAI prima
+            # che sia stato inviato almeno un chunk reale, ma nemmeno prima che
+            # siano trascorsi almeno kill_delay secondi in totale — se il chunk
+            # parte prima dello scadere di kill_delay, si aspetta il tempo
+            # rimanente invece di uccidere il worker all'istante.
+            wait_start = time.perf_counter()
             signaled = self.orchestrator.chunk_sent_event.wait(timeout=kill_delay)
             if not signaled:
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
+            else:
+                elapsed = time.perf_counter() - wait_start
+                remaining = kill_delay - elapsed
+                if remaining > 0:
+                    print(f"[TEST] Primo chunk di inferenza inviato dopo {elapsed:.1f}s. Attendo altri {remaining:.1f}s "
+                          f"(fino a {kill_delay}s totali) per dare modo a un po' di lavoro reale di completarsi...")
+                    time.sleep(remaining)
 
             environment = getattr(self.orchestrator, "environment", "local")
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
@@ -106,7 +147,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
                     # ma qui non c'è né un docker.sock raggiungibile né un
                     # processo worker locale sulla porta 18861: va sempre presa
                     # la via ECS (ecs:StopTask), indipendentemente da is_docker.
-                    _kill_one_ecs_worker_task(mode)
+                    _kill_one_ecs_worker_task(mode, self.config)
                 elif is_docker:
                     import docker
                     client = docker.from_env()

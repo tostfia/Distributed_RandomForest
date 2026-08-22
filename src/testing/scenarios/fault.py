@@ -5,7 +5,42 @@ import signal
 from src.testing.scenarios.base import BaseTestScenario
 
 
-def _kill_one_ecs_worker_task(mode: str):
+def _merge_aws_overrides(config: dict, key: str) -> dict:
+    """
+    Unisce il blocco di config 'key' (es. 'fault_tolerance') con l'eventuale
+    override AWS-specifico in config['aws']['suggested_overrides'][key] —
+    quest'ultimo, se presente, vince sui valori "locali". Pensato per i
+    timeout di guasto: su AWS l'ETL/RPC reale è più lento del kill istantaneo
+    locale/Docker (l'ETL da solo impiega spesso 30-40s), quindi un
+    kill_worker_after_seconds tarato per il locale scatterebbe troppo presto,
+    prima ancora che un worker abbia ricevuto un chunk reale — esercitando
+    solo "worker sparito prima dell'assegnazione", non "worker morto a metà
+    lavoro". Filtra le chiavi di solo commento (es. '_NOTE') presenti nel
+    JSON di config.
+    """
+    merged = dict(config.get(key, {}) or {})
+    if (config.get("aws", {}) or {}).get("suggested_overrides", {}).get(key):
+        overrides = config["aws"]["suggested_overrides"][key]
+        merged.update({k: v for k, v in overrides.items() if not k.startswith("_")})
+    return merged
+
+
+def _resolve_aws_infra(config: dict):
+    """
+    Cluster/region/nomi service ECS: letti da config['aws'] quando presente
+    (stessa sezione già usata da run_test_aws.sh/aws_ecs_utils.py, vedi
+    test_config.json), altrimenti fallback su env var/default fisso — così
+    il comportamento resta invariato anche se il config non ha quella sezione.
+    """
+    aws_cfg = config.get("aws", {}) or {}
+    cluster = aws_cfg.get("ecs_cluster_name") or os.environ.get("CLUSTER_NAME", "forest-cluster")
+    region = aws_cfg.get("region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    worker_service_centralized = aws_cfg.get("worker_service_name_centralized", "worker-service")
+    worker_service_federated_prefix = aws_cfg.get("worker_service_name_federated_prefix", "worker-service-")
+    return cluster, region, worker_service_centralized, worker_service_federated_prefix
+
+
+def _kill_one_ecs_worker_task(mode: str, config: dict):
     """
     Simula il crash improvviso di UN worker Fargate fermando fisicamente il suo
     task ECS (ecs:StopTask) — l'equivalente AWS del 'docker kill worker-1' usato
@@ -24,10 +59,8 @@ def _kill_one_ecs_worker_task(mode: str):
     pianifica automaticamente un task di rimpiazzo: è l'equivalente Fargate del
     supervisor locale che fa restart/backoff del processo worker ucciso.
 
-    CLUSTER_NAME non è oggi passato come env var ai task (deploy.sh lo tiene
-    solo come variabile bash): usiamo lo stesso pattern di fallback già in uso
-    altrove nel progetto per BUCKET_NAME, con default 'forest-cluster' (il nome
-    fisso usato da deploy.sh/teardown.sh).
+    Cluster/region/nome service letti da config['aws'] (vedi _resolve_aws_infra),
+    con fallback su env var/default fisso se quella sezione manca.
     """
     try:
         import boto3
@@ -35,9 +68,8 @@ def _kill_one_ecs_worker_task(mode: str):
         print("[TEST ERRORE] Pacchetto 'boto3' non disponibile: impossibile fermare un task ECS.")
         return
 
-    cluster = os.environ.get("CLUSTER_NAME", "forest-cluster")
-    service_name = "worker-service" if mode == "centralized" else "worker-service-1"
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    cluster, region, worker_service_centralized, worker_service_federated_prefix = _resolve_aws_infra(config)
+    service_name = worker_service_centralized if mode == "centralized" else f"{worker_service_federated_prefix}1"
 
     try:
         ecs = boto3.client("ecs", region_name=region)
@@ -68,7 +100,7 @@ class FaultToleranceScenario(BaseTestScenario):
 
 
     def run(self) -> dict:
-        ft_cfg = self.config.get("fault_tolerance", {})
+        ft_cfg = _merge_aws_overrides(self.config, "fault_tolerance")
 
         mode = os.environ.get("SYS_MODE", "centralized")
 
@@ -106,7 +138,7 @@ class FaultToleranceScenario(BaseTestScenario):
                     # ma qui non c'è né un docker.sock raggiungibile né un
                     # processo worker locale sulla porta 18861: va sempre presa
                     # la via ECS (ecs:StopTask), indipendentemente da is_docker.
-                    _kill_one_ecs_worker_task(mode)
+                    _kill_one_ecs_worker_task(mode, self.config)
                 elif is_docker:
                     import docker
                     client = docker.from_env()
