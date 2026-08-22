@@ -68,9 +68,26 @@ class ScalabilityScenario(BaseTestScenario):
                 num_samples = accuracy_metrics.get("testing_set_size", 0)
                 infer_throughput = num_samples / infer_duration if infer_duration > 0 else 0
 
+                # Tempo della sola costruzione degli alberi (vedi
+                # CentralizedOrchestrator.last_dispatch_seconds). È la misura
+                # corretta per lo strong scaling: 'train_duration' include
+                # anche ETL, aggregazione e stima OOB, che sono costi
+                # PRATICAMENTE COSTANTI rispetto al numero di worker e quindi
+                # comprimono artificialmente lo speedup — con un overhead fisso
+                # di pochi secondi, raddoppiare i worker non può mai avvicinarsi
+                # al 2x anche se la parte parallela scala perfettamente
+                # (è la legge di Amdahl applicata suo malgrado alla misura).
+                train_only = getattr(self.orchestrator, "last_dispatch_seconds", 0.0) or train_duration
+                train_only_throughput = num_trees / train_only if train_only > 0 else 0
+
                 raw_metrics[worker_count] = {
                     "train_duration": train_duration,
+                    "train_only_duration": train_only,
                     "train_throughput": train_throughput,
+                    "train_only_throughput": train_only_throughput,
+                    "etl_seconds": getattr(self.orchestrator, "last_etl_seconds", 0.0),
+                    "aggregation_seconds": getattr(self.orchestrator, "last_aggregation_seconds", 0.0),
+                    "oob_seconds": getattr(self.orchestrator, "last_oob_seconds", 0.0),
                     "infer_duration": infer_duration,
                     "infer_throughput": infer_throughput,
                     "num_trees": num_trees,
@@ -82,6 +99,7 @@ class ScalabilityScenario(BaseTestScenario):
         # ─── FASE 2: CALCOLO SPEEDUP E STAMPA IN MODO ELEGANTE ───
         baseline_w = min(workers_to_test)
         base_train_time = raw_metrics[baseline_w]["train_duration"]
+        base_train_only_time = raw_metrics[baseline_w]["train_only_duration"]
         base_infer_time = raw_metrics[baseline_w]["infer_duration"]
 
         print("\n" + "="*80)
@@ -93,14 +111,29 @@ class ScalabilityScenario(BaseTestScenario):
 
             # Formula dello Speedup: Tempo con 1 Worker (o baseline) / Tempo con N Worker
             train_speedup = base_train_time / m["train_duration"] if m["train_duration"] > 0 else 1.0
+            # Speedup della sola parte parallelizzabile: è quello che dice
+            # quanto bene scala l'architettura, senza che l'overhead costante
+            # (ETL, aggregazione, OOB) lo appiattisca.
+            train_only_speedup = (base_train_only_time / m["train_only_duration"]
+                                  if m["train_only_duration"] > 0 else 1.0)
+            # Efficienza parallela = speedup / numero di worker: 1.0 significa
+            # scaling ideale, valori bassi indicano che l'overhead per worker
+            # sta mangiando il guadagno.
+            train_only_efficiency = train_only_speedup / worker_count if worker_count > 0 else 0.0
             infer_speedup = base_infer_time / m["infer_duration"] if m["infer_duration"] > 0 else 1.0
 
             # Stampa a schermo strutturata
             print(f"\n[Configurazione: {worker_count} Worker]")
             print(f"    ADDESTRAMENTO ({m['num_trees']} alberi complessivi):")
-            print(f"     • Durata:     {m['train_duration']:.2f} secondi")
-            print(f"     • Throughput: {m['train_throughput']:.2f} alberi/s")
-            print(f"     • Speedup:    {train_speedup:.2f}x")
+            print(f"     • Durata totale:        {m['train_duration']:.2f} s "
+                  f"(di cui ETL {m['etl_seconds']:.2f} s, aggregazione {m['aggregation_seconds']:.2f} s, "
+                  f"OOB {m['oob_seconds']:.2f} s)")
+            print(f"     • Durata soli alberi:   {m['train_only_duration']:.2f} s")
+            print(f"     • Throughput:           {m['train_throughput']:.2f} alberi/s "
+                  f"({m['train_only_throughput']:.2f} alberi/s sui soli alberi)")
+            print(f"     • Speedup totale:       {train_speedup:.2f}x")
+            print(f"     • Speedup soli alberi:  {train_only_speedup:.2f}x  "
+                  f"(efficienza parallela {train_only_efficiency:.2f})")
 
             print(f"   INFERENZA :")
             print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
@@ -114,8 +147,15 @@ class ScalabilityScenario(BaseTestScenario):
             results[f"workers_{worker_count}"] = {
                 "training": {
                     "duration_seconds": round(m["train_duration"], 2),
+                    "training_only_seconds": round(m["train_only_duration"], 2),
+                    "etl_seconds": round(m["etl_seconds"], 2),
+                    "aggregation_seconds": round(m["aggregation_seconds"], 2),
+                    "oob_estimation_seconds": round(m["oob_seconds"], 2),
                     "throughput_trees_per_s": round(m['train_throughput'], 2),
-                    "speedup": round(train_speedup, 2)
+                    "throughput_trees_per_s_training_only": round(m['train_only_throughput'], 2),
+                    "speedup": round(train_speedup, 2),
+                    "speedup_training_only": round(train_only_speedup, 2),
+                    "parallel_efficiency_training_only": round(train_only_efficiency, 3)
                 },
                 "inference": {
                     "duration_seconds": round(m["infer_duration"], 2),

@@ -21,7 +21,32 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         duration = time.perf_counter() - start_time
         self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
 
+        # Scomposizione del tempo, letta dall'orchestratore (vedi
+        # CentralizedOrchestrator._execute_training_step). Serve a confrontare
+        # con la baseline locale SOLO ciò che la baseline effettivamente fa:
+        # 'training_only_seconds' è la costruzione degli alberi, il termine da
+        # mettere accanto a T_seq/T_1node. ETL, aggregazione e stima OOB sono
+        # costi propri dell'architettura distribuita, che la baseline non
+        # sostiene affatto: vanno riportati, ma separati.
+        timing = {
+            "etl_seconds": round(getattr(self.orchestrator, "last_etl_seconds", 0.0), 4),
+            "training_only_seconds": round(getattr(self.orchestrator, "last_dispatch_seconds", 0.0), 4),
+            "aggregation_seconds": round(getattr(self.orchestrator, "last_aggregation_seconds", 0.0), 4),
+            "oob_estimation_seconds": round(getattr(self.orchestrator, "last_oob_seconds", 0.0), 4),
+            "_NOTA": "training_only_seconds e' il termine confrontabile con la baseline "
+                     "(T_seq monocore / T_1node multicore). duration_seconds include anche "
+                     "ETL, aggregazione e stima OOB, che la baseline non esegue.",
+        }
+        # Residuo non attribuito: differenza fra il totale misurato dallo
+        # scenario e la somma delle fasi. Se cresce, significa che è comparso
+        # del costo non ancora strumentato, invece di restare invisibile.
+        timing["unaccounted_seconds"] = round(
+            duration - sum(v for k, v in timing.items() if k.endswith("_seconds")), 4
+        )
+
         throughput = num_trees / duration if duration > 0 else 0
+        training_only = timing["training_only_seconds"]
+        throughput_training_only = (num_trees / training_only) if training_only > 0 else 0
         accuracy_metrics = self._run_inference_and_get_metrics(payload, task_type)
 
         return {
@@ -29,8 +54,10 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "status": "SUCCESS" if num_trees == target_trees else "FAILED",
             "execution_mode": execution_mode,
             "duration_seconds": round(duration, 4),
+            "timing_breakdown": timing,
             "trees_built": num_trees,
             "throughput_trees_per_sec": round(throughput, 4),
+            "throughput_trees_per_sec_training_only": round(throughput_training_only, 4),
             "model_accuracy_metrics": accuracy_metrics
         }
     def _build_payload(self):

@@ -42,6 +42,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # AWS per via di S3) penalizzerebbe sistematicamente il cluster.
         # 0.0 quando l'ETL viene saltata grazie allo SHORT-CIRCUIT.
         self.last_etl_seconds = 0.0
+        # Scomposizione del tempo di _execute_training_step, esposta perché il
+        # confronto con la baseline locale sia onesto in entrambe le direzioni.
+        # La baseline misura il solo fit di scikit-learn: sommarci sopra
+        # trasferimenti S3, checkpoint e stima OOB — che la baseline non fa
+        # affatto — penalizzerebbe il cluster per lavoro che non gli è stato
+        # chiesto di confrontare.
+        #
+        #   last_dispatch_seconds     costruzione vera degli alberi: scoperta
+        #                             dei worker, invio dei chunk via RPC e
+        #                             attesa del loro completamento. È IL
+        #                             numero da confrontare con T_seq/T_1node.
+        #   last_aggregation_seconds  ricomposizione della foresta globale e
+        #                             salvataggio del modello sullo storage.
+        #   last_oob_seconds          stima Out-Of-Bag: ricarica il training
+        #                             set e ricalcola le predizioni, quindi è
+        #                             una diagnostica aggiuntiva, non parte
+        #                             dell'addestramento.
+        #
+        # Totale di _execute_training_step ~=
+        #   last_etl_seconds + last_dispatch_seconds
+        #   + last_aggregation_seconds + last_oob_seconds
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+        self.last_oob_seconds = 0.0
         
         super().__init__(
             orchestrator_name=name,
@@ -256,11 +280,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
               f"max_depth={max_depth}, max_features={max_features}, min_samples_split={min_samples_split}, "
               f"criterion={criterion}, bootstrap={bootstrap}, max_samples={max_samples}")
 
+        # Azzerati a ogni step: se questo step non costruisce alberi (caso
+        # limite sotto) i valori devono restare 0.0 e non conservare quelli
+        # dello step precedente.
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+        self.last_oob_seconds = 0.0
+
         # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
         else:
             print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
+            dispatch_start = time.perf_counter()
             while True:
                 available_workers = ServiceRegistry.get_available_workers(self.environment)
                 if available_workers:
@@ -432,6 +464,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
             for t in threads:
                 t.join()
 
+            # Fine della fase di costruzione degli alberi: da qui in poi è solo
+            # ricomposizione e diagnostica. Questo è il tempo direttamente
+            # confrontabile con T_seq/T_1node della baseline locale.
+            self.last_dispatch_seconds = time.perf_counter() - dispatch_start
+            print(f"[DEBUG TIMING] Costruzione distribuita degli alberi completata in "
+                  f"{self.last_dispatch_seconds:.2f}s ({len(all_trained_trees)} alberi, "
+                  f"{num_workers} worker).")
+
             # 7. Monitoraggio fallimento totale dello step
             if not task_queue.empty() and len(active_worker_names) == 0:
                 print(f"   [{self.orchestrator_name}] Tutti i worker sono crashati. SQS gestirà il failover macro.")
@@ -447,6 +487,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # 8. Ricomposizione della foresta globale
         if len(all_trained_trees) > 0:
             print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
+            aggregation_start = time.perf_counter()
             try:
                 n_features = all_trained_trees[0].n_features_in_
                 
@@ -478,9 +519,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
 
+                # La ricomposizione e il salvataggio finiscono qui: la stima OOB
+                # che segue è una diagnostica separata (ricarica il training set
+                # e ricalcola le predizioni), quindi va cronometrata a parte per
+                # non gonfiare il costo attribuito all'addestramento.
+                self.last_aggregation_seconds = time.perf_counter() - aggregation_start
+                print(f"[DEBUG TIMING] Ricomposizione e salvataggio del modello: "
+                      f"{self.last_aggregation_seconds:.2f}s.")
+
                 # ─── STIMA OOB (Breiman, 2001), "gratis" e non bloccante ───
                 # Se fallisce per qualunque motivo, non deve invalidare un training
                 # già completato e salvato con successo: solo log, nessun raise.
+                oob_start = time.perf_counter()
                 try:
                     X_train_oob, y_train_oob = self._load_training_matrix_for_oob(tree_type)
                     oob_metrics = self._compute_oob_metrics(
@@ -497,7 +547,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         })
                 except Exception as e_oob:
                     print(f"   [{self.orchestrator_name}] [OOB-WARN] Stima OOB fallita (training non impattato): {e_oob}")
-                
+                finally:
+                    # Cronometrata anche in caso di fallimento: se l'OOB si
+                    # interrompe a metà, il tempo speso è comunque reale e non
+                    # va attribuito silenziosamente all'addestramento.
+                    self.last_oob_seconds = time.perf_counter() - oob_start
+                    print(f"[DEBUG TIMING] Stima OOB (ricarica training set + predizioni): "
+                          f"{self.last_oob_seconds:.2f}s.")
+
+                print(f"[DEBUG TIMING] Riepilogo _execute_training_step -> "
+                      f"ETL {self.last_etl_seconds:.2f}s | costruzione alberi "
+                      f"{self.last_dispatch_seconds:.2f}s | aggregazione "
+                      f"{self.last_aggregation_seconds:.2f}s | OOB {self.last_oob_seconds:.2f}s")
+
                 # ─── MODIFICA 3: Restituiamo la dimensione REALE degli alberi salvati ───
                 return len(all_trained_trees)
                 
@@ -759,9 +821,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
-        # Esposto esplicitamente (prima mancava): chi chiama questo metodo — inclusa
-        # la suite di test locale — deve poter leggere le metriche reali dal valore di
-        # ritorno, invece di affidarsi a un monkey-patch interno fragile.
         return {
             "status": "SUCCESS" if not failed_tasks else "PARTIAL",
             "testing_set_size": int(X_test.shape[0]),

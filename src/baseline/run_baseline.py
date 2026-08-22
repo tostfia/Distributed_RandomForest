@@ -231,29 +231,6 @@ def run_baseline():
             ).split(df_clean)
         etl_time = time.perf_counter() - preprocess_start_time
     else:
-        # Cartella sorgente del dataset REALE.
-        #
-        # La versione precedente era:
-        #     data_folder = getattr(sys_cfg, "dataset_path", None)
-        #     if not data_folder or not os.path.exists(data_folder) or data_folder == "./data":
-        #         data_folder = "./dataset_cache" if os.path.exists("./dataset_cache") else "./data"
-        # con due difetti indipendenti:
-        #
-        # 1) SystemConfig non espone alcun attributo 'dataset_path' (vedi
-        #    config.py: definisce solo mode, env, aws_region, le due code SQS e
-        #    s3_bucket_name). Quindi il getattr restituiva SEMPRE None, la prima
-        #    condizione era SEMPRE vera e nessun percorso configurato veniva mai
-        #    onorato: la configurazione dava l'illusione di essere letta.
-        #
-        # 2) Il fallback finale su './data' faceva puntare RawCSVDataLoader a
-        #    una cartella che poteva contenere CSV estranei (è lì che si trovava
-        #    'sintetic_data.csv', un dataset SINTETICO): sarebbero stati
-        #    ingeriti e processati dal CICIDSPreprocessor come se fossero
-        #    traffico di rete reale, corrompendo la baseline in silenzio.
-        #
-        # Ora il percorso è configurabile davvero, tramite DATASET_LOCAL_PATH,
-        # e in assenza della cartella si fallisce subito con un errore
-        # esplicito invece di ripiegare su una directory arbitraria.
         data_folder = os.environ.get("DATASET_LOCAL_PATH", "./dataset_cache")
         if not os.path.exists(data_folder):
             raise FileNotFoundError(
