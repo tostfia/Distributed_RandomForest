@@ -216,6 +216,7 @@ DYNAMO_TABLES=(
   "OrchestratorLocks"
   "WorkerTasks"
   "WorkerIndexLocks"
+  "JobMetaData"  
 )
 
 for t in "${DYNAMO_TABLES[@]}"; do

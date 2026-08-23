@@ -82,7 +82,18 @@ resource "aws_dynamodb_table" "worker_index_locks" {
 
   tags = { Project = var.project_name }
 }
+resource "aws_dynamodb_table" "job_meta_data"{
+  name         = "JobMetadata"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "job_id"
 
+  attribute {
+    name = "job_id"
+    type = "S"
+  }
+
+  tags = { Project = var.project_name }
+}
 # ---------------------------------------------------------------------
 # WorkerTasks: unica tabella con due Global Secondary Index, confermati
 # via describe-table (worker_name-index, job_id-index). La projection

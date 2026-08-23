@@ -18,6 +18,14 @@ from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+# Tabella DynamoDB per il sidecar dei metadati di job (vedi _save_job_meta):
+# equivalente AWS del file JSON usato in locale, necessaria perché
+# _perform_active_recovery possa ricostruire un payload FEDELE all'originale
+# (iperparametri, tipo/percorso dataset, partizionamento federato) dopo un
+# failover dell'orchestratore, invece di ricadere sui default. Va creata a
+# parte (stesso schema chiave delle altre tabelle usate qui, es. WorkerTasks/
+# OrchestratorLocks): non viene provisionata da questo codice.
+JOB_META_TABLE = "JobMetadata"
 
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
@@ -337,8 +345,20 @@ class BaseOrchestrator(ABC):
                 ownership_lost_event.set()
                 return  # inutile continuare a girare, l'ownership è persa
 
-    def start(self):
-        """Metodo Template: gestisce l'intero ciclo di vita del polling e del failover."""
+    def start(self, stop_event: threading.Event = None):
+        """
+        Metodo Template: gestisce l'intero ciclo di vita del polling e del failover.
+
+        stop_event: opzionale, retrocompatibile (default None = comportamento
+        storico invariato, usato dall'entrypoint reale in produzione). Se
+        fornito, viene controllato ad ogni iterazione del loop principale:
+        serve SOLO a chi avvia questo metodo in un thread in background (es.
+        gli scenari di test di failover, che istanziano un Leader/Standby
+        "usa e getta" per la durata del singolo scenario) per poterlo fermare
+        pulitamente al termine — altrimenti, dato che qui SIGTERM/KeyboardInterrupt
+        sono disabilitati fuori dal main thread (vedi sotto), il loop
+        resterebbe attivo per sempre, anche dopo che lo scenario è concluso.
+        """
         print("=====================================================")
         print(f"  {self.orchestrator_name.upper()} IN ASCOLTO ({self.environment.upper()})...")
         print("=====================================================\n")
@@ -359,6 +379,10 @@ class BaseOrchestrator(ABC):
         leadership_lost_event = threading.Event()
         try:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    print(f"[{self.orchestrator_name}] [STOP] Richiesta di arresto ricevuta (stop_event): "
+                          f"uscita pulita dal loop di polling.")
+                    break
                 if leadership_lost_event.is_set():
                     print(f"[{self.orchestrator_name}] [DOWNGRADE] Rientro in standby, riprovo l'acquisizione.")
                     is_leader = False
@@ -592,51 +616,100 @@ class BaseOrchestrator(ABC):
 
     def _save_job_meta(self, job_id: str, payload: dict):
         """
-        Persiste su disco i metadati originali del job (dataset_path, dataset_type,
-        hyperparameters, request_type). Lo state_manager (DynamoDB reale o mock) NON
-        conserva questi campi: senza questo sidecar, _perform_active_recovery non potrebbe
-        ricostruire un payload valido dopo un failover dell'orchestratore.
-        Implementato solo per l'ambiente locale, coerente con il resto del recovery.
+        Persiste i metadati originali del job (dataset_path, dataset_type,
+        hyperparameters, request_type, e — per il federato — partition_strategy/
+        partition_alpha/tree_allocation_strategy). Lo state_manager (DynamoDB
+        reale o mock) NON conserva questi campi: senza questo sidecar,
+        _perform_active_recovery non potrebbe ricostruire un payload valido
+        dopo un failover dell'orchestratore, e ripartirebbe con i default
+        (es. n_estimators=100 invece del valore reale del manifesto).
+
+        In locale: file JSON su disco (bind mount condiviso tra le istanze
+        Docker). Su AWS: stessa idea via una piccola tabella DynamoDB
+        dedicata (JOB_META_TABLE) — PRIMA questo metodo era no-op su AWS, il
+        che faceva silenziosamente ricadere il recovery sui default proprio
+        nell'ambiente (Fargate) dove il failover viene testato per davvero.
         """
-        if self.environment != "local" or not job_id:
+        if not job_id:
             return
-        try:
-            meta_path = self._get_job_meta_path(job_id)
-            os.makedirs(os.path.dirname(meta_path), exist_ok=True)
-            meta = {
-                "dataset_path": payload.get("dataset_path"),
-                "dataset_type": payload.get("dataset_type"),
-                "hyperparameters": payload.get("hyperparameters", {}),
-                "request_type": payload.get("request_type", "TRAINING"),
-            }
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
-        except Exception as e:
-            print(f"[{self.orchestrator_name}] [WARN] Impossibile salvare i metadati del job {job_id[:8]}: {e}")
+        meta = {
+            "dataset_path": payload.get("dataset_path"),
+            "dataset_type": payload.get("dataset_type"),
+            "hyperparameters": payload.get("hyperparameters", {}),
+            "request_type": payload.get("request_type", "TRAINING"),
+            # Iperparametro dell'ESPERIMENTO federato (non del modello): senza
+            # questi, un job federato ripreso dopo un failover perderebbe la
+            # strategia di partizionamento/allocazione dichiarata nel job
+            # originale, ripiegando sui default "iid"/"proportional" anche se
+            # il job vero era, ad esempio, Dirichlet con allocazione equa —
+            # etichettando le metriche del run recuperato in modo scorretto.
+            "partition_strategy": payload.get("partition_strategy", "iid"),
+            "partition_alpha": payload.get("partition_alpha"),
+            "tree_allocation_strategy": payload.get("tree_allocation_strategy", "proportional"),
+        }
+        if self.environment == "local":
+            try:
+                meta_path = self._get_job_meta_path(job_id)
+                os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile salvare i metadati del job {job_id[:8]}: {e}")
+        else:
+            try:
+                db = DynamoDBFactory.get_db(self.environment)
+                db.put_item(JOB_META_TABLE, job_id, meta)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile salvare i metadati AWS (tabella "
+                      f"'{JOB_META_TABLE}') del job {job_id[:8]}: {e}. Se la tabella non esiste ancora, "
+                      f"il recovery su questo ambiente ricadrà sui default fino a quando non viene creata.")
 
     def _load_job_meta(self, job_id: str) -> dict:
-        if self.environment != "local":
+        if self.environment == "local":
+            meta_path = self._get_job_meta_path(job_id)
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [WARN] Metadati del job {job_id[:8]} corrotti o illeggibili: {e}")
+            else:
+                print(f"[{self.orchestrator_name}] [WARN] Nessun sidecar di metadati trovato per il job {job_id[:8]}. Il recovery userà i default.")
             return {}
-        meta_path = self._get_job_meta_path(job_id)
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [WARN] Metadati del job {job_id[:8]} corrotti o illeggibili: {e}")
         else:
-            print(f"[{self.orchestrator_name}] [WARN] Nessun sidecar di metadati trovato per il job {job_id[:8]}. Il recovery userà i default.")
-        return {}
+            try:
+                db = DynamoDBFactory.get_db(self.environment)
+                raw = db.get_item(JOB_META_TABLE, job_id)
+                # Alcune implementazioni Dynamo (get_item "grezzo") avvolgono il
+                # risultato in {"Item": {...}}; normalizziamo entrambi i casi.
+                if isinstance(raw, dict) and "Item" in raw:
+                    item = raw.get("Item") or {}
+                else:
+                    item = raw if isinstance(raw, dict) else {}
+                if not item:
+                    print(f"[{self.orchestrator_name}] [WARN] Nessun sidecar AWS di metadati trovato per il "
+                          f"job {job_id[:8]} (tabella '{JOB_META_TABLE}'). Il recovery userà i default.")
+                return item
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Lettura metadati AWS del job {job_id[:8]} fallita: {e}. "
+                      f"Il recovery userà i default.")
+                return {}
 
     def _clean_job_meta(self, job_id: str):
-        if self.environment != "local":
-            return
-        meta_path = self._get_job_meta_path(job_id)
-        if os.path.exists(meta_path):
+        if self.environment == "local":
+            meta_path = self._get_job_meta_path(job_id)
+            if os.path.exists(meta_path):
+                try:
+                    os.remove(meta_path)
+                except Exception:
+                    pass
+        else:
             try:
-                os.remove(meta_path)
+                db = DynamoDBFactory.get_db(self.environment)
+                if hasattr(db, "delete_item"):
+                    db.delete_item(JOB_META_TABLE, job_id)
             except Exception:
-                pass
+                pass  # cleanup best-effort: un record residuo non è dannoso
 
     def _load_checkpoint(self, job_id: str, existing_state: dict) -> int:
         db_val = existing_state.get("alberi_addestrati", 0)
@@ -721,6 +794,12 @@ class BaseOrchestrator(ABC):
                         "dataset_path": job_meta.get("dataset_path") or item_data.get("dataset_path"),
                         "dataset_type": job_meta.get("dataset_type"),
                         "hyperparameters": job_meta.get("hyperparameters", {}),
+                        # Vedi _save_job_meta: senza questi, un job federato
+                        # ripreso dopo un failover perderebbe la strategia di
+                        # partizionamento/allocazione originale.
+                        "partition_strategy": job_meta.get("partition_strategy", "iid"),
+                        "partition_alpha": job_meta.get("partition_alpha"),
+                        "tree_allocation_strategy": job_meta.get("tree_allocation_strategy", "proportional"),
                     }
 
                     # Il leader precedente è "mancato" (crash), ma la sua lease su

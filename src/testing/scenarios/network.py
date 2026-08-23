@@ -203,6 +203,15 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "tree_type": self.config["selected_task"],
             },
         }
+        # Costruito a mano, separatamente da _build_payload(): senza questo
+        # ricadeva sui DEFAULT SILENZIOSI di federated.py ("iid"/"proportional")
+        # invece della strategia realmente dichiarata nel manifesto — osservato
+        # in un run reale: i probe di questo metodo dichiaravano
+        # tree_allocation='proportional' mentre il job principale dello stesso
+        # scenario dichiarava correttamente 'equal' (stessa sessione, stesso
+        # manifesto, due valori diversi).
+        if os.environ.get("SYS_MODE", "centralized") == "federated":
+            probe_payload = self._augment_payload_with_partitioning(probe_payload)
         t0 = time.perf_counter()
         self._reuse_dataset_if_available(probe_payload, seed=0)
         self.orchestrator._execute_training_step(
