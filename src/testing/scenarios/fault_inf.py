@@ -121,6 +121,12 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
                 "error": f"Fase di addestramento preliminare fallita: {e}"
             }
 
+        # Vedi fault.py: segnala al thread killer che l'inferenza sotto test è
+        # già conclusa, per evitare che un kill_delay più lungo del tempo
+        # reale di inferenza (spesso <2s) spari durante lo scenario SUCCESSIVO.
+        job_done_event = threading.Event()
+        fault_triggered = {"value": False}
+
         def kill_worker_local():
             # Stessa logica a due fasi di fault.py: il guasto non scatta MAI prima
             # che sia stato inviato almeno un chunk reale, ma nemmeno prima che
@@ -137,7 +143,16 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
                 if remaining > 0:
                     print(f"[TEST] Primo chunk di inferenza inviato dopo {elapsed:.1f}s. Attendo altri {remaining:.1f}s "
                           f"(fino a {kill_delay}s totali) per dare modo a un po' di lavoro reale di completarsi...")
-                    time.sleep(remaining)
+                    # Ci fermiamo prima se l'inferenza finisce nel frattempo
+                    # (tipicamente 1-2s): niente kill sparato a scenario finito.
+                    if job_done_event.wait(timeout=remaining):
+                        print("[TEST] L'inferenza è già COMPLETATA prima dello scadere del timer di guasto: "
+                              "guasto ANNULLATO (altrimenti colpirebbe il prossimo scenario, non questo).")
+                        return
+
+            if job_done_event.is_set():
+                print("[TEST] Inferenza già completata: guasto ANNULLATO.")
+                return
 
             environment = getattr(self.orchestrator, "environment", "local")
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
@@ -180,6 +195,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
                             # Uccidiamo il figlio. Il supervisor capterà l'exit code != 0 e farà il backoff
                             os.kill(int(valid_pids[0]), signal.SIGKILL)
                             print(f"[TEST TRIGGER] Processo Worker locale (PID {valid_pids[0]}) abbattuto!")
+                fault_triggered["value"] = True
             except Exception as e:
                     print(f"[TEST ERRORE] Impossibile eseguire il kill: {e}")
 
@@ -189,7 +205,8 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
         # un worker riceva un vero task di inferenza.
         self.orchestrator.chunk_sent_event.clear()
 
-        threading.Thread(target=kill_worker_local, daemon=True).start()
+        kill_thread = threading.Thread(target=kill_worker_local, daemon=True)
+        kill_thread.start()
         start_time = time.perf_counter()
 
         test_status = "FAILED"
@@ -209,13 +226,26 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             test_status = "FAILED"
 
         duration = time.perf_counter() - start_time
+
+        # Vedi fault.py: segnaliamo la fine e aspettiamo il thread killer
+        # PRIMA di ritornare, altrimenti (daemon=True, mai altrimenti atteso)
+        # potrebbe sparare durante lo scenario successivo.
+        job_done_event.set()
+        kill_thread.join(timeout=max(kill_delay or 0, 5) + 5)
+        if kill_thread.is_alive():
+            print("[TEST WARN] Il thread di simulazione del guasto non si è concluso in tempo: "
+                  "potrebbe sparare durante lo scenario successivo.")
+
         mode = os.environ.get("SYS_MODE", "centralized")
         return {
             "scenario_description": "Crash improvviso Worker su thread/processi Python locali durante l'inferenza.",
             "execution_mode": "centralized" if mode == "centralized" else "federated",
             "status": test_status,
             "duration_seconds": round(duration, 2),
-            "accuracy_metrics": accuracy_metrics
+            "accuracy_metrics": accuracy_metrics,
+            # Vedi fault.py::fault_actually_triggered: se False, il risultato
+            # SUCCESS non ha davvero testato il crash del worker.
+            "fault_actually_triggered": fault_triggered["value"],
         }
 
     def _build_payload(self):

@@ -112,6 +112,18 @@ class FaultToleranceScenario(BaseTestScenario):
         # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
         # quindi non si puo' piu' chiedere N alberi dichiarandone M ai worker.
         target_trees = self._resolve_target_trees()
+
+        # Segnala al thread killer che il job sotto test è già concluso: senza
+        # questo, un guasto programmato DOPO la fine del job (kill_delay più
+        # lungo del tempo reale di training) scatterebbe comunque, ma
+        # colpendo un job/scenario SUCCESSIVO — esattamente il bug osservato
+        # eseguendo 'all' (il kill dello scenario 4 è comparso durante lo
+        # scenario 6). Il thread lo controlla PRIMA di procedere al kill vero
+        # e proprio, e se il job è già finito annulla il guasto invece di
+        # spararlo a vuoto/tardi.
+        job_done_event = threading.Event()
+        fault_triggered = {"value": False}
+
         def kill_worker_local():
             # Rispettiamo entrambi gli intenti: il guasto non scatta MAI prima che
             # sia stato inviato almeno un chunk reale (altrimenti staremmo testando
@@ -130,7 +142,17 @@ class FaultToleranceScenario(BaseTestScenario):
                 if remaining > 0:
                     print(f"[TEST] Primo chunk inviato dopo {elapsed:.1f}s. Attendo altri {remaining:.1f}s "
                           f"(fino a {kill_delay}s totali) per dare modo a un po' di lavoro reale di completarsi...")
-                    time.sleep(remaining)
+                    # Aspettiamo il tempo residuo, ma ci fermiamo prima se il
+                    # job termina nel frattempo: niente kill_delay fisso che
+                    # spara dopo che il job (e magari lo scenario) è già finito.
+                    if job_done_event.wait(timeout=remaining):
+                        print("[TEST] Il job è già COMPLETATO prima dello scadere del timer di guasto: "
+                              "guasto ANNULLATO (altrimenti colpirebbe il prossimo scenario, non questo).")
+                        return
+
+            if job_done_event.is_set():
+                print("[TEST] Job già completato: guasto ANNULLATO.")
+                return
 
             environment = getattr(self.orchestrator, "environment", "local")
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
@@ -173,17 +195,41 @@ class FaultToleranceScenario(BaseTestScenario):
                             # Uccidiamo il figlio. Il supervisor capterà l'exit code != 0 e farà il backoff
                             os.kill(int(valid_pids[0]), signal.SIGKILL)
                             print(f"[TEST TRIGGER] Processo Worker locale (PID {valid_pids[0]}) abbattuto!")
+                fault_triggered["value"] = True
             except Exception as e:
                     print(f"[TEST ERRORE] Impossibile eseguire il kill: {e}")
 
+        # Reset esplicito: chunk_sent_event potrebbe essere ancora "set" da un
+        # job/scenario precedente eseguito nello stesso processo (es. con
+        # 'all'). Senza questo clear, il thread killer lo vedrebbe già
+        # segnalato e passerebbe direttamente al kill_delay pieno come se il
+        # chunk fosse appena partito — o peggio, con un chunk_sent_event già
+        # settato e un kill_delay più lungo della durata reale del job,
+        # scatterebbe più tardi, durante lo scenario SUCCESSIVO.
+        self.orchestrator.chunk_sent_event.clear()
 
-        threading.Thread(target=kill_worker_local, daemon=True).start()
+        kill_thread = threading.Thread(target=kill_worker_local, daemon=True)
+        kill_thread.start()
         start_time = time.perf_counter()
 
         payload = self._build_payload()
         self._reuse_dataset_if_available(payload, seed=123)
         num_trees = self.orchestrator._execute_training_step(payload, start_alberi=0, target_alberi=target_trees, seed=123)
         duration = time.perf_counter() - start_time
+
+        # Segnaliamo la fine del job e aspettiamo che il thread killer si
+        # concluda (annullandosi o sparando) PRIMA di ritornare: altrimenti,
+        # se il job finisce prima del kill_delay, il thread resterebbe vivo
+        # (daemon=True, mai altrimenti atteso/cancellato) e potrebbe sparare
+        # il kill nel bel mezzo dello scenario successivo — il bug osservato.
+        job_done_event.set()
+        kill_delay = ft_cfg.get("kill_worker_after_seconds") or 0
+        kill_thread.join(timeout=max(kill_delay, 5) + 5)
+        if kill_thread.is_alive():
+            print("[TEST WARN] Il thread di simulazione del guasto non si è concluso in tempo "
+                  "(probabilmente bloccato su una chiamata di rete): potrebbe sparare durante lo "
+                  "scenario successivo. Valuta un timeout più basso, o ignora se è l'ultimo scenario eseguito.")
+
         self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)
 
         return {
@@ -191,7 +237,12 @@ class FaultToleranceScenario(BaseTestScenario):
             "execution_mode": "centralized" if mode == "centralized" else "federated",
             "status": "SUCCESS" if num_trees == target_trees else "FAILED",
             "trees_built": num_trees,
-            "duration_seconds": round(duration, 2)
+            "duration_seconds": round(duration, 2),
+            # Se False, il guasto è stato annullato (job finito prima del
+            # kill_delay) o il thread non ha fatto in tempo a confermarlo:
+            # uno "status": "SUCCESS" con questo a False NON ha davvero
+            # testato la tolleranza ai guasti, va scartato dal confronto.
+            "fault_actually_triggered": fault_triggered["value"],
         }
 
     def _build_payload(self):

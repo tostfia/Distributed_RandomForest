@@ -85,9 +85,9 @@
     "Idle Min"
   ],
   "federated_partitioning": {
-    "strategy": "dirichlet",
+    "strategy": "iid",
     "alpha": 0.5,
-    "tree_allocation": "proportional"
+    "tree_allocation": "equal"
   },
   "hyperparameters": {
     "n_estimators": 30,

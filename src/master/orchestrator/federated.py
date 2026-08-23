@@ -56,6 +56,21 @@ class FederatedOrchestrator(BaseOrchestrator):
         # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
         self._trees_cache = {}
 
+        # Strumentazione dei tempi (letta da performance.py/scalability.py via
+        # getattr): prima assente su FederatedOrchestrator, che ha la propria
+        # implementazione di _execute_training_step separata da quella
+        # centralizzata dove questi attributi erano già impostati. Inizializzati
+        # qui (non solo assegnati a runtime) così un getattr(...) prima del
+        # primo job trova comunque 0.0 invece di ricadere sul default silenzioso
+        # del chiamante, che mascherava l'assenza di dato reale.
+        self.last_etl_seconds = 0.0
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+        # Il federato non esegue stima OOB (scelta di design: l'OOB richiede il
+        # training set completo in un unico posto, qui ogni worker vede solo il
+        # proprio shard) — resta sempre 0.0, non "non misurato".
+        self.last_oob_seconds = 0.0
+
     def _ensure_local_bootstrap(self, payload: dict):
         """
         VERIFICA (senza generarli) che gli shard federati siano già presenti sul
@@ -526,6 +541,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 worker_conn.close()
                             except Exception:
                                 pass
+            dispatch_start = time.perf_counter()
             threads = []
             for i, worker_name in enumerate(worker_names, start=1):
                 stable_idx = self._infer_worker_index(worker_name, i)
@@ -535,6 +551,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             for t in threads:
                 t.join()
+            self.last_dispatch_seconds = time.perf_counter() - dispatch_start
             print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")
 
             if not all_trained_trees:
@@ -547,7 +564,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
                 collected_trees = all_trained_trees
 
+            aggregation_start = time.perf_counter()
             final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
+            self.last_aggregation_seconds = time.perf_counter() - aggregation_start
             self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
             return final_count
 

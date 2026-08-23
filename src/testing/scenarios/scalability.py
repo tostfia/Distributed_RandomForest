@@ -78,12 +78,29 @@ class ScalabilityScenario(BaseTestScenario):
                 # di pochi secondi, raddoppiare i worker non può mai avvicinarsi
                 # al 2x anche se la parte parallela scala perfettamente
                 # (è la legge di Amdahl applicata suo malgrado alla misura).
-                train_only = getattr(self.orchestrator, "last_dispatch_seconds", 0.0) or train_duration
+                #
+                # 'last_dispatch_seconds' esiste solo su CentralizedOrchestrator
+                # in questo momento: FederatedOrchestrator non lo strumenta
+                # ancora. PRIMA questo ramo ricadeva silenziosamente su
+                # train_duration quando l'attributo mancava — che rende
+                # 'train_only_duration' identico a 'train_duration' e fa
+                # sembrare una misura valida quella che è solo un placeholder,
+                # falsando speedup/efficienza in modo non distinguibile a
+                # valle. Ora lo distinguiamo esplicitamente.
+                dispatch_seconds_raw = getattr(self.orchestrator, "last_dispatch_seconds", None)
+                train_only_instrumented = dispatch_seconds_raw is not None
+                train_only = dispatch_seconds_raw if train_only_instrumented else train_duration
+                if not train_only_instrumented:
+                    print(f"[SCALABILITY {execution_mode.upper()}] [WARN] 'last_dispatch_seconds' non "
+                          f"disponibile su questo orchestratore ({worker_count} worker): "
+                          f"'training_only_seconds'/speedup 'soli alberi' NON sono misure valide per "
+                          f"questa configurazione, sono un placeholder = duration_seconds totale.")
                 train_only_throughput = num_trees / train_only if train_only > 0 else 0
 
                 raw_metrics[worker_count] = {
                     "train_duration": train_duration,
                     "train_only_duration": train_only,
+                    "train_only_instrumented": train_only_instrumented,
                     "train_throughput": train_throughput,
                     "train_only_throughput": train_only_throughput,
                     "etl_seconds": getattr(self.orchestrator, "last_etl_seconds", 0.0),
@@ -129,12 +146,14 @@ class ScalabilityScenario(BaseTestScenario):
             print(f"     • Durata totale:        {m['train_duration']:.2f} s "
                   f"(di cui ETL {m['etl_seconds']:.2f} s, aggregazione {m['aggregation_seconds']:.2f} s, "
                   f"OOB {m['oob_seconds']:.2f} s)")
-            print(f"     • Durata soli alberi:   {m['train_only_duration']:.2f} s")
+            print(f"     • Durata soli alberi:   {m['train_only_duration']:.2f} s"
+                  + ("" if m["train_only_instrumented"] else "  [PLACEHOLDER: non strumentato, = durata totale]"))
             print(f"     • Throughput:           {m['train_throughput']:.2f} alberi/s "
                   f"({m['train_only_throughput']:.2f} alberi/s sui soli alberi)")
             print(f"     • Speedup totale:       {train_speedup:.2f}x")
             print(f"     • Speedup soli alberi:  {train_only_speedup:.2f}x  "
-                  f"(efficienza parallela {train_only_efficiency:.2f})")
+                  f"(efficienza parallela {train_only_efficiency:.2f})"
+                  + ("" if m["train_only_instrumented"] else "  [NON VALIDO: vedi placeholder sopra]"))
 
             print(f"   INFERENZA :")
             print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
@@ -149,6 +168,7 @@ class ScalabilityScenario(BaseTestScenario):
                 "training": {
                     "duration_seconds": round(m["train_duration"], 2),
                     "training_only_seconds": round(m["train_only_duration"], 2),
+                    "training_only_instrumented": m["train_only_instrumented"],
                     "etl_seconds": round(m["etl_seconds"], 2),
                     "aggregation_seconds": round(m["aggregation_seconds"], 2),
                     "oob_estimation_seconds": round(m["oob_seconds"], 2),
@@ -168,6 +188,21 @@ class ScalabilityScenario(BaseTestScenario):
 
         print("\n" + "="*80)
 
+        # In federato ogni worker valida il proprio shard: il testing_set_size
+        # totale CRESCE con il numero di worker testati (non è lo stesso
+        # carico rivalutato più volte, come in centralized). Lo speedup
+        # dell'inferenza confronta quindi tempi su MOLI DI LAVORO diverse tra
+        # una configurazione e l'altra: non è strong scaling, è un artefatto.
+        # Il throughput (samples/s) resta invece confrontabile.
+        federated_mode = os.environ.get("SYS_MODE", "centralized") == "federated"
+        inference_speedup_note = (
+            "In modalità federata ogni worker valida il proprio shard: il testing_set_size totale "
+            "cresce con il numero di worker (vedi 'num_samples' per configurazione). "
+            "'inference.speedup' qui NON è comparabile tra configurazioni (confronta moli di lavoro "
+            "diverse, non lo stesso carico su più worker): usare 'throughput_samples_per_s' per il "
+            "confronto reale."
+        ) if federated_mode else None
+
         return {
             "scenario_description": (
                 f"Strong scaling test completato per Addestramento ed Inferenza in ambiente {execution_mode}. "
@@ -177,6 +212,7 @@ class ScalabilityScenario(BaseTestScenario):
             "scaling_type": "strong",
             "baseline_worker_count": baseline_w,
             "total_available_workers": total_available,
+            "inference_speedup_caveat": inference_speedup_note,
             "metrics_per_scale": results
         }
 

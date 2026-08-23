@@ -4,7 +4,7 @@
     "status": "SUCCESS",
     "original_leader": "orchestrator-federato-testing",
     "recovered_by": "Master-2-Standby",
-    "duration_seconds": 417.463946203,
-    "trees_built": 100
+    "duration_seconds": 496.1347163820001,
+    "trees_built": 16
   }
 }

@@ -399,7 +399,13 @@ class NetworkSimulationScenario(BaseTestScenario):
                 "AWS Academy Learner Lab di questo progetto)."
             ),
             "pure_rpc_ping_latency_ms": pure_ping_stats,
-            "measured_real_rpc_latency_ms": probe_stats,
+            # Rinominato da 'measured_real_rpc_latency_ms': il nome vecchio
+            # suggeriva latenza di rete pura, ma probe_stats include l'ETL
+            # (vedi log subito sopra: "job di probe, ETL incluso dopo il
+            # primo"). Nome distinto da 'probe_job_total_time_ms' del ramo
+            # locale (che è uno scalare) perché qui è un dict di statistiche
+            # su più probe (min/avg/median/max), non lo stesso tipo di dato.
+            "probe_job_total_time_stats_ms": probe_stats,
             "duration_seconds": round(duration, 2),
             "throughput_trees_per_second": round(throughput, 2),
             "accuracy_metrics": accuracy_metrics,
