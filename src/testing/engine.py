@@ -143,7 +143,8 @@ class TestEngine:
             print("5. Guasto improvviso del Worker (inferenza)")
             print("6. Failover dell'Orchestratore (addestramento)")
             print("7. Failover dell'Orchestratore (inferenza)")
-            valid_options = ["1", "2", "3", "4","5", "6", "7", "all"]
+            print("8. Genera Grafici") 
+            valid_options = ["1", "2", "3", "4","5", "6", "7", "8", "all"]
             # Bypass non-interattivo: se la variabile d'ambiente SCENARIO è
             # impostata (usato da run_test_engine_ecs.sh / task ECS one-off
             # senza terminale collegato all'avvio), la usiamo al posto del
@@ -155,7 +156,7 @@ class TestEngine:
                 print(f"Scelta (da variabile d'ambiente SCENARIO): {config_mode}")
             else:
                 while True:
-                    user_choice = input("Scelta (1-7, o 'all' per eseguire tutti): ").strip().lower()
+                    user_choice = input("Scelta (1-8, o 'all' per eseguire tutti): ").strip().lower()
                     if user_choice in valid_options:
                         config_mode = user_choice
                         break
@@ -183,7 +184,11 @@ class TestEngine:
             elif config_mode == "7":
                 orchestrator_fault_inf = InferenceOrchestratorFaultScenario(self.config, self.orchestrator)
                 self.global_reports["inference_orchestrator_failover"] = orchestrator_fault_inf.run()
-            if config_mode != "all":
+            elif config_mode == "8":
+                from src.testing.plot_generator import PlotGenerator
+                plotter = PlotGenerator()
+                plotter.generate_all_plots()
+            if config_mode not in ("all", "8"):
                 self._print_final_summary()
         finally:
             docker = os.environ.get("RUNNING_IN_DOCKER")
