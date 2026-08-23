@@ -78,3 +78,7 @@ saved_models/*
 synthetic/*
 !synthetic/.gitkeep
 !synthetic/*.json
+
+# === OUTPUT GRAFICI LOCALI ===
+# Ignora la cartella plots/ generata automaticamente dallo script di plottaggio
+plots/
