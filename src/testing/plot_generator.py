@@ -4,11 +4,19 @@ Generatore automatico dei grafici per la relazione finale.
 Legge i report JSON prodotti da TestEngine._print_final_summary() e il manifesto
 .pkl prodotto da run_baseline(), e produce i PNG in ./plots.
 
-PRINCIPIO DI ROBUSTEZZA:
-    Se i dati per un grafico non ci sono (perche' quel test
+PRINCIPIO DI ROBUSTEZZA (requisito esplicito del progetto):
+    Nessun metodo di questa classe puo' far fallire l'esecuzione. Ogni accesso a
+    file e' preceduto da os.path.exists(), ogni accesso a dizionario passa da
+    dict.get(), e ogni generatore e' eseguito dentro un wrapper che intercetta
+    qualunque eccezione. Se i dati per un grafico non ci sono (perche' quel test
     non e' mai stato eseguito, o e' stato SKIPPED), il grafico viene saltato con
     un [WARN] e la generazione prosegue.
 
+PRIORITA' DELLE SORGENTI:
+    test_reports/aws/  ->  test_reports/docker/  ->  test_reports/local/
+    Il primo ambiente che contiene dati utilizzabili diventa l'ambiente
+    "primario" per i grafici a singolo ambiente; gli altri restano comunque
+    caricati e vengono usati per i confronti cross-ambiente.
 
 Uso:
     python -m src.testing.plot_generator
@@ -35,7 +43,8 @@ from matplotlib.patches import Patch
 
 
 # ---------------------------------------------------------------------------
-# Palette e stile
+# Palette e stile: una sola definizione, riusata da tutti i grafici, cosi' la
+# relazione risulta visivamente coerente da un capitolo all'altro.
 # ---------------------------------------------------------------------------
 PALETTE = {
     "primary":    "#1F4E79",   # blu profondo  - misura principale
@@ -92,8 +101,9 @@ class PlotGenerator:
         self.baseline_pkl_path = baseline_pkl
         self.dpi = dpi
 
-        # reports[env][mode] = {nome_scenario: {...}}
-        self.reports = {}
+        # Una voce per file di report: {env, mode, path, file, mtime,
+        # scenarios, fingerprint}. Vedi _load_all_reports.
+        self.runs = []
         self.primary_env = None
         self.primary_mode = None
 
@@ -168,7 +178,24 @@ class PlotGenerator:
         return "unknown"
 
     def _load_all_reports(self):
-        """Carica tutti i JSON di test_reports/<env>[/<sottocartella>]/*.json."""
+        """
+        Carica i JSON di test_reports/<env>[/<sottocartella>]/*.json.
+
+        UN FILE = UNA RUN. Questo e' il punto piu' importante di tutta la
+        classe: ogni file di report e' il prodotto di UNA sessione di test, con
+        un suo dataset, un suo numero di alberi e una sua configurazione. File
+        diversi nella stessa cartella sono, quasi sempre, ESPERIMENTI DIVERSI
+        eseguiti in momenti diversi.
+
+        Fondere gli scenari di piu' file in un unico dizionario (come faceva la
+        prima versione) produce grafici formalmente corretti e sostanzialmente
+        falsi: si finisce per confrontare il tempo di un job da 30 alberi sul
+        dataset reale con quello di un job da 100 alberi sul sintetico, e a
+        concludere che "il crash del worker rende il sistema piu' veloce".
+
+        Per questo ogni run resta separata, e ogni grafico comparativo attinge
+        da UNA sola run.
+        """
         if not os.path.isdir(self.reports_root):
             print(f"[WARN] Cartella dei report '{self.reports_root}' inesistente: "
                   f"nessun grafico basato sui test potra' essere generato.")
@@ -180,50 +207,106 @@ class PlotGenerator:
                 continue
 
             # Ricerca ricorsiva: gestisce sia test_reports/local/*.json sia
-            # test_reports/local/federated/*.json 
-            paths = sorted(
-                glob.glob(os.path.join(env_dir, "**", "*.json"), recursive=True),
-                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-            )
-            if not paths:
-                continue
-
+            # test_reports/local/federated/*.json (organizzazione consigliata
+            # per poter confrontare le due modalita').
+            paths = sorted(glob.glob(os.path.join(env_dir, "**", "*.json"), recursive=True))
             for path in paths:
                 payload = self._read_json(path)
                 if not isinstance(payload, dict) or not payload:
                     continue
 
+                scenarios = {k: v for k, v in payload.items() if isinstance(v, dict)}
+                if not scenarios:
+                    print(f"[WARN] '{path}' non contiene alcuno scenario valido: lo salto.")
+                    continue
+
                 rel = os.path.relpath(path, env_dir)
-                mode = self._infer_mode_from_filename(rel)
-                bucket = self.reports.setdefault(env, {}).setdefault(mode, {})
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = 0.0
 
-                # I file sono ordinati per data di modifica crescente: un report
-                # piu' recente sovrascrive lo stesso scenario letto da un file
-                # piu' vecchio (tipicamente 'all_tests' vs run singole).
-                for scenario_name, scenario_data in payload.items():
-                    if isinstance(scenario_data, dict):
-                        bucket[scenario_name] = scenario_data
+                self.runs.append({
+                    "env": env,
+                    "mode": self._infer_mode_from_filename(rel),
+                    "path": path,
+                    "file": os.path.basename(path),
+                    "mtime": mtime,
+                    "scenarios": scenarios,
+                    "fingerprint": self._fingerprint(scenarios),
+                })
 
-            if env in self.reports:
-                n_files = len(paths)
-                modes = ", ".join(sorted(self.reports[env].keys()))
-                print(f"[PLOT] Ambiente '{env}': {n_files} file di report letti "
-                      f"(modalita' rilevate: {modes}).")
-
-        for env in self.ENV_PRIORITY:
-            modes = self.reports.get(env, {})
-            if any(modes.values()):
-                self.primary_env = env
-                # Modalita' primaria = quella con piu' scenari disponibili.
-                self.primary_mode = max(modes, key=lambda m: len(modes[m]))
-                break
-
-        if self.primary_env:
-            print(f"[PLOT] Ambiente primario selezionato: '{self.primary_env}' "
-                  f"(modalita' '{self.primary_mode}').")
-        else:
+        if not self.runs:
             print("[WARN] Nessun report utilizzabile trovato in "
                   f"'{self.reports_root}/{{aws,docker,local}}'.")
+            return
+
+        self._print_provenance()
+
+        primary = self._pick_run(["performance_and_metrics", "scalability"])
+        if primary:
+            self.primary_env = primary["env"]
+            self.primary_mode = primary["mode"]
+
+    @staticmethod
+    def _fingerprint(scenarios: dict) -> dict:
+        """
+        Riassume la configurazione di una run: serve a riconoscere a colpo
+        d'occhio (e a stampare) che due file NON descrivono lo stesso
+        esperimento. Chiavi: numero di alberi, dimensione del test set, tipo di
+        task.
+        """
+        trees, test_sizes, tasks = set(), set(), set()
+        for block in scenarios.values():
+            value = block.get("trees_built")
+            if isinstance(value, (int, float)) and value > 0:
+                trees.add(int(value))
+            for metrics in (block.get("model_accuracy_metrics"), block.get("accuracy_metrics")):
+                if isinstance(metrics, dict):
+                    size = metrics.get("testing_set_size")
+                    if isinstance(size, (int, float)) and size > 0:
+                        test_sizes.add(int(size))
+                    tasks.add("regressione" if "mse" in metrics or "r2" in metrics
+                              else "classificazione")
+        return {"trees": sorted(trees), "test_sizes": sorted(test_sizes),
+                "tasks": sorted(tasks)}
+
+    def _print_provenance(self):
+        """
+        Tabella di provenienza: quale file, quale ambiente, quanti scenari, con
+        quale configurazione. E' la prima cosa da guardare quando un grafico
+        sembra assurdo — di solito la risposta e' che due righe di questa
+        tabella non parlano dello stesso esperimento.
+        """
+        print("\n[PLOT] Report rilevati (una riga = una sessione di test):")
+        print(f"        {'AMBIENTE':<8} {'FILE':<44} {'SCEN.':>5}  CONFIGURAZIONE")
+        for run in sorted(self.runs, key=lambda r: (self.ENV_PRIORITY.index(r["env"]), r["file"])):
+            fp = run["fingerprint"]
+            descr = []
+            if fp["trees"]:
+                descr.append("alberi: " + "/".join(str(t) for t in fp["trees"]))
+            if fp["test_sizes"]:
+                descr.append("test set: " + "/".join(f"{s:,}".replace(",", ".")
+                                                    for s in fp["test_sizes"]))
+            if fp["tasks"]:
+                descr.append("/".join(fp["tasks"]))
+            print(f"        {run['env']:<8} {run['file'][:44]:<44} "
+                  f"{len(run['scenarios']):>5}  {' | '.join(descr) if descr else 'n/d'}")
+
+        # Avviso esplicito quando nello stesso ambiente convivono run con
+        # configurazioni diverse: e' il caso in cui i confronti fra file
+        # sarebbero privi di senso, ed e' esattamente cio' che questa classe
+        # ora si rifiuta di fare.
+        for env in self.ENV_PRIORITY:
+            runs = [r for r in self.runs if r["env"] == env]
+            trees = {t for r in runs for t in r["fingerprint"]["trees"]}
+            sizes = {s for r in runs for s in r["fingerprint"]["test_sizes"]}
+            if len(runs) > 1 and (len(trees) > 1 or len(sizes) > 1):
+                print(f"[WARN] In 'test_reports/{env}' convivono report con carichi o dataset "
+                      f"DIVERSI (alberi: {sorted(trees)}, test set: {sorted(sizes)}). "
+                      f"Sono esperimenti distinti: ogni grafico usera' una sola run e non "
+                      f"mettera' mai a confronto file diversi. Per una relazione pulita, "
+                      f"svuota la cartella e rilancia una volta sola con SCENARIO=all.")
 
     def _read_json(self, path: str):
         if not os.path.exists(path):
@@ -241,6 +324,11 @@ class PlotGenerator:
     def _load_baseline(self):
         """
         Carica il manifesto .pkl della baseline locale.
+
+        Il file contiene un oggetto sklearn: se la versione di scikit-learn
+        installata qui e' incompatibile con quella che lo ha prodotto, il
+        pickle.load() puo' fallire. E' un caso previsto, non un errore fatale:
+        si perdono solo i grafici che dipendono dalla baseline.
         """
         path = self.baseline_pkl_path
         if not os.path.exists(path):
@@ -263,52 +351,58 @@ class PlotGenerator:
                   f"I grafici basati sulla baseline saranno saltati.")
 
     # =======================================================================
-    # ACCESSO AI DATI 
+    # ACCESSO AI DATI (tutto via .get(), mai indicizzazione diretta)
     # =======================================================================
 
-    def _scenarios(self, env=None, mode=None) -> dict:
-        """Restituisce il dizionario degli scenari per (env, mode) richiesti."""
-        env = env or self.primary_env
-        if env is None:
-            return {}
-        modes = self.reports.get(env, {})
-        if mode is not None:
-            return modes.get(mode, {})
-        # Nessuna modalita' richiesta: unisco tutte le modalita' disponibili,
-        # dando precedenza a quella primaria.
-        merged = {}
-        for m in modes:
-            if m != self.primary_mode:
-                merged.update(modes.get(m, {}))
-        merged.update(modes.get(self.primary_mode, {}))
-        return merged
+    @staticmethod
+    def _scenarios(run) -> dict:
+        """Gli scenari di una run (dizionario vuoto se la run e' None)."""
+        return (run or {}).get("scenarios", {})
 
-    def _scenario(self, name: str, env=None, mode=None):
-        """Uno scenario specifico, o None se assente/non valido."""
-        data = self._scenarios(env, mode).get(name)
+    def _scenario(self, name: str, run=None):
+        """Uno scenario specifico dentro una run, o None se assente/non valido."""
+        data = self._scenarios(run).get(name)
         return data if isinstance(data, dict) else None
 
-    def _pick_env(self, required_names, mode=None):
+    def _pick_run(self, required_names, mode=None, prefer="env"):
         """
-        Sceglie l'ambiente da cui prendere i dati per UN grafico.
+        Sceglie LA run (cioe' il file, cioe' la sessione di test) da cui
+        prendere i dati per UN grafico.
 
-        La priorita' aws -> docker -> local vale a parita' di copertura, ma non
-        deve mai far saltare un grafico: se su AWS e' stato eseguito solo lo
-        scenario di performance, la curva di scalabilita' viene presa da Docker
-        o dal locale (e l'ambiente effettivo finisce nel sottotitolo della
-        figura, cosi' la relazione resta onesta su cosa sta mostrando).
+        Criteri, in ordine:
+          1. priorita' d'ambiente aws -> docker -> local, ma solo fra le run che
+             contengono almeno uno degli scenari richiesti (se su AWS manca lo
+             scenario di scalabilita', la curva viene presa da Docker e
+             l'ambiente effettivo finisce nel sottotitolo della figura);
+          2. copertura: a parita' d'ambiente vince la run che contiene piu'
+             scenari fra quelli richiesti — tipicamente 'test_report_all_tests.json',
+             che e' anche l'unica intrinsecamente coerente;
+          3. la piu' recente.
 
-        Un singolo grafico non mescola MAI ambienti diversi: si sceglie quello
-        con la copertura maggiore fra gli scenari richiesti.
+        Un grafico non mescola MAI due run: e' cio' che impedisce di confrontare
+        misure prese su carichi o dataset diversi.
         """
-        best, best_score = None, 0
-        for env in self.ENV_PRIORITY:            # priorita' = ordine di iterazione
-            if env not in self.reports:
+        best, best_key = None, None
+        for run in self.runs:
+            if mode is not None and run["mode"] != mode:
                 continue
-            scenarios = self._scenarios(env, mode)
-            score = sum(1 for n in required_names if self._is_usable(scenarios.get(n)))
-            if score > best_score:               
-                best, best_score = env, score
+            scenarios = run["scenarios"]
+            coverage = sum(1 for n in required_names if self._is_usable(scenarios.get(n)))
+            if coverage == 0:
+                continue
+            env_rank = -self.ENV_PRIORITY.index(run["env"])
+            # prefer="env": conta prima l'ambiente (un grafico a sorgente unica
+            #   deve venire da AWS se AWS ce l'ha).
+            # prefer="coverage": conta prima quanti degli scenari richiesti sono
+            #   presenti nella STESSA sessione — indispensabile per i grafici
+            #   comparativi, dove una run AWS con il solo job pulito non puo'
+            #   battere una run locale che contiene job pulito E guasti.
+            # A parita', vince la sessione piu' completa (tipicamente
+            # 'test_report_all_tests.json') e poi la piu' recente.
+            key = ((env_rank, coverage) if prefer == "env" else (coverage, env_rank))
+            key = key + (len(run["scenarios"]), run["mtime"])
+            if best_key is None or key > best_key:
+                best, best_key = run, key
         return best
 
     @staticmethod
@@ -355,14 +449,14 @@ class PlotGenerator:
             out[aliases.get(key, key)] = value
         return out
 
-    def _find_accuracy_metrics(self, env=None, mode=None):
+    def _find_accuracy_metrics(self, run=None):
         """
         Cerca il primo blocco di metriche di qualita' disponibile, in ordine di
         affidabilita': lo scenario di performance e' quello progettato per
         misurarle, gli altri le riportano come sottoprodotto.
         Restituisce (metriche_normalizzate, nome_scenario_di_provenienza).
         """
-        scen = self._scenarios(env, mode)
+        scen = self._scenarios(run)
 
         perf = scen.get("performance_and_metrics")
         if isinstance(perf, dict):
@@ -397,13 +491,13 @@ class PlotGenerator:
         except (ValueError, IndexError):
             return -1
 
-    def _scaling_series(self, env=None, mode=None):
+    def _scaling_series(self, run=None):
         """
         Estrae la serie ordinata dello strong scaling.
         Restituisce una lista di dict, uno per configurazione di worker, oppure
         [] se lo scenario manca o e' stato saltato.
         """
-        scal = self._scenario("scalability", env, mode)
+        scal = self._scenario("scalability", run)
         if not self._is_usable(scal):
             return []
         per_scale = scal.get("metrics_per_scale")
@@ -477,13 +571,32 @@ class PlotGenerator:
         fig.text(0.01, y, text, ha="left", va="top", fontsize=8.5,
                  color="#595959", style="italic", wrap=True)
 
-    def _env_subtitle(self, env=None, mode=None) -> str:
-        env = env or self.primary_env
-        mode = mode if mode is not None else self.primary_mode
+    def _env_subtitle(self, run=None) -> str:
+        """Ambiente (e modalita', se nota) della run mostrata nella figura."""
+        env = (run or {}).get("env", self.primary_env)
+        mode = (run or {}).get("mode", self.primary_mode)
         label = self.ENV_LABELS.get(env, str(env))
         if mode and mode != "unknown":
             label += f" - modalita' {mode}"
         return label
+
+    @staticmethod
+    def _provenance(run) -> str:
+        """
+        Riga di provenienza da mettere in nota: quale file ha prodotto i numeri
+        della figura. In relazione e' cio' che rende il grafico verificabile.
+        """
+        if not run:
+            return ""
+        fp = run.get("fingerprint", {})
+        extra = []
+        if fp.get("trees"):
+            extra.append("carico: " + "/".join(str(t) for t in fp["trees"]) + " alberi")
+        if fp.get("test_sizes"):
+            extra.append("test set: " + "/".join(f"{s:,}".replace(",", ".")
+                                                 for s in fp["test_sizes"]) + " campioni")
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        return f"Fonte: test_reports/{run['env']}/{run['file']}{suffix}."
 
     # =======================================================================
     # ORCHESTRAZIONE
@@ -550,8 +663,8 @@ class PlotGenerator:
         stessa informazione gia' misurata sui dati reali.
         """
         name = "Distribuzione delle classi"
-        env = self._pick_env(self.METRIC_SOURCES)
-        metrics, source = self._find_accuracy_metrics(env=env)
+        run = self._pick_run(self.METRIC_SOURCES)
+        metrics, source = self._find_accuracy_metrics(run)
         if not metrics:
             self._skip(name, "nessun blocco di metriche di classificazione nei report")
             return
@@ -606,9 +719,10 @@ class PlotGenerator:
         ax.set_axisbelow(True)
         ax.margins(x=0.2)
         self._titles(fig, ax, "Distribuzione delle classi nel test set",
-                     f"{self._env_subtitle(env)} - sbilanciamento {ratio:.1f} : 1")
+                     f"{self._env_subtitle(run)} - sbilanciamento {ratio:.1f} : 1")
         self._footnote(fig, f"Conteggi ricavati dal campo 'support' di {source}. "
-                            f"Lo sbilanciamento motiva l'uso di F1 e AUC accanto all'accuracy.")
+                            f"Lo sbilanciamento motiva l'uso di F1 e AUC accanto all'accuracy. "
+                            f"{self._provenance(run)}")
         self._save(fig, "ml_01_distribuzione_classi.png")
 
     def plot_feature_importance(self, top_n: int = 15):
@@ -693,8 +807,8 @@ class PlotGenerator:
         sui conteggi assoluti l'errore sulla classe minoritaria e' invisibile.
         """
         name = "Matrice di confusione"
-        env = self._pick_env(self.METRIC_SOURCES)
-        metrics, source = self._find_accuracy_metrics(env=env)
+        run = self._pick_run(self.METRIC_SOURCES)
+        metrics, source = self._find_accuracy_metrics(run)
         if not metrics:
             self._skip(name, "nessun blocco di metriche nei report")
             return
@@ -748,7 +862,7 @@ class PlotGenerator:
         if acc is not None and f1 is not None:
             headline += f"   (accuracy {acc * 100:.2f} %, F1 {f1 * 100:.2f} %)"
         fig.suptitle(headline, fontsize=14, fontweight="bold", y=1.08)
-        fig.text(0.5, 1.01, self._env_subtitle(env), ha="center",
+        fig.text(0.5, 1.01, self._env_subtitle(run), ha="center",
                  fontsize=10.5, color="#595959")
         self._footnote(fig, f"Fonte: scenario '{source}'. Test set di "
                             f"{int(matrix.sum()):,} campioni.".replace(",", "."))
@@ -763,8 +877,8 @@ class PlotGenerator:
         modello, perche' gli alberi sono indipendenti per costruzione.
         """
         name = "Confronto metriche ML"
-        env = self._pick_env(self.METRIC_SOURCES)
-        distributed, source = self._find_accuracy_metrics(env=env)
+        run = self._pick_run(self.METRIC_SOURCES)
+        distributed, source = self._find_accuracy_metrics(run)
         if not distributed:
             self._skip(name, "metriche del sistema distribuito non disponibili")
             return
@@ -803,7 +917,7 @@ class PlotGenerator:
                          "Sistema distribuito (Master-Worker RPC)")
         note = (f"Distribuito: scenario '{source}'. Stesso random_state e stessi iperparametri "
                 f"della baseline: un Δ nullo e' il risultato atteso e dimostra la neutralita' "
-                f"algoritmica della distribuzione.")
+                f"algoritmica della distribuzione. {self._provenance(run)}")
 
         if not is_classification:
             # Le metriche di regressione hanno ordini di grandezza diversi
@@ -834,7 +948,7 @@ class PlotGenerator:
             # titolo su due righe): y > 1 con bbox_inches='tight' li tiene fuori.
             fig.suptitle("Qualita' del modello: baseline centralizzata vs sistema distribuito",
                          fontsize=14, fontweight="bold", y=1.16)
-            fig.text(0.5, 1.09, self._env_subtitle(env), ha="center",
+            fig.text(0.5, 1.09, self._env_subtitle(run), ha="center",
                      fontsize=10.5, color="#595959")
             self._footnote(fig, note, y=-0.15)
             self._save(fig, "ml_04_confronto_baseline_distribuito.png")
@@ -877,7 +991,7 @@ class PlotGenerator:
         ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2)
         ax.set_axisbelow(True)
         self._titles(fig, ax, "Qualita' del modello: baseline centralizzata vs sistema distribuito",
-                     self._env_subtitle(env))
+                     self._env_subtitle(run))
         self._footnote(fig, note, y=-0.16)
         self._save(fig, "ml_04_confronto_baseline_distribuito.png")
 
@@ -888,8 +1002,8 @@ class PlotGenerator:
     def plot_strong_scaling(self):
         """Tempo di addestramento in funzione del numero di worker (strong scaling)."""
         name = "Curva di strong scaling"
-        env = self._pick_env(["scalability"])
-        series = self._scaling_series(env=env)
+        run = self._pick_run(["scalability"])
+        series = self._scaling_series(run)
         if len(series) < 2:
             self._skip(name, "servono almeno due configurazioni di worker in "
                              "'scalability.metrics_per_scale'")
@@ -955,19 +1069,19 @@ class PlotGenerator:
         ax.legend(loc="upper right")
         ax.set_axisbelow(True)
 
-        trees = self._trees_per_scale(env=env)
-        subtitle = self._env_subtitle(env)
+        trees = self._trees_per_scale(run)
+        subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
         self._titles(fig, ax, "Strong scaling: tempo di addestramento a carico costante", subtitle)
         self._footnote(fig, "Il divario fra curva misurata e curva ideale e' l'overhead "
                             "distribuito: parte seriale (ETL, aggregazione, OOB) piu' costo "
-                            "di comunicazione RPC.")
+                            "di comunicazione RPC. " + self._provenance(run))
         self._save(fig, "sdcc_01_strong_scaling.png")
 
-    def _trees_per_scale(self, env=None):
+    def _trees_per_scale(self, run=None):
         """Numero di alberi dichiarato dallo scenario di scalabilita', se noto."""
-        scal = self._scenario("scalability", env=env)
+        scal = self._scenario("scalability", run)
         if not isinstance(scal, dict):
             return None
         desc = str(scal.get("scenario_description", ""))
@@ -979,8 +1093,8 @@ class PlotGenerator:
     def plot_speedup_and_efficiency(self):
         """Speedup misurato vs ideale, con l'efficienza parallela sul pannello destro."""
         name = "Speedup ed efficienza"
-        env = self._pick_env(["scalability"])
-        series = self._scaling_series(env=env)
+        run = self._pick_run(["scalability"])
+        series = self._scaling_series(run)
         if len(series) < 2:
             self._skip(name, "servono almeno due configurazioni di worker per calcolare lo speedup")
             return
@@ -1056,12 +1170,12 @@ class PlotGenerator:
         ax.set_ylim(0, max(1.15, float(efficiency.max()) * 1.15))
         ax.set_axisbelow(True)
 
-        fig.suptitle(f"Scalabilita' del sistema distribuito - {self._env_subtitle(env)}",
+        fig.suptitle(f"Scalabilita' del sistema distribuito - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "Lo speedup sul tempo totale e' limitato dalla frazione seriale "
                             "(legge di Amdahl): l'ETL e l'aggregazione non si accorciano "
                             "aggiungendo worker. L'efficienza misura quanto di ogni worker "
-                            "aggiunto viene effettivamente convertito in lavoro utile.")
+                            "aggiunto viene effettivamente convertito in lavoro utile. " + self._provenance(run))
         self._save(fig, "sdcc_02_speedup_efficienza.png")
 
     def plot_time_breakdown(self):
@@ -1070,8 +1184,8 @@ class PlotGenerator:
         e' la visualizzazione diretta della legge di Amdahl.
         """
         name = "Scomposizione dei tempi (Amdahl)"
-        env = self._pick_env(["scalability", "performance_and_metrics"])
-        series = self._scaling_series(env=env)
+        run = self._pick_run(["scalability", "performance_and_metrics"])
+        series = self._scaling_series(run)
         phases = ("etl_seconds", "training_only_seconds", "aggregation_seconds",
                   "oob_estimation_seconds", "unaccounted_seconds")
 
@@ -1091,7 +1205,7 @@ class PlotGenerator:
         else:
             # Fallback: lo scenario di performance espone comunque un
             # 'timing_breakdown' per una singola configurazione.
-            perf = self._scenario("performance_and_metrics", env=env)
+            perf = self._scenario("performance_and_metrics", run)
             timing = perf.get("timing_breakdown") if isinstance(perf, dict) else None
             if not isinstance(timing, dict):
                 self._skip(name, "ne' 'scalability' con tempi strumentati ne' "
@@ -1150,19 +1264,19 @@ class PlotGenerator:
                    for p in phases]
         fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.14),
                    frameon=True)
-        fig.suptitle(f"Scomposizione del tempo di addestramento - {self._env_subtitle(env)}",
+        fig.suptitle(f"Scomposizione del tempo di addestramento - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "Solo la fascia blu si riduce all'aumentare dei worker: le fasi "
                             "seriali restano pressoche' costanti e, crescendo in quota "
                             "relativa (pannello destro), fissano il tetto di Amdahl allo "
-                            "speedup ottenibile.")
+                            "speedup ottenibile. " + self._provenance(run))
         self._save(fig, "sdcc_03_scomposizione_tempi.png")
 
     def plot_throughput(self):
         """Throughput di addestramento (alberi/s) e di inferenza (campioni/s)."""
         name = "Throughput"
-        env = self._pick_env(["scalability"])
-        series = self._scaling_series(env=env)
+        run = self._pick_run(["scalability"])
+        series = self._scaling_series(run)
         if not series:
             self._skip(name, "scenario 'scalability' assente o saltato")
             return
@@ -1221,12 +1335,12 @@ class PlotGenerator:
             ax.set_axisbelow(True)
             ax.set_ylim(0, float(values.max()) * 1.15)
 
-        fig.suptitle(f"Throughput del sistema distribuito - {self._env_subtitle(env)}",
+        fig.suptitle(f"Throughput del sistema distribuito - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
 
         # Il caveat sul federato e' scritto dallo scenario stesso: se c'e', va
         # riportato, perche' cambia il modo in cui il grafico va letto.
-        scal = self._scenario("scalability", env=env) or {}
+        scal = self._scenario("scalability", run) or {}
         caveat = scal.get("inference_speedup_caveat")
         note = ("Il throughput e' la misura corretta anche in modalita' federata, dove il "
                 "test set totale cresce con il numero di worker e lo speedup dell'inferenza "
@@ -1234,7 +1348,7 @@ class PlotGenerator:
                 if caveat else
                 "Throughput misurato a carico fisso: cresce con i worker fintanto che la "
                 "parte parallela domina il tempo totale.")
-        self._footnote(fig, note)
+        self._footnote(fig, note + " " + self._provenance(run))
         self._save(fig, "sdcc_04_throughput.png")
 
     def plot_fault_tolerance_overhead(self):
@@ -1248,16 +1362,16 @@ class PlotGenerator:
         secondi/albero e si annota comunque il dato grezzo.
         """
         name = "Overhead di fault tolerance"
-        env = self._pick_env([
+        run = self._pick_run([
             "performance_and_metrics", "fault_tolerance", "orchestrator_failover",
             "inference_worker_fault", "inference_orchestrator_failover", "scalability",
-        ])
-        scen = self._scenarios(env)
+        ], prefer="coverage")
+        scen = self._scenarios(run)
 
         train_specs = [
             ("performance_and_metrics", "Job pulito\n(nessun guasto)", PALETTE["success"]),
-            ("fault_tolerance",         "Crash di un Worker\n(training)", PALETTE["accent"]),
-            ("orchestrator_failover",   "Failover dell'Orchestratore\n(training)", PALETTE["secondary"]),
+            ("fault_tolerance",         "Crash Worker\n(training)", PALETTE["accent"]),
+            ("orchestrator_failover",   "Failover Orchestratore\n(training)", PALETTE["secondary"]),
         ]
         train_rows = []
         for key, label, color in train_specs:
@@ -1274,13 +1388,13 @@ class PlotGenerator:
                                "raw": duration, "trees": int(trees)})
 
         infer_specs = [
-            ("inference_worker_fault",           "Crash di un Worker\n(inferenza)", PALETTE["accent"]),
-            ("inference_orchestrator_failover",  "Failover dell'Orchestratore\n(inferenza)", PALETTE["secondary"]),
+            ("inference_worker_fault",           "Crash Worker\n(inferenza)", PALETTE["accent"]),
+            ("inference_orchestrator_failover",  "Failover Orchestratore\n(inferenza)", PALETTE["secondary"]),
         ]
         infer_rows = []
         # Riferimento pulito per l'inferenza: la configurazione di scalabilita'
         # con piu' worker, che e' l'unica a cronometrare l'inferenza da sola.
-        series = self._scaling_series(env=env)
+        series = self._scaling_series(run)
         clean_infer = next((p["infer_duration"] for p in reversed(series)
                             if p["infer_duration"] is not None and p["infer_duration"] > 0), None)
         if clean_infer is not None:
@@ -1331,17 +1445,17 @@ class PlotGenerator:
             ax.set_title("Addestramento" if kind == "train" else "Inferenza", fontsize=13)
             ax.set_ylim(0, max(values) * 1.42)
             ax.set_axisbelow(True)
-            ax.tick_params(axis="x", labelsize=10)
+            ax.tick_params(axis="x", labelsize=9.5)
             # Le etichette multi-riga sopra le barre sono larghe: senza margine
             # orizzontale quella della prima barra viene tagliata dall'asse.
             ax.margins(x=0.16)
 
-        fig.suptitle(f"Costo della tolleranza ai guasti - {self._env_subtitle(env)}",
+        fig.suptitle(f"Costo della tolleranza ai guasti - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "I tempi di addestramento sono normalizzati per albero perche' i tre "
                             "scenari possono essere stati eseguiti con carichi diversi. "
                             "La differenza rispetto al job pulito e' il costo di rilevazione del "
-                            "guasto piu' la ridistribuzione del lavoro perso.")
+                            "guasto piu' la ridistribuzione del lavoro perso. " + self._provenance(run))
         self._save(fig, "sdcc_05_overhead_fault_tolerance.png")
 
     # =======================================================================
@@ -1353,14 +1467,17 @@ class PlotGenerator:
         name = "Confronto fra ambienti"
         rows = []
         for env in self.ENV_PRIORITY:
-            if env not in self.reports:
+            # Una sola run per ambiente: quella piu' completa/recente che
+            # contenga lo scenario di performance.
+            candidates = [r for r in self.runs if r["env"] == env
+                          and self._is_usable(r["scenarios"].get("performance_and_metrics"))]
+            if not candidates:
                 continue
-            perf = self._scenario("performance_and_metrics", env=env, mode=None)
-            if not self._is_usable(perf):
-                continue
+            run = max(candidates, key=lambda r: (len(r["scenarios"]), r["mtime"]))
+            perf = self._scenario("performance_and_metrics", run)
             throughput = self._get_float(perf, "throughput_trees_per_sec")
             duration = self._get_float(perf, "duration_seconds")
-            metrics, _ = self._find_accuracy_metrics(env=env, mode=None)
+            metrics, _ = self._find_accuracy_metrics(run)
             accuracy = self._get_float(metrics, "accuracy")
             if accuracy is None:
                 accuracy = self._get_float(metrics, "r2")
@@ -1368,25 +1485,39 @@ class PlotGenerator:
                 continue
             rows.append({"env": env, "label": self.ENV_LABELS.get(env, env),
                          "throughput": throughput, "duration": duration,
-                         "accuracy": accuracy})
+                         "accuracy": accuracy,
+                         "trees": self._get_float(perf, "trees_built"),
+                         "run": run})
 
         if len(rows) < 2:
             self._skip(name, "servono report di 'performance_and_metrics' in almeno "
                              "due ambienti fra aws/docker/local")
             return
 
+        # Confrontare tempi ASSOLUTI misurati su carichi diversi non significa
+        # nulla: se i tre ambienti hanno addestrato un numero di alberi diverso
+        # si mostra solo il throughput, che e' per definizione normalizzato.
+        loads = {int(r["trees"]) for r in rows if r["trees"]}
+        comparable_durations = len(loads) <= 1
+        if not comparable_durations:
+            print(f"[WARN] Gli ambienti confrontati hanno carichi diversi ({sorted(loads)} alberi): "
+                  f"ometto il pannello dei tempi assoluti e mostro solo il throughput, "
+                  f"che e' indipendente dal carico.")
+
         labels = [r["label"] for r in rows]
         colors = [PALETTE["primary"], PALETTE["accent"], PALETTE["success"]] * 2
 
         show_accuracy = any(r["accuracy"] is not None for r in rows)
-        n_panels = 2 + int(show_accuracy)
+        n_panels = int(comparable_durations) + 1 + int(show_accuracy)
         fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 5.4), squeeze=False)
         axes = list(axes[0])
 
-        panels = [
-            ("duration", "Tempo totale di addestramento", "Secondi", lambda v: f"{v:.1f} s"),
-            ("throughput", "Throughput di addestramento", "Alberi / secondo", lambda v: f"{v:.3f}"),
-        ]
+        panels = []
+        if comparable_durations:
+            panels.append(("duration", "Tempo totale di addestramento", "Secondi",
+                           lambda v: f"{v:.1f} s"))
+        panels.append(("throughput", "Throughput di addestramento", "Alberi / secondo",
+                       lambda v: f"{v:.3f}"))
         if show_accuracy:
             panels.append(("accuracy", "Qualita' del modello", "Accuracy / R²", lambda v: f"{v:.4f}"))
 
@@ -1409,6 +1540,8 @@ class PlotGenerator:
             ax.set_axisbelow(True)
             ax.tick_params(axis="x", labelrotation=14, labelsize=9.5)
             if key == "accuracy":
+                # Scala 0-1 fissa (piu' spazio per le etichette): un asse
+                # troncato esagererebbe visivamente differenze irrilevanti.
                 ax.set_ylim(0, 1.12)
 
         fig.suptitle("Ambiente di esecuzione: locale, containerizzato, cloud",
@@ -1428,40 +1561,41 @@ class PlotGenerator:
         si dichiara la limitazione nel grafico stesso.
         """
         name = "Impatto della latenza di rete"
-        # Su Fargate tc netem non e' iniettabile: privilegio l'ambiente in cui
-        # le regole sono state applicate davvero, altrimenti il grafico non
-        # avrebbe due termini da confrontare.
-        env = next((e for e in self.ENV_PRIORITY
-                    if (self._scenario("network_simulation", env=e) or {})
-                    .get("tc_rules_successfully_injected")), None)
-        env = env or self._pick_env(["network_simulation", "performance_and_metrics"])
-        net = self._scenario("network_simulation", env=env)
-        if not isinstance(net, dict):
-            self._skip(name, "scenario 'network_simulation' assente")
+        # Il confronto "con e senza latenza" ha senso SOLO se i due termini
+        # vengono dalla stessa sessione di test: stesso dataset, stesso numero
+        # di alberi, stessa macchina. Prendere il job degradato da un file e il
+        # riferimento pulito da un altro e' il modo piu' rapido per ottenere il
+        # risultato assurdo "con 1500 ms di latenza il sistema va piu' veloce".
+        candidates = [
+            r for r in self.runs
+            if (r["scenarios"].get("network_simulation") or {}).get("tc_rules_successfully_injected")
+            and self._is_usable(r["scenarios"].get("performance_and_metrics"))
+        ]
+        if not candidates:
+            any_net = any(isinstance(r["scenarios"].get("network_simulation"), dict) for r in self.runs)
+            if not any_net:
+                self._skip(name, "scenario 'network_simulation' assente")
+            else:
+                self._skip(name, "nessuna singola sessione di test contiene sia lo scenario di rete "
+                                 "con regole tc effettivamente iniettate sia il job di riferimento "
+                                 "senza latenza (lanciali insieme con SCENARIO=all)")
             return
 
-        injected = bool(net.get("tc_rules_successfully_injected", False))
+        run = max(candidates, key=lambda r: (-self.ENV_PRIORITY.index(r["env"]),
+                                             len(r["scenarios"]), r["mtime"]))
+        net = self._scenario("network_simulation", run)
+        perf = self._scenario("performance_and_metrics", run)
+
         latency = self._get_float(net, "applied_latency_ms", 0.0) or 0.0
         loss = self._get_float(net, "applied_loss_percent", 0.0) or 0.0
         net_throughput = self._get_float(net, "throughput_trees_per_second")
         net_duration = self._get_float(net, "duration_seconds")
+        base_throughput = self._get_float(perf, "throughput_trees_per_sec")
+        base_duration = self._get_float(perf, "duration_seconds")
 
-        if net_throughput is None and net_duration is None:
-            self._skip(name, "'network_simulation' privo di 'throughput_trees_per_second' "
-                             "e di 'duration_seconds'")
-            return
-        if not injected:
-            self._skip(name, f"regole tc non iniettate (status "
-                             f"'{net.get('status', 'n/d')}'): nessun confronto con/senza latenza "
-                             f"e' possibile in questo ambiente")
-            return
-
-        perf = self._scenario("performance_and_metrics", env=env)
-        base_throughput = self._get_float(perf, "throughput_trees_per_sec") if self._is_usable(perf) else None
-        base_duration = self._get_float(perf, "duration_seconds") if self._is_usable(perf) else None
-        if base_throughput is None and base_duration is None:
-            self._skip(name, "manca lo scenario di riferimento senza latenza "
-                             "('performance_and_metrics')")
+        if (net_throughput is None and net_duration is None) or \
+           (base_throughput is None and base_duration is None):
+            self._skip(name, "durate/throughput non disponibili in entrambi i termini del confronto")
             return
 
         fig, axes = plt.subplots(1, 2, figsize=(12.4, 5.4))
@@ -1492,12 +1626,12 @@ class PlotGenerator:
             ax.set_ylim(0, max(values) * 1.30)
             ax.set_axisbelow(True)
 
-        fig.suptitle(f"Sensibilita' alla latenza di rete - {self._env_subtitle(env)}",
+        fig.suptitle(f"Sensibilita' alla latenza di rete - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "Latenza iniettata con tc netem sull'interfaccia dei container. "
                             "La degradazione misura quanto il protocollo RPC sincrono e' "
                             "sensibile al RTT: piu' chiamate per job, piu' il ritardo si "
-                            "accumula sul percorso critico.")
+                            "accumula sul percorso critico. " + self._provenance(run))
         self._save(fig, "cmp_02_latenza_rete.png")
 
 
