@@ -266,7 +266,7 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             return self._run_aws_real_failover(orch_leader, ft_cfg)
 
         print(f"\n--- [TEST] Failover dell'Orchestratore con Leader di Sistema: '{orch_leader.orchestrator_name}' ---")
-        orchestrator_type = os.environ.get("SYS_MODE", "centralized")
+        orchestrator_type = os.environ.get("TRAINING_MODE", "centralized")
         target_queue = orch_leader.queue_name
         docker_env = os.environ.get("RUNNING_IN_DOCKER")
 

@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
-from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
+from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
@@ -24,6 +24,23 @@ from src.dataset.checkpoint_dao import CheckpointDAOFactory
 
 TEST_SIZE = 0.2
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+
+# Timeout (in secondi) delle chiamate RPC sincrone verso i worker.
+#
+# PRIMA: due letterali 600 incastonati nelle chiamate a rpyc.connect (nel thread
+# di dispatch dell'addestramento e in quello dell'inferenza). deploy.sh leggeva
+# RPC_SYNC_TIMEOUT_SECONDS / RPC_INFERENCE_SYNC_TIMEOUT_SECONDS dal .env e le
+# iniettava nella task definition ECS dell'orchestratore, ma il codice
+# centralizzato non le leggeva: la configurazione c'era, era documentata, e non
+# aveva alcun effetto. Solo federated.py le usava davvero.
+#
+# I DEFAULT RESTANO 600/600, non i 1800/900 di federated.py: così, quando le
+# variabili non sono impostate — cioè in locale e in Docker Compose — il
+# comportamento è identico byte per byte a quello precedente. Su AWS, dove
+# deploy.sh le valorizza, il timeout diventa finalmente quello dichiarato nel
+# .env, che è il punto di tutta questa configurazione.
+RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 600)
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 600)
 
 class CentralizedOrchestrator(BaseOrchestrator):
     def __init__(self, orchestrator_name: str = None):
@@ -370,11 +387,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 try:
                     print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                     worker_conn = rpyc.connect(
-                        w_info["host"], 
-                        w_info["port"], 
+                        w_info["host"],
+                        w_info["port"],
                         config={
                             'allow_pickle': True,
-                            'sync_request_timeout': 600,
+                            'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
                             'keepalive': True
                         }
                     )
@@ -728,11 +745,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
             try:
                 print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
                 worker_conn = rpyc.connect(
-                    w_info["host"], 
-                    w_info["port"], 
+                    w_info["host"],
+                    w_info["port"],
                     config={
                         'allow_pickle': True,
-                        'sync_request_timeout': 600,
+                        'sync_request_timeout': RPC_INFERENCE_SYNC_TIMEOUT_SECONDS,
                         'keepalive': True
                     }
                 )

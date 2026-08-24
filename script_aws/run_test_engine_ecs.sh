@@ -11,7 +11,7 @@ set -e
 # Prerequisiti:
 #   - deploy.sh già eseguito con successo (worker-service/orchestrator-service
 #     RUNNING sul cluster 'forest-cluster')
-#   - .env con SYS_ENV=aws e credenziali AWS Academy correnti
+#   - .env con ENV_MODE=aws e credenziali AWS Academy correnti
 #
 # Uso:
 #   ./run_test_engine_ecs.sh
@@ -27,19 +27,18 @@ get_env_var() {
   grep -E "^[[:space:]]*${key}[[:space:]]*=" .env | cut -d '=' -f 2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
 }
 
-ENV_SYS_ENV=$(get_env_var "SYS_ENV")
-ENV_SYS_MODE=$(get_env_var "SYS_MODE")
+ENV_ENV_MODE=$(get_env_var "ENV_MODE")
 ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
 ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
 ENV_REGION=$(get_env_var "AWS_DEFAULT_REGION")
 ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
 
-if [ "$ENV_SYS_ENV" != "aws" ]; then
-  echo "[ERRORE] SYS_ENV nel .env è '$ENV_SYS_ENV', non 'aws'."
+if [ "$ENV_ENV_MODE" != "aws" ]; then
+  echo "[ERRORE] ENV_MODE nel .env è '$ENV_ENV_MODE', non 'aws'."
   exit 1
 fi
 
-TRAINING_MODE="${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}"
+TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
 REGION="${ENV_REGION:-us-east-1}"
 NUM_WORKERS="${ENV_NUM_WORKERS:-2}"
 BUCKET_NAME="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
@@ -50,7 +49,7 @@ FAMILY="rf-test-engine-task"
 CONTAINER_NAME="test-engine"
 
 if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; then
-  echo "ERRORE: SYS_MODE/TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
+  echo "ERRORE: TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
   exit 1
 fi
 
@@ -164,9 +163,7 @@ cat <<EOF > /tmp/test-engine-task-def.json
         {"name": "PYTHONUNBUFFERED", "value": "1"},
         {"name": "NUM_WORKERS", "value": "${NUM_WORKERS}"},
         {"name": "ENV_MODE", "value": "aws"},
-        {"name": "SYS_ENV", "value": "aws"},
         {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
-        {"name": "SYS_MODE", "value": "${TRAINING_MODE}"},
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},

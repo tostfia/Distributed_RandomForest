@@ -12,7 +12,7 @@ BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
 
 # ---------------------------------------------------------------------
 # Rilevamento della modalità corrente dal .env, con la stessa priorità
-# usata da deploy.sh (SYS_MODE > TRAINING_MODE > default "centralized").
+# usata da deploy.sh (TRAINING_MODE > default "centralized").
 # Serve solo per --purge-legacy-mode: capire quali service NON
 # appartengono alla modalità attualmente in uso.
 # ---------------------------------------------------------------------
@@ -22,9 +22,8 @@ if [ -f "$ENV_FILE" ]; then
     local key="$1"
     grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE" | cut -d '=' -f 2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
   }
-  ENV_SYS_MODE=$(get_env_var "SYS_MODE")
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
-  TRAINING_MODE="${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}"
+  TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato: assumo TRAINING_MODE=centralized per --purge-legacy-mode."
   TRAINING_MODE="centralized"
@@ -204,10 +203,12 @@ else
 fi
 
 echo "==> [3/5] Svuotamento stato applicativo su DynamoDB..."
-echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks"
+echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks, WorkerIndexLocks, JobMetadata"
 echo "    Nota: vengono rimossi solo gli ITEM, le tabelle restano intatte."
 
-# Elenco confermato dalla console DynamoDB (7 tabelle totali usate dal sistema)
+# Elenco confermato dalla console DynamoDB (8 tabelle totali usate dal sistema)
+# NOTA: il nome corretto e' "JobMetadata" (case-sensitive) - la tabella creata a
+# mano come "JobMetaData" era un refuso ormai eliminato, vedi validazione failover.
 DYNAMO_TABLES=(
   "workers_registry"
   "orchestrators_registry"
@@ -216,7 +217,7 @@ DYNAMO_TABLES=(
   "OrchestratorLocks"
   "WorkerTasks"
   "WorkerIndexLocks"
-  "JobMetaData"  
+  "JobMetadata"
 )
 
 for t in "${DYNAMO_TABLES[@]}"; do

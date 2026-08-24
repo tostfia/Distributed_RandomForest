@@ -385,7 +385,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
         try:
             print(f"\n--- [TEST] Failover dell'Orchestratore durante l'inferenza ' ---")
-            orchestrator_type = os.environ.get("SYS_MODE", "centralized")
+            orchestrator_type = os.environ.get("TRAINING_MODE", "centralized")
             target_queue = orch_leader.queue_name
             docker_env = os.environ.get("RUNNING_IN_DOCKER")
             if docker_env == "true":
@@ -758,7 +758,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             "hyperparameters": hp,
         }
         # isinstance su orch_leader (non os.environ): questo metodo, come in
-        # orchestrator_fault.py, non ha garanzia che SYS_MODE rifletta lo
+        # orchestrator_fault.py, non ha garanzia che TRAINING_MODE rifletta lo
         # stesso valore usato per istanziare l'orchestratore ricevuto.
         is_federated = isinstance(orch_leader, FederatedOrchestrator)
         if is_federated:

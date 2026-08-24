@@ -50,7 +50,7 @@ def main():
         print(f"[CONFIG] Coda associata: '{orchestrator.queue_name}'")
         
     else:
-        print(f"\n[ERRORE] SYS_MODE '{mode}' non valida.")
+        print(f"\n[ERRORE] TRAINING_MODE '{mode}' non valida.")
         sys.exit(1)
 
     try: 

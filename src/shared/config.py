@@ -12,12 +12,12 @@ class SystemConfig:
             cls._instance = super(SystemConfig, cls).__new__(cls)
             
             # Legge le variabili con i tuoi valori di default
-            cls._instance.mode = os.getenv("SYS_MODE", "centralized")
-            cls._instance.env = os.getenv("SYS_ENV", "local")
-            
+            cls._instance.mode = os.getenv("TRAINING_MODE", "centralized")
+            cls._instance.env = os.getenv("ENV_MODE", "local")
+
             # Validazione fondamentale per la robustezza del sistema
             if cls._instance.mode not in ["centralized", "federated"]:
-                raise ValueError(f"SYS_MODE non valido nel file .env: {cls._instance.mode}")
+                raise ValueError(f"TRAINING_MODE non valido nel file .env: {cls._instance.mode}")
             
             cls._instance.aws_region = os.getenv("AWS_REGION", "us-east-1")
 

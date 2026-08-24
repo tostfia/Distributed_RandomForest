@@ -15,16 +15,16 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-# Legge SYS_ENV/SYS_MODE dal .env solo per la verifica di coerenza qui sotto,
+# Legge ENV_MODE/TRAINING_MODE dal .env solo per la verifica di coerenza qui sotto,
 # SENZA esportarli: sarà config.py (via load_dotenv) a farlo al posto nostro,
 # leggendo esattamente questi valori senza rischio di override dalla shell.
 # tr -d rimuove anche gli apici singoli oltre a quelli doppi, per coerenza
 # con get_env_var() in deploy.sh (che gestisce entrambi i tipi di quoting).
-ENV_SYS_ENV=$(grep -E "^SYS_ENV=" .env | cut -d= -f2 | tr -d " \"'")
-ENV_SYS_MODE=$(grep -E "^SYS_MODE=" .env | cut -d= -f2 | tr -d " \"'")
+ENV_ENV_MODE=$(grep -E "^ENV_MODE=" .env | cut -d= -f2 | tr -d " \"'")
+ENV_TRAINING_MODE=$(grep -E "^TRAINING_MODE=" .env | cut -d= -f2 | tr -d " \"'")
 
-if [ "$ENV_SYS_ENV" != "aws" ]; then
-  echo "[ERRORE] SYS_ENV nel .env è '$ENV_SYS_ENV', non 'aws'."
+if [ "$ENV_ENV_MODE" != "aws" ]; then
+  echo "[ERRORE] ENV_MODE nel .env è '$ENV_ENV_MODE', non 'aws'."
   echo "         Aggiorna il .env se vuoi puntare all'infrastruttura AWS."
   exit 1
 fi
@@ -71,7 +71,7 @@ aws ecs wait services-stable \
   --region "$REGION"
 echo "    OK, infrastruttura pronta (tutti i Service sono stabili)."
 
-echo "==> [3/3] Avvio Client (modalità dal .env: SYS_MODE=$ENV_SYS_MODE)..."
+echo "==> [3/3] Avvio Client (modalità dal .env: TRAINING_MODE=$ENV_TRAINING_MODE)..."
 echo "    (Il client parla con l'infrastruttura solo via SQS/DynamoDB:"
 echo "     nessun bisogno di conoscere IP o porte di orchestratori/worker su Fargate.)"
 echo ""

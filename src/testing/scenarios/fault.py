@@ -106,7 +106,7 @@ class FaultToleranceScenario(BaseTestScenario):
     def run(self) -> dict:
         ft_cfg = _merge_aws_overrides(self.config, "fault_tolerance")
 
-        mode = os.environ.get("SYS_MODE", "centralized")
+        mode = os.environ.get("TRAINING_MODE", "centralized")
 
         # Numero di alberi dal manifesto della baseline (vedi
         # BaseTestScenario._resolve_hyperparameters): stessa fonte del payload,
@@ -259,6 +259,6 @@ class FaultToleranceScenario(BaseTestScenario):
         # etichetterebbero sempre "iid"/"proportional" anche se gli shard sul
         # disco sono stati provisionati con Dirichlet/equal (vedi
         # BaseTestScenario._augment_payload_with_partitioning).
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload

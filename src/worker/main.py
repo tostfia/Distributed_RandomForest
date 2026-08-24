@@ -57,7 +57,7 @@ def main():
         "bootstrap": True ,  
     }
 
-    # 4. Istanziamo il Worker corretto in base a SYS_MODE del file .env
+    # 4. Istanziamo il Worker corretto in base a TRAINING_MODE del file .env
     if mode == "centralized":
         print(f"[*] Istanziazione in corso: comportamento CENTRALIZZATO per {worker_name}")
         worker = CentralizedWorker(**common_params, target_column="Label")
@@ -65,7 +65,7 @@ def main():
         print(f"[*] Istanziazione in corso: comportamento FEDERATO per {worker_name}")
         worker = FederatedWorker(**common_params, target_column="Label", tree_type=tree_type)
     else:
-        print(f"[ERRORE] SYS_MODE '{mode}' non valida nel file .env. Scegliere 'centralized' o 'federated'.")
+        print(f"[ERRORE] TRAINING_MODE '{mode}' non valida nel file .env. Scegliere 'centralized' o 'federated'.")
         sys.exit(1)
     
     print(f"[+] Avvio Server RPyC per il worker {worker_name} sulla porta {port} (Host: {host})...")

@@ -25,11 +25,7 @@ Principio di funzionamento per identificare il LEADER reale:
 
 import os
 import re
-
-try:
-    import boto3
-except ImportError:  # pragma: no cover - boto3 dovrebbe essere già una dipendenza del progetto
-    boto3 = None
+import boto3
 
 CLUSTER_NAME = os.environ.get("ECS_CLUSTER_NAME", "forest-cluster")
 ORCHESTRATOR_SERVICE_NAME = "orchestrator-service"
@@ -44,7 +40,7 @@ def is_aws_environment(orchestrator) -> bool:
     quelli Docker-locale/thread-locale.
     """
     env_attr = getattr(orchestrator, "environment", "") or ""
-    return env_attr == "aws" or os.environ.get("SYS_ENV", "").lower() == "aws"
+    return env_attr == "aws" or os.environ.get("ENV_MODE", "").lower() == "aws"
 
 
 def get_ecs_client(region: str = None):
@@ -146,7 +142,7 @@ def resolve_worker_service_name(worker_index: int = 1) -> str:
     'worker-service' con worker anonimi/intercambiabili: l'indice non ha
     alcun significato e viene ignorato.
     """
-    training_mode = os.environ.get("TRAINING_MODE") or os.environ.get("SYS_MODE") or "centralized"
+    training_mode = os.environ.get("TRAINING_MODE") or "centralized"
     if training_mode == "federated":
         return f"worker-service-{worker_index}"
     return "worker-service"

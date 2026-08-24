@@ -194,7 +194,7 @@ class ScalabilityScenario(BaseTestScenario):
         # dell'inferenza confronta quindi tempi su MOLI DI LAVORO diverse tra
         # una configurazione e l'altra: non è strong scaling, è un artefatto.
         # Il throughput (samples/s) resta invece confrontabile.
-        federated_mode = os.environ.get("SYS_MODE", "centralized") == "federated"
+        federated_mode = os.environ.get("TRAINING_MODE", "centralized") == "federated"
         inference_speedup_note = (
             "In modalità federata ogni worker valida il proprio shard: il testing_set_size totale "
             "cresce con il numero di worker (vedi 'num_samples' per configurazione). "
@@ -226,7 +226,7 @@ class ScalabilityScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload
 

@@ -66,23 +66,7 @@ DEFAULT_PARTITION_STRATEGY = "iid"
 DEFAULT_ALPHA = 0.5
 
 BASE_CACHE_DIR = "./workers_cache"
-
-# Cartella predefinita del dataset reale. Stesso nome di variabile d'ambiente
-# usato da run_baseline.py, così le due parti del sistema si configurano allo
-# stesso modo invece di usare tre nomi diversi ('dataset_path' inesistente su
-# SystemConfig, 'DATASET_PATH' qui, nessuno nella baseline).
 DEFAULT_DATA_FOLDER = "./dataset_cache"
-
-
-def _worker_shard_dir(base_cache_dir: str, index_one_based: int) -> str:
-    """
-    Replica esattamente lo schema di naming usato da FederatedDataSplitter nel
-    ramo 'local' (padding a 2 cifre per i primi 9 worker, senza padding dal
-    decimo in poi): Worker-Locale-01 ... Worker-Locale-09, Worker-Locale-10, ...
-    """
-    i = index_one_based - 1
-    worker_id = f"Worker-Locale-0{i + 1}" if i < 9 else f"Worker-Locale-{i + 1}"
-    return os.path.join(base_cache_dir, worker_id)
 
 
 def _shards_already_present(num_workers: int, base_cache_dir: str = BASE_CACHE_DIR) -> bool:
@@ -197,9 +181,7 @@ def main() -> None:
                     "(gemello locale di provision_federated_shards.py)."
     )
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("NUM_WORKERS", 3)))
-    # Allineato a run_baseline.py: stessa variabile d'ambiente DATASET_LOCAL_PATH.
-    # Prima il default leggeva 'DATASET_PATH', un terzo nome diverso sia da quello
-    # usato dalla baseline sia dall'attributo (inesistente) cercato su SystemConfig.
+   
     parser.add_argument("--data-folder", type=str,
                         default=os.environ.get("DATASET_LOCAL_PATH", DEFAULT_DATA_FOLDER))
     parser.add_argument("--dataset-type", type=str, default=os.environ.get("DATASET_TYPE", "real"),

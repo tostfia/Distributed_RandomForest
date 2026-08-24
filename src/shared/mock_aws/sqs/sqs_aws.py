@@ -6,19 +6,6 @@ Espone la STESSA interfaccia pubblica di MockSQSQueue (sqs.py):
     - receive_message(queue_name, visibility_timeout=300) -> {"Body": dict, "ReceiptHandle": str} | None
     - delete_message(receipt_handle) -> bool
     - change_message_visibility(queue_name, receipt_handle, visibility_timeout) -> bool
-
-Nota importante su delete_message
-----------------------------------
-L'API reale `sqs:DeleteMessage` richiede l'URL della coda, non solo il
-ReceiptHandle. L'interfaccia esistente però chiama
-`self.sqs_queue.delete_message(receipt_handle)` da BaseOrchestrator senza
-passare il queue_name. Per non dover toccare l'interfaccia e tutto il
-codice che la usa, manteniamo una mappa interna
-    receipt_handle -> queue_url
-popolata ad ogni receive_message() e consumata da delete_message() /
-change_message_visibility(). Questo è sicuro perché ogni orchestratore fa
-polling su UNA sola coda alla volta (self.queue_name), quindi non c'è
-ambiguità su quale coda appartenga un dato ReceiptHandle.
 """
 
 import json
@@ -47,7 +34,7 @@ class AwsSQSQueue(SQSQueueInterface):
             except ClientError as e:
                 raise RuntimeError(
                     f"[AWS SQS] Coda '{queue_name}' non trovata su AWS. "
-                    f"Va creata (vedi setup_aws_resources.py) prima di avviare il sistema con SYS_ENV=aws."
+                    f"Va creata (vedi setup_aws_resources.py) prima di avviare il sistema con ENV_MODE=aws."
                 ) from e
             self._queue_url_cache[queue_name] = response["QueueUrl"]
         return self._queue_url_cache[queue_name]
@@ -57,7 +44,7 @@ class AwsSQSQueue(SQSQueueInterface):
             raise ValueError("[AWS SQS]: Il messaggio deve contenere un 'job_id' univoco.")
 
         queue_url = self._resolve_queue_url(queue_name)
-        
+
         # Assegnazione dinamica del Group ID in base alla coda di destinazione
         if "federated" in queue_name:
             group_id = "ML-Federated-Group"
@@ -75,11 +62,11 @@ class AwsSQSQueue(SQSQueueInterface):
             log_tipo_coda = "[FIFO]"
         else:
             log_tipo_coda = "[STANDARD]"
-        
+
         self._client.send_message(**send_params)
         print(f"[AWS SQS] {log_tipo_coda} Messaggio inviato in '{queue_name}' - Job ID: {message_dict['job_id'][:8]}...")
-        
-       
+
+
     def receive_message(self, queue_name: str, visibility_timeout: int = 300) -> Optional[dict]:
         queue_url = self._resolve_queue_url(queue_name)
 

@@ -1,5 +1,5 @@
 
-import json, os, time, boto3
+import json, os, boto3
 from urllib.parse import urlparse
 
 class LocalMetricsDAO:

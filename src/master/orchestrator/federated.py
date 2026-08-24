@@ -15,7 +15,7 @@ import re
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
-from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator
+from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
@@ -27,8 +27,13 @@ BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket
 # scalabilita' con pochi worker attivi), senza toccare il default usato finora in
 # locale/Docker se la variabile non e' impostata. Due costanti separate perché
 # training e inferenza avevano gia' default diversi (600s e 300s).
-RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
-RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900))
+#
+# int(os.environ.get(...)) è stato sostituito da env_timeout_seconds: deploy.sh,
+# quando la chiave manca nel .env, ripiega su "1800s"/"900s" — col suffisso — e
+# int("1800s") solleva ValueError a livello di modulo, uccidendo il container
+# all'import. Vedi il docstring di env_timeout_seconds in BaseOrchestrator.py.
+RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 1800)
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900)
 
 class FederatedOrchestrator(BaseOrchestrator):
 

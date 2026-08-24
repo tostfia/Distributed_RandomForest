@@ -210,7 +210,7 @@ class NetworkSimulationScenario(BaseTestScenario):
         # tree_allocation='proportional' mentre il job principale dello stesso
         # scenario dichiarava correttamente 'equal' (stessa sessione, stesso
         # manifesto, due valori diversi).
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             probe_payload = self._augment_payload_with_partitioning(probe_payload)
         t0 = time.perf_counter()
         self._reuse_dataset_if_available(probe_payload, seed=0)
@@ -438,7 +438,7 @@ class NetworkSimulationScenario(BaseTestScenario):
             "dataset_path": self.config["dataset_path"],
             "hyperparameters": hp,
         }
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload
 

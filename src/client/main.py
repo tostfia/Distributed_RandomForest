@@ -797,8 +797,8 @@ def main():
         config_mode = get_input("Scelta: ", "1")
 
         if config_mode == "2":
-            mode = os.environ.get("SYS_MODE", "centralized")
-            env = os.environ.get("SYS_ENV", "local")
+            mode = cfg.mode
+            env = cfg.env
             engine = TestEngine(mode=mode, env=env)
             engine.run_scenarios()
             print("\n[INFO] Test Suite completata. Ritorno al menù principale.")

@@ -123,6 +123,47 @@ def normalize_job_meta_numerics(meta: dict) -> dict:
     return normalized
 
 
+def env_timeout_seconds(var_name: str, default: int) -> int:
+    """
+    Legge un timeout espresso in secondi da variabile d'ambiente, restituendo
+    'default' se la variabile è assente, vuota o non interpretabile.
+
+    PERCHÉ NON BASTA int(os.environ.get(NOME, default))
+    deploy.sh, quando la chiave non è presente nel .env, ripiega su valori
+    scritti CON il suffisso: DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800s}".
+    Quel valore finisce tale e quale nella task definition ECS, e int("1800s")
+    solleva ValueError — a livello di modulo, quindi PRIMA che qualunque
+    try/except applicativo possa intercettarlo: il container morirebbe
+    all'import con uno stack trace incomprensibile, e solo sulle macchine il
+    cui .env non dichiara quella chiave.
+
+    Qui il suffisso 's' viene tollerato, e qualunque altro valore malformato
+    produce un WARN esplicito più il default, invece di un crash. Un timeout
+    sbagliato è un problema; un orchestratore che non parte è peggio.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return default
+    if cleaned[-1] in ("s", "S"):
+        cleaned = cleaned[:-1].strip()
+
+    try:
+        value = int(cleaned)
+    except (TypeError, ValueError):
+        print(f"[CONFIG] [WARN] {var_name}='{raw}' non è un numero di secondi valido: "
+              f"uso il default {default}s.")
+        return default
+
+    if value <= 0:
+        print(f"[CONFIG] [WARN] {var_name}='{raw}' non è positivo: uso il default {default}s.")
+        return default
+    return value
+
+
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
     pass

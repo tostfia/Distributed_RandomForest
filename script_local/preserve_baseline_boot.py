@@ -39,9 +39,7 @@ def save(config_path: str, tmp_path: str) -> None:
 
 
 def restore(config_path: str, tmp_path: str) -> None:
-    # Nota: se tmp_path è stato creato con 'mktemp', il file esiste già ma è
-    # vuoto finché 'save' non ci scrive dentro. Un file assente o vuoto
-    # significa entrambi "nessuna sezione da preservare": non è un errore.
+    
     if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

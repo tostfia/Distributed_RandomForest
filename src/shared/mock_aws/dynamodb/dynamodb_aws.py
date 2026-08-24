@@ -34,14 +34,6 @@ class AwsDynamoDB:
         'OrchestratorLocks': 'lock_key',
         'JobLocks': 'lock_key',
         'WorkerIndexLocks': 'lock_key',
-        # Sidecar dei metadati di job per il recovery (vedi
-        # BaseOrchestrator._save_job_meta/_load_job_meta/_clean_job_meta):
-        # stessa convenzione già usata per 'ModelStatus', chiave = job_id.
-        # Senza questa riga, _get_primary_key_name solleva ValueError PRIMA
-        # ancora di contattare DynamoDB — la tabella va comunque creata a
-        # parte (non la crea questo codice), ma con questa entry mancante
-        # nessuna chiamata put_item/get_item/delete_item su 'JobMetadata'
-        # potrebbe funzionare, qualunque nome le si dia in fase di creazione.
         'JobMetadata': 'job_id',
     }
 
@@ -80,7 +72,6 @@ class AwsDynamoDB:
         """DynamoDB non accetta float nativi: vanno convertiti in Decimal.
         Applica la conversione ricorsivamente su dict/list."""
         if isinstance(value, float):
-            # str() evita i classici problemi di precisione binaria di Decimal(float)
             return decimal.Decimal(str(value))
         if isinstance(value, dict):
             return {k: AwsDynamoDB._to_dynamo(v) for k, v in value.items()}

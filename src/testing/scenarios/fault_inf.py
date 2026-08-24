@@ -156,7 +156,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
 
             environment = getattr(self.orchestrator, "environment", "local")
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
-            mode = os.environ.get("SYS_MODE", "centralized")
+            mode = os.environ.get("TRAINING_MODE", "centralized")
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
 
             # In centralized qualunque worker va bene. In federated, "sempre
@@ -236,7 +236,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             print("[TEST WARN] Il thread di simulazione del guasto non si è concluso in tempo: "
                   "potrebbe sparare durante lo scenario successivo.")
 
-        mode = os.environ.get("SYS_MODE", "centralized")
+        mode = os.environ.get("TRAINING_MODE", "centralized")
         return {
             "scenario_description": "Crash improvviso Worker su thread/processi Python locali durante l'inferenza.",
             "execution_mode": "centralized" if mode == "centralized" else "federated",
@@ -259,6 +259,6 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload

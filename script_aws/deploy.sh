@@ -29,7 +29,6 @@ if [ -f "$ENV_FILE" ]; then
   if [ -n "$ENV_AWS_REGION" ]; then export AWS_DEFAULT_REGION="$ENV_AWS_REGION"; fi
 
   # 2. Caricamento Modalità di Training e Bucket S3
-  ENV_SYS_MODE=$(get_env_var "SYS_MODE")
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
   ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
@@ -39,21 +38,21 @@ if [ -f "$ENV_FILE" ]; then
   ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
   ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
 
-  # Priorità per la modalità: parametro $1 > SYS_MODE > TRAINING_MODE > default "centralized"
-  DETECTED_MODE="${1:-${ENV_SYS_MODE:-${ENV_TRAINING_MODE:-centralized}}}"
+  # Priorità per la modalità: parametro $1 > TRAINING_MODE > default "centralized"
+  DETECTED_MODE="${1:-${ENV_TRAINING_MODE:-centralized}}"
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
   DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
   DETECTED_WORKERS="${ENV_NUM_WORKERS:-2}"
-  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800s}"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900s}"
+  DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800}"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900}"
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato. Uso parametri di fallback."
   DETECTED_MODE="${1:-centralized}"
   DETECTED_REGION="us-east-1"
   DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
   DETECTED_WORKERS="2"
-  DETECTED_RPC_SYNC_TIMEOUT="1800s"
-  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="900s"
+  DETECTED_RPC_SYNC_TIMEOUT="1800"
+  DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="900"
 fi
 
 REGION="$DETECTED_REGION"
@@ -71,6 +70,15 @@ ORCHESTRATOR_DESIRED_COUNT=2
 # chiamante della connessione rpyc, i worker non hanno bisogno di conoscerle.
 RPC_SYNC_TIMEOUT_SECONDS="$DETECTED_RPC_SYNC_TIMEOUT"
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS="$DETECTED_RPC_INFERENCE_SYNC_TIMEOUT"
+
+if ! [[ "$RPC_SYNC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$RPC_SYNC_TIMEOUT_SECONDS" -le 0 ]; then
+  echo "ERRORE: RPC_SYNC_TIMEOUT_SECONDS deve essere un intero positivo (secondi), ricevuto: '$RPC_SYNC_TIMEOUT_SECONDS'"
+  exit 1
+fi
+if ! [[ "$RPC_INFERENCE_SYNC_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$RPC_INFERENCE_SYNC_TIMEOUT_SECONDS" -le 0 ]; then
+  echo "ERRORE: RPC_INFERENCE_SYNC_TIMEOUT_SECONDS deve essere un intero positivo (secondi), ricevuto: '$RPC_INFERENCE_SYNC_TIMEOUT_SECONDS'"
+  exit 1
+fi
 
 # Forziamo ECS a spegnere i task vecchi PRIMA di avviare quelli nuovi
 # durante un deployment (niente overlap temporaneo vecchi+nuovi).
@@ -107,8 +115,8 @@ echo "    [ENV CONFIG] REGION        : $REGION"
 echo "    [ENV CONFIG] TRAINING_MODE : $TRAINING_MODE"
 echo "    [ENV CONFIG] BUCKET_NAME   : $BUCKET_NAME"
 echo "    [ENV CONFIG] NUM_WORKERS   : $WORKER_DESIRED_COUNT"
-echo "    [ENV CONFIG] RPC_SYNC_TIMEOUT_SECONDS           : $RPC_SYNC_TIMEOUT_SECONDS"
-echo "    [ENV CONFIG] RPC_INFERENCE_SYNC_TIMEOUT_SECONDS : $RPC_INFERENCE_SYNC_TIMEOUT_SECONDS"
+echo "    [ENV CONFIG] RPC_SYNC_TIMEOUT_SECONDS           : ${RPC_SYNC_TIMEOUT_SECONDS}s"
+echo "    [ENV CONFIG] RPC_INFERENCE_SYNC_TIMEOUT_SECONDS : ${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}s"
 echo "-----------------------------------------------------------------------"
 
 echo "==> [0/10] Controllo di sicurezza: .env non deve finire nell'immagine..."
@@ -248,9 +256,7 @@ if [ "$TRAINING_MODE" == "federated" ]; then
         {"name": "WORKER_INDEX", "value": "${i}"},
         {"name": "RPC_PORT", "value": "${RPC_PORT}"},
         {"name": "ENV_MODE", "value": "aws"},
-        {"name": "SYS_ENV", "value": "aws"},
         {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
-        {"name": "SYS_MODE", "value": "${TRAINING_MODE}"},
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
@@ -299,9 +305,7 @@ else
         {"name": "NUM_WORKERS", "value": "${WORKER_DESIRED_COUNT}"},
         {"name": "RPC_PORT", "value": "${RPC_PORT}"},
         {"name": "ENV_MODE", "value": "aws"},
-        {"name": "SYS_ENV", "value": "aws"},
         {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
-        {"name": "SYS_MODE", "value": "${TRAINING_MODE}"},
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
@@ -349,9 +353,7 @@ cat <<EOF > /tmp/orchestrator-task-def.json
         {"name": "WORKER_HEARTBEAT_TIMEOUT", "value": "120"},
         {"name": "NUM_WORKERS", "value": "${WORKER_DESIRED_COUNT}"},
         {"name": "ENV_MODE", "value": "aws"},
-        {"name": "SYS_ENV", "value": "aws"},
         {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
-        {"name": "SYS_MODE", "value": "${TRAINING_MODE}"},
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},

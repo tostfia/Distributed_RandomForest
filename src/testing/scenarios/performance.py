@@ -11,9 +11,6 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         print(f"[PERFORMANCE] Esecuzione in ambiente '{execution_mode.upper()}'...")
         task_type = self.config.get("selected_task", "classifier")
         payload = self._build_payload()
-        # Ricavato dal payload stesso (che ora nasce dal manifesto della
-        # baseline): leggerlo separatamente da test_config.json permetteva di
-        # chiedere N alberi mentre il payload ne dichiarava M.
         target_trees = self._resolve_target_trees()
 
         start_time = time.perf_counter()
@@ -62,10 +59,6 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "model_accuracy_metrics": accuracy_metrics
         }
     def _build_payload(self):
-        # Iperparametri dal manifesto della baseline (vedi
-        # BaseTestScenario._resolve_hyperparameters): è ciò che rende
-        # confrontabili i tempi e le metriche di questo scenario con T_seq /
-        # T_1node prodotti da run_baseline().
         hp = self._resolve_hyperparameters()
         payload = {
             "job_id": f"test_perf_{int(time.time())}",
@@ -73,7 +66,7 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", "synthetic/synthetic_dataset.csv"),
             "hyperparameters": hp
         }
-        if os.environ.get("SYS_MODE", "centralized") == "federated":
+        if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload
 
