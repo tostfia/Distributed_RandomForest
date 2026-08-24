@@ -314,6 +314,14 @@ class FederatedOrchestrator(BaseOrchestrator):
         """
         self.current_job_id = payload.get("job_id")
 
+        # Azzerati a ogni step, come nel centralizzato: senza questo, uno step
+        # che non costruisce alberi (o che fallisce prima del dispatch)
+        # lascerebbe in piedi i valori dello step PRECEDENTE, e il report li
+        # attribuirebbe a questo. Eseguendo 'all' gli scenari condividono la
+        # stessa istanza di orchestratore, quindi il rischio e' concreto.
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment == "aws":
             self._ensure_aws_bootstrap(payload)
@@ -322,8 +330,10 @@ class FederatedOrchestrator(BaseOrchestrator):
             os.makedirs("./.local_storage", exist_ok=True)
 
 
-        if start_alberi == 0 and self.checkpoint_dao.exists(checkpoint_trees_path):
-            self.checkpoint_dao.delete(checkpoint_trees_path)
+        if start_alberi == 0:
+            # Rimuove parti incrementali E monolitico: ripartendo da zero non
+            # deve sopravvivere nulla di un tentativo precedente sullo stesso id.
+            self._purge_trees_checkpoint(self.current_job_id)
         if start_alberi == 0:
             self._trees_cache.pop(self.current_job_id, None)
         all_trained_trees = []
@@ -343,12 +353,13 @@ class FederatedOrchestrator(BaseOrchestrator):
                 # recuperare lo stato: qui avviene il vero, garantito, recovery cross-istanza.
                 print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Nessuna cache locale valida per "
                       f"start_alberi = {start_alberi}. Ripristino checkpoint fisico da storage condiviso...")
-                if self.checkpoint_dao.exists(checkpoint_trees_path):
+                if self._trees_checkpoint_exists(self.current_job_id):
                     try:
-                        # NOTA: il checkpoint viene sempre salvato come lista COMPLETA e aggiornata
-                        # (overwrite, non append) tramite checkpoint_dao.save(): un singolo load()
-                        # restituisce già tutti gli alberi, senza bisogno di ricostruire nulla a mano.
-                        all_trained_trees = self.checkpoint_dao.load(checkpoint_trees_path)
+                        # Il checkpoint e' ora INCREMENTALE: una parte per scrittura,
+                        # contenente solo gli alberi nuovi. _load_trees_checkpoint le
+                        # rilegge in ordine e le ricompone, con fallback automatico sul
+                        # vecchio formato monolitico se non esiste alcuna parte.
+                        all_trained_trees = self._load_trees_checkpoint(self.current_job_id)
                         print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
                         start_alberi = len(all_trained_trees)
                     except Exception as e_load:
@@ -435,6 +446,29 @@ class FederatedOrchestrator(BaseOrchestrator):
             feature_selezionate = (None if self.environment == "aws" else self.select_from_config(self._resolve_dataset_type(payload)))
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
+
+            # Lock DEDICATO alla persistenza del checkpoint, separato da
+            # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
+            # cioe' dentro la stessa sezione critica che serve ad accodare gli
+            # alberi ricevuti: ogni worker che finiva restava fermo ad aspettare
+            # la fine dell'upload di un altro, non per calcolare ma solo per
+            # poter registrare il proprio risultato. Era un punto di
+            # serializzazione che cresceva col numero di worker, e falsava
+            # proprio la misura di strong scaling.
+            checkpoint_lock = threading.Lock()
+            # Contatore monotono dell'ultimo snapshot effettivamente persistito:
+            #  1) impedisce che uno snapshot piu' VECCHIO sovrascriva uno piu'
+            #     recente, ora che la scrittura e' fuori da results_lock e due
+            #     thread possono arrivarci in ordine diverso da quello in cui
+            #     hanno preso lo snapshot (un checkpoint che regredisce
+            #     sposterebbe INDIETRO il punto di ripartenza dopo un guasto);
+            #  2) salta le scritture gia' superate: se risulta persistito uno
+            #     stato con piu' alberi, riscrivere e' inutile e il checkpoint
+            #     resta comunque piu' avanti.
+            # "parts" riparte dal numero di parti gia'su storage: scrivere di nuovo
+            # dalla 0 sovrascriverebbe un delta valido con un altro delta.
+            checkpoint_lock_state = {"count": start_alberi,
+                                     "parts": self._count_trees_checkpoint_parts(self.current_job_id)}
             RETRY_WAIT_SECONDS = 10
             # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
             # che i test di fault injection possano attendere in modo affidabile il
@@ -495,32 +529,54 @@ class FederatedOrchestrator(BaseOrchestrator):
                             },
                         )
                         result_trees = pickle.loads(obtain(result_raw))
+                        # SEZIONE CRITICA MINIMA: solo l'aggiornamento della lista
+                        # condivisa e uno snapshot immutabile. Upload su S3 e
+                        # scrittura su DynamoDB sono spostati fuori (vedi sotto).
                         with results_lock:
                             all_trained_trees.extend(result_trees)
                             current_total = len(all_trained_trees)
-                            try:
-                                t_chk_start = time.perf_counter()
-                                self.checkpoint_dao.save(checkpoint_trees_path, all_trained_trees)
-                                checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
-                                # Manteniamo la cache di istanza allineata SOLO dopo che il
-                                # salvataggio fisico su storage condiviso è andato a buon fine,
-                                # così non è mai "più avanti" della fonte di verità persistita.
-                                self._trees_cache[self.current_job_id] = list(all_trained_trees)
-                                print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
-                            except Exception as e_fs:
-                                print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
-                            if hasattr(self, 'state_manager') and self.state_manager:
+                            # Copia: la serializzazione fuori dal lock non deve
+                            # poter vedere la lista mutare sotto i piedi.
+                            snapshot = list(all_trained_trees)
+
+                        # --- fuori da results_lock ---
+                        with checkpoint_lock:
+                            if current_total > checkpoint_lock_state["count"]:
                                 try:
-                                    self.state_manager.update_request_status(
-                                        job_id=self.current_job_id,
-                                        status="PROCESSING",
-                                        orchestrator_id=self.orchestrator_name,
-                                        retries=payload.get("retries", 0),
-                                        base_random_state=seed,
-                                        alberi_addestrati=current_total,
-                                    )
-                                except Exception as e_db:
-                                    print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                                    t_chk_start = time.perf_counter()
+                                    # Scrive SOLO gli alberi nuovi (alla parte 0 l'intero
+                                    # snapshot, per migrare dal formato monolitico).
+                                    self._persist_trees_delta(
+                                        self.current_job_id, snapshot,
+                                        checkpoint_lock_state["count"], checkpoint_lock_state["parts"])
+                                    checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
+                                    checkpoint_lock_state["count"] = current_total
+                                    checkpoint_lock_state["parts"] += 1
+                                    # Cache di istanza allineata SOLO dopo il salvataggio
+                                    # riuscito, cosi' non e' mai "piu' avanti" della fonte
+                                    # di verita' persistita.
+                                    self._trees_cache[self.current_job_id] = snapshot
+                                    print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
+                                except Exception as e_fs:
+                                    # Il contatore NON avanza: un writer successivo deve
+                                    # poter riprovare a persistere lo stato.
+                                    print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+
+                                if hasattr(self, 'state_manager') and self.state_manager:
+                                    try:
+                                        self.state_manager.update_request_status(
+                                            job_id=self.current_job_id,
+                                            status="PROCESSING",
+                                            orchestrator_id=self.orchestrator_name,
+                                            retries=payload.get("retries", 0),
+                                            base_random_state=seed,
+                                            alberi_addestrati=current_total,
+                                        )
+                                    except Exception as e_db:
+                                        print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                            else:
+                                print(f"   [RPC <- {w_name}] [CHECKPOINT SKIP] Task {task_id}: gia' persistito uno "
+                                      f"stato piu' avanzato ({checkpoint_lock_state['count']} alberi >= {current_total}).")
 
                         print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
                         self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
@@ -898,9 +954,13 @@ class FederatedOrchestrator(BaseOrchestrator):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
 
         if alberi_reali is not None and len(alberi_reali) > 0:
-            checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
             try:
-                self.checkpoint_dao.save(checkpoint_trees_path, alberi_reali)
+                # Sostituzione integrale dello stato: si azzera e si riscrive come
+                # parte 0. Percorso oggi mai esercitato — BaseOrchestrator chiama
+                # _save_checkpoint senza 'alberi_reali' — ma va tenuto coerente
+                # col formato a parti, altrimenti reintrodurrebbe un monolitico.
+                self._purge_trees_checkpoint(job_id)
+                self._persist_trees_delta(job_id, alberi_reali, 0, 0)
                 print(f"[{self.orchestrator_name}] Checkpoint alberi salvato in {checkpoint_trees_path}.")
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile salvare checkpoint alberi: {e}")
@@ -908,10 +968,10 @@ class FederatedOrchestrator(BaseOrchestrator):
     def _clean_checkpoint(self, job_id: str):
         super()._clean_checkpoint(job_id)
         self._trees_cache.pop(job_id, None)
-        checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
         try:
-            self.checkpoint_dao.delete(checkpoint_trees_path)
-            print(f"[{self.orchestrator_name}] Checkpoint alberi rimosso da {checkpoint_trees_path}.")
+            # Rimuove tutte le parti incrementali oltre all'eventuale monolitico.
+            self._purge_trees_checkpoint(job_id)
+            print(f"[{self.orchestrator_name}] Checkpoint alberi rimosso per il job {job_id}.")
         except Exception as e:
             print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint alberi: {e}")
 

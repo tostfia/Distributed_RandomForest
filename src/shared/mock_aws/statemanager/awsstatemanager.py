@@ -8,6 +8,10 @@ JOBS_TABLE = "ModelStatus"
 WORKER_TASKS_TABLE = "WorkerTasks"
 LOCKS_TABLE = "OrchestratorLocks"
 JOB_LOCKS_TABLE = "JobLocks"
+# Nome del Global Secondary Index su WorkerTasks che permette di recuperare
+# tutti i task di un job senza fare la scansione dell'intera tabella.
+WORKER_TASKS_JOB_INDEX = "job_id-index"
+
 cfg = SystemConfig()
 
 class AwsStateManager(StateManagerInterface):
@@ -68,9 +72,6 @@ class AwsStateManager(StateManagerInterface):
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,
             "alberi_addestrati": alberi_addestrati,
-            # Riportati dal record esistente: put_item sovrascrive l'intero item,
-            # quindi senza questo passaggio esplicito questi campi andrebbero persi
-            # al primo aggiornamento di stato dopo la creazione del job.
             "hyperparameters": current_item.get("hyperparameters", {}),
             "mode": current_item.get("mode"),
             "dataset_type": current_item.get("dataset_type"),
@@ -101,7 +102,15 @@ class AwsStateManager(StateManagerInterface):
             "status": status,
             "timestamp": int(time.time()),
             "job_id": job_id,
+            # NOTA: MockStateManager scrive lo stesso dato sotto la chiave
+            # 'worker_id'. La differenza è storica e oggi innocua (nessun
+            # consumatore legge questo campo: are_all_workers_done filtra per
+            # job_id e stato), ma se in futuro qualcosa dovesse leggerlo, i due
+            # ambienti restituirebbero risultati diversi. Scriviamo entrambe le
+            # chiavi con lo stesso valore: costa un attributo e rende i record
+            # AWS e locali interpretabili nello stesso modo.
             "worker_name": worker_id,
+            "worker_id": worker_id,
         }
         self._db.put_item(WORKER_TASKS_TABLE, task_id, payload)
 
@@ -112,12 +121,16 @@ class AwsStateManager(StateManagerInterface):
         self._db.put_item(WORKER_TASKS_TABLE, task_id, current_item)
 
     def are_all_workers_done(self, job_id: str, expected_count: int) -> bool:
-        response = self._db.query_table(
+        """
+        Verifica se tutti i worker attesi hanno completato la propria parte del job.
+        """
+        response = self._db.query_by_index(
             table_name=WORKER_TASKS_TABLE,
-            index_name="job_id-index",
-            key_condition={"job_id": job_id}
+            index_name=WORKER_TASKS_JOB_INDEX,
+            key_name="job_id",
+            key_value=job_id,
         )
-        
+
         job_tasks = response.get("Items", [])
         completed_tasks = [t for t in job_tasks if t.get("status") == "COMPLETED"]
         return len(completed_tasks) == expected_count
@@ -148,11 +161,11 @@ class AwsStateManager(StateManagerInterface):
         claimed = self._db.try_acquire_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
         if not claimed:
             claimed = self._db.refresh_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id, ttl=lease_seconds)
- 
+
         if not claimed:
             print(f"[AWS StateManager] [CLAIM FAILED] Job {job_id[:8]}... già posseduto da un altro Orchestrator.")
         return claimed
-    
+
     def release_job_lease(self, job_id: str, orchestrator_id: str) -> bool:
         released = self._db.release_lock(JOB_LOCKS_TABLE, job_id, orchestrator_id)
         if released:

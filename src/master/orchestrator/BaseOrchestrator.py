@@ -27,6 +27,102 @@ BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket
 # OrchestratorLocks): non viene provisionata da questo codice.
 JOB_META_TABLE = "JobMetadata"
 
+# --------------------------------------------------------------------------- #
+# Normalizzazione dei tipi numerici dei metadati di job                        #
+# --------------------------------------------------------------------------- #
+#
+# PERCHÉ ESISTE QUESTO BLOCCO
+# DynamoDB non ha un tipo "float": AwsDynamoDB._to_dynamo converte i float in
+# Decimal in scrittura, e AwsDynamoDB._from_dynamo li riconverte in lettura con
+#
+#     return int(value) if value % 1 == 0 else float(value)
+#
+# cioè OGNI Decimal con parte frazionaria nulla torna come int. È la scelta
+# giusta per la stragrande maggioranza dei campi che passano di lì
+# (alberi_addestrati, expires_at, timestamp, n_estimators: devono essere int, e
+# restituirli come float romperebbe range(), gli indici e i confronti), quindi
+# NON va cambiata in _from_dynamo.
+#
+# Per un pugno di iperparametri, però, int e float non sono lo stesso numero
+# scritto in due modi: sono due SEMANTICHE DIVERSE in scikit-learn.
+#
+#     max_samples=1.0  (float) -> ogni albero campiona il 100% del training set
+#     max_samples=1    (int)   -> ogni albero campiona UN SINGOLO record
+#
+# Il manifesto della baseline dichiara max_samples: 1.0. Senza questa
+# normalizzazione, un job ripreso da _perform_active_recovery dopo un failover
+# ricostruirebbe la foresta con un albero per campione: nessuna eccezione,
+# nessun log anomalo, solo metriche prive di senso dopo il failover.
+#
+# PERCHÉ QUI E NON NEL MODELLO PYDANTIC
+# Hyperparameters.check_max_samples farebbe già la coercizione int -> float, ma
+# il percorso di recovery non passa dal modello: _perform_active_recovery mette
+# job_meta.get("hyperparameters", {}) grezzo nel payload e l'orchestratore lo
+# legge con hp.get("max_samples") (vedi CentralizedOrchestrator, ramo che
+# inoltra bootstrap/max_samples a train_subset_forest). La normalizzazione va
+# quindi fatta al confine di lettura dei metadati, dove i tipi attesi sono noti.
+#
+# In locale il round-trip JSON preserva già 1.0 come float: là la funzione è un
+# no-op, ed è applicata comunque per non avere due comportamenti diversi fra i
+# due ambienti.
+
+# Iperparametri che devono restare float anche quando il valore è numericamente
+# intero. Nota su max_features: scikit-learn accetterebbe anche un int (= numero
+# assoluto di feature), ma il modello Hyperparameters lo dichiara
+# Optional[Union[str, float]], quindi in questo sistema un max_features numerico
+# è SEMPRE una frazione. Restano ovviamente intatti i valori stringa
+# ('sqrt', 'log2'), che non sono numeri.
+_JOB_META_FLOAT_HP_KEYS = ("max_samples", "max_features")
+
+# Campi float di primo livello nei metadati. partition_alpha è l'iperparametro
+# di eterogeneità della partizione Dirichlet: numericamente 1 e 1.0 sono
+# equivalenti per numpy, ma tenerlo float mantiene coerente ciò che finisce
+# nelle metriche dell'esperimento.
+_JOB_META_FLOAT_KEYS = ("partition_alpha",)
+
+
+def _as_float_if_integral(value):
+    """
+    Riporta a float un valore che deve esserlo ma è tornato int dal round-trip
+    DynamoDB. Lascia intatto tutto il resto: None, stringhe ('sqrt'), float già
+    corretti. I bool sono esclusi esplicitamente perché in Python bool è
+    sottoclasse di int, e True diventerebbe 1.0.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return float(value)
+    return value
+
+
+def normalize_job_meta_numerics(meta: dict) -> dict:
+    """
+    Restituisce una copia di 'meta' con i campi numerici riportati al tipo
+    atteso. Difensiva per costruzione: un meta vuoto, parziale o con
+    'hyperparameters' di tipo inatteso attraversa la funzione senza modifiche,
+    perché un sidecar malformato non deve impedire il recovery — deve solo non
+    peggiorarlo.
+    """
+    if not isinstance(meta, dict) or not meta:
+        return meta
+
+    normalized = dict(meta)
+
+    for key in _JOB_META_FLOAT_KEYS:
+        if key in normalized:
+            normalized[key] = _as_float_if_integral(normalized[key])
+
+    hp = normalized.get("hyperparameters")
+    if isinstance(hp, dict):
+        hp_normalized = dict(hp)
+        for key in _JOB_META_FLOAT_HP_KEYS:
+            if key in hp_normalized:
+                hp_normalized[key] = _as_float_if_integral(hp_normalized[key])
+        normalized["hyperparameters"] = hp_normalized
+
+    return normalized
+
+
 class MessageOwnershipLostError(Exception):
     """Eccezione personalizzata per indicare la perdita di ownership del messaggio SQS."""
     pass
@@ -670,7 +766,10 @@ class BaseOrchestrator(ABC):
             if os.path.exists(meta_path):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
-                        return json.load(f)
+                        # normalize_job_meta_numerics è un no-op sul ramo locale
+                        # (JSON preserva i float): applicata comunque per non
+                        # avere due comportamenti diversi fra locale e AWS.
+                        return normalize_job_meta_numerics(json.load(f))
                 except Exception as e:
                     print(f"[{self.orchestrator_name}] [WARN] Metadati del job {job_id[:8]} corrotti o illeggibili: {e}")
             else:
@@ -689,6 +788,18 @@ class BaseOrchestrator(ABC):
                 if not item:
                     print(f"[{self.orchestrator_name}] [WARN] Nessun sidecar AWS di metadati trovato per il "
                           f"job {job_id[:8]} (tabella '{JOB_META_TABLE}'). Il recovery userà i default.")
+                # QUI la normalizzazione è indispensabile: DynamoDB restituisce
+                # Decimal, e AwsDynamoDB._from_dynamo trasforma in int ogni
+                # Decimal a parte frazionaria nulla — max_samples: 1.0 tornerebbe
+                # come 1, che per scikit-learn significa "un solo campione per
+                # albero" invece di "il 100% del training set".
+                item = normalize_job_meta_numerics(item)
+                hp_check = item.get("hyperparameters") if isinstance(item, dict) else None
+                if isinstance(hp_check, dict):
+                    print(f"[{self.orchestrator_name}] [RECOVERY] Iperparametri recuperati dal sidecar: "
+                          f"n_estimators={hp_check.get('n_estimators')}, max_depth={hp_check.get('max_depth')}, "
+                          f"max_features={hp_check.get('max_features')}, criterion={hp_check.get('criterion')}, "
+                          f"bootstrap={hp_check.get('bootstrap')}, max_samples={hp_check.get('max_samples')}")
                 return item
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [WARN] Lettura metadati AWS del job {job_id[:8]} fallita: {e}. "
@@ -842,6 +953,127 @@ class BaseOrchestrator(ABC):
                     except Exception as e:
                         print(f"[{self.orchestrator_name}] Errore durante il recupero del Job {job_id[:8]}: {e}")
     
+    # ------------------------------------------------------------------ #
+    # Checkpoint INCREMENTALE degli alberi                                #
+    # ------------------------------------------------------------------ #
+    #
+    # FORMATO PRECEDENTE: un'unica chiave, riscritta per intero a ogni chunk
+    # con tutta la foresta accumulata fino a quel momento. Rileggerla era
+    # banale, ma con W worker le scritture erano W di dimensione crescente
+    # (N/W, 2N/W, ... N), per un traffico totale di N*(W+1)/2 invece di N:
+    # il costo cresceva col numero di nodi proprio mentre si misurava la
+    # scalabilita'.
+    #
+    # FORMATO ATTUALE: una PARTE per scrittura, contenente solo gli alberi
+    # nuovi. Le parti sono numerate in sequenza e non hanno buchi, perche' la
+    # scrittura avviene sotto lock e l'indice avanza solo dopo un salvataggio
+    # riuscito. Il ripristino puo' quindi enumerarle sondando con exists()
+    # finche' non ne trova una mancante: CheckpointDAO espone soltanto
+    # save/load/exists/delete, nessuna operazione di listing.
+    #
+    # RETROCOMPATIBILITA': se non esiste alcuna parte ma esiste il file
+    # monolitico del formato precedente, viene letto quello. Alla prima
+    # scrittura successiva lo stato viene migrato scrivendo l'intero snapshot
+    # come parte 0 e rimuovendo il file monolitico, cosi' i due formati non
+    # convivono mai per lo stesso job.
+    #
+    # Questi metodi usano self.checkpoint_dao e self._resolve_trees_checkpoint_path,
+    # definiti nelle sottoclassi (Centralized/Federated): la base fornisce solo
+    # la logica, che e' identica per entrambe.
+
+    _TREES_CHECKPOINT_PROBE_MARGIN = 3
+
+    def _trees_checkpoint_part_path(self, job_id: str, index: int) -> str:
+        """Path della parte n-esima, derivato da quello del checkpoint monolitico."""
+        base = self._resolve_trees_checkpoint_path(job_id)
+        stem = base[:-len(".pkl")] if base.endswith(".pkl") else base
+        return f"{stem}.part_{index:04d}.pkl"
+
+    def _count_trees_checkpoint_parts(self, job_id: str) -> int:
+        """Quante parti risultano gia' persistite per questo job (0 se nessuna)."""
+        index = 0
+        while self.checkpoint_dao.exists(self._trees_checkpoint_part_path(job_id, index)):
+            index += 1
+        return index
+
+    def _load_trees_checkpoint(self, job_id: str) -> list:
+        """
+        Ricompone la foresta parziale leggendo le parti in ordine. Se non ce
+        ne sono, ricade sul file monolitico del formato precedente. Ritorna
+        una lista vuota se non esiste alcun checkpoint.
+        """
+        trees, index = [], 0
+        while True:
+            part_path = self._trees_checkpoint_part_path(job_id, index)
+            if not self.checkpoint_dao.exists(part_path):
+                break
+            trees.extend(self.checkpoint_dao.load(part_path))
+            index += 1
+
+        if index > 0:
+            print(f"[{self.orchestrator_name}] [CHECKPOINT] Ricomposti {len(trees)} alberi da {index} parti incrementali.")
+            return trees
+
+        legacy_path = self._resolve_trees_checkpoint_path(job_id)
+        if self.checkpoint_dao.exists(legacy_path):
+            legacy_trees = list(self.checkpoint_dao.load(legacy_path))
+            print(f"[{self.orchestrator_name}] [CHECKPOINT] Nessuna parte incrementale trovata: letti "
+                  f"{len(legacy_trees)} alberi dal checkpoint monolitico (formato precedente).")
+            return legacy_trees
+        return []
+
+    def _trees_checkpoint_exists(self, job_id: str) -> bool:
+        return (self.checkpoint_dao.exists(self._trees_checkpoint_part_path(job_id, 0))
+                or self.checkpoint_dao.exists(self._resolve_trees_checkpoint_path(job_id)))
+
+    def _persist_trees_delta(self, job_id: str, snapshot: list, already_persisted: int, part_index: int) -> None:
+        """
+        Persiste UNA parte. Alla parte 0 scrive l'intero snapshot e rimuove
+        l'eventuale file monolitico: e' il passo di migrazione dal formato
+        precedente, necessario perche' altrimenti il prefisso gia' presente
+        nel monolitico andrebbe perso (il ripristino, trovando delle parti,
+        smette di considerare il vecchio file).
+        Dalla parte 1 in poi scrive solo il delta non ancora persistito.
+        """
+        payload = list(snapshot) if part_index == 0 else list(snapshot[already_persisted:])
+        self.checkpoint_dao.save(self._trees_checkpoint_part_path(job_id, part_index), payload)
+        if part_index == 0:
+            legacy_path = self._resolve_trees_checkpoint_path(job_id)
+            try:
+                if self.checkpoint_dao.exists(legacy_path):
+                    self.checkpoint_dao.delete(legacy_path)
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [CHECKPOINT WARN] Impossibile rimuovere il checkpoint "
+                      f"monolitico dopo la migrazione: {e}")
+
+    def _purge_trees_checkpoint(self, job_id: str) -> None:
+        """
+        Rimuove tutte le parti e l'eventuale file monolitico. Sonda qualche
+        indice oltre la prima assenza (_TREES_CHECKPOINT_PROBE_MARGIN) per non
+        lasciare parti orfane di un tentativo precedente: costa qualche
+        exists() e evita che un checkpoint incoerente sopravviva alla pulizia.
+        """
+        index, misses, removed = 0, 0, 0
+        while misses < self._TREES_CHECKPOINT_PROBE_MARGIN:
+            part_path = self._trees_checkpoint_part_path(job_id, index)
+            try:
+                if self.checkpoint_dao.exists(part_path):
+                    self.checkpoint_dao.delete(part_path)
+                    removed += 1
+                    misses = 0
+                else:
+                    misses += 1
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [CHECKPOINT WARN] Errore rimuovendo {part_path}: {e}")
+                misses += 1
+            index += 1
+        try:
+            self.checkpoint_dao.delete(self._resolve_trees_checkpoint_path(job_id))
+        except Exception:
+            pass
+        if removed:
+            print(f"[{self.orchestrator_name}] [CHECKPOINT] Rimosse {removed} parti del checkpoint alberi.")
+
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
         """
         Implementazione di base: gestisce il checkpoint LOGICO (Metadati su DynamoDB).

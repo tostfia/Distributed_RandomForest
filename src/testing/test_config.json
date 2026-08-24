@@ -1,9 +1,12 @@
 {
   "_NOTE_ruolo_di_questo_file": "Configurazione del BANCO DI PROVA: cosa testare, con quali soglie e contro quale infrastruttura. NON descrive più il modello: iperparametri e ricetta del dataset vivono nel manifesto della baseline (outputs_baseline/config_synthetic.json o config_real.json), che è la fonte di verità condivisa fra run_baseline(), il client e il cluster. Vedi BaseTestScenario._resolve_hyperparameters.",
 
-  "selected_task": "classifier",
-  "dataset_type": "real",
-  "dataset_path": "dataset_cache/",
+  "_NOTE_dataset": "ATTENZIONE ai percorsi: 'dataset_path' viene inviato TALE E QUALE all'orchestratore, che su AWS gira dentro un container Fargate. Un percorso locale (es. 'dataset_cache/') lì non esiste e il job fallisce con FileNotFoundError, viene rimesso in coda da SQS e riparte in loop — dall'esterno sembra che il test sia bloccato. Per 'dataset_type': 'real' su AWS il valore corretto è l'URI S3 ('s3://<bucket>/real/'), la stessa convenzione usata dal client (main.py: default_data_url = f's3://{bucket_name}/real/'). 'dataset_cache/' è valido SOLO in locale/Docker.",
+  "selected_task": "regressor",
+  "dataset_type": "synthetic",
+  "dataset_path": "synthetic/synthetic_dataset.csv",
+
+  "_NOTE_selected_task": "Deve coincidere con il 'tree_type' del manifesto della baseline effettivamente in uso, altrimenti _resolve_hyperparameters stampa un [ATTENZIONE] e il run gira con un selected_task incoerente rispetto al modello davvero addestrato. Verifica con: python3 -c \"import json;print(json.load(open('outputs_baseline/config_synthetic.json'))['hyperparameters'])\"",
 
   "_NOTE_iperparametri": "I due blocchi qui sotto NON sono più la fonte primaria: valgono solo (a) come fallback quando il manifesto della baseline non esiste ancora su questa macchina, e (b) quando 'use_local_hyperparameters' è true. Se differiscono dal manifesto e vengono effettivamente usati, gli scenari lo dichiarano nei log con una riga [TEST CONFIG].",
   "hyperparameters_class": {

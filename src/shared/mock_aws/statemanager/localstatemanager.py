@@ -57,9 +57,6 @@ class MockStateManager(StateManagerInterface):
             "last_orchestrator": orchestrator_id,
             "base_random_state": final_seed,   
             "alberi_addestrati": alberi_addestrati,
-            # Riportati dal record esistente: put_item sovrascrive l'intero item,
-            # quindi senza questo passaggio esplicito questi campi andrebbero persi
-            # al primo aggiornamento di stato dopo la creazione del job.
             "hyperparameters": current_job.get("hyperparameters", {}),
             "mode": current_job.get("mode"),
             "dataset_type": current_job.get("dataset_type"),
