@@ -1,9 +1,4 @@
 # === CONFIGURAZIONI E SEGRETI ===
-# AGGIUNTO: '.env' non era presente in questo file, pur essendoci la sezione
-# dedicata ai segreti. Contiene le credenziali AWS Academy e il progetto viene
-# consegnato come link a un repository: senza questa riga rischia di finire
-# nei commit. Se risulta già tracciato ('git ls-files .env'), aggiungerlo qui
-# NON basta: serve anche 'git rm --cached .env'.
 .env
 aws_creds.sh
 
