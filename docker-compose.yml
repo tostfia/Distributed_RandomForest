@@ -71,7 +71,7 @@ services:
     #build: .
     profiles:
       - testing
-    mem_limit: 4096m
+    mem_limit: '${TEST_ENGINE_MEM_LIMIT:-6144m}'
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     environment:
