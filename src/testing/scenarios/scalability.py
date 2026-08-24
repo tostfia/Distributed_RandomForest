@@ -42,6 +42,32 @@ class ScalabilityScenario(BaseTestScenario):
         # baseline ha cronometrato in sequenziale, e lo speedup rispetto a
         # T_seq è confrontabile.
         target_trees = self._resolve_target_trees()
+
+        # Override opzionale, SOLO per questo scenario: con pochi alberi (quelli
+        # tipici del manifesto della baseline) l'overhead di rete/orchestrazione
+        # domina il tempo totale e lo speedup misurato resta rumore attorno a 1x
+        # qualunque sia il numero di worker. 'n_estimators_override' in
+        # 'scalability_test' (test_config.json) alza deliberatamente il carico
+        # SOLO qui, senza toccare 'use_local_hyperparameters' (che è globale e
+        # cambierebbe gli alberi anche per Performance/Rete/Guasti/Failover,
+        # rompendo la loro comparabilità con T_seq/T_1node). Se assente, il
+        # comportamento resta quello di sempre: stesso carico della baseline.
+        n_estimators_override = scal_cfg.get("n_estimators_override")
+        if n_estimators_override:
+            try:
+                overridden = int(n_estimators_override)
+                if overridden > 0:
+                    print(f"[SCALABILITY {execution_mode.upper()}] [INFO] n_estimators_override={overridden} attivo "
+                          f"(era {target_trees} dal manifesto della baseline): i tempi di QUESTO scenario non sono "
+                          f"più confrontabili con T_seq/T_1node — gli altri scenari non sono toccati.")
+                    target_trees = overridden
+                else:
+                    print(f"[SCALABILITY {execution_mode.upper()}] [WARN] n_estimators_override={overridden} non "
+                          f"positivo: ignorato, resto sul carico della baseline ({target_trees}).")
+            except (TypeError, ValueError):
+                print(f"[SCALABILITY {execution_mode.upper()}] [WARN] n_estimators_override='{n_estimators_override}' "
+                      f"non è un intero valido: ignorato, resto sul carico della baseline ({target_trees}).")
+
         rng = random.Random(123)
         worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
@@ -50,7 +76,7 @@ class ScalabilityScenario(BaseTestScenario):
             sampled_workers = {k: all_active_workers[k] for k in sampled_ids}
             original_get_workers = ServiceRegistry.get_available_workers
             ServiceRegistry.get_available_workers = lambda environment: sampled_workers
-            payload = self._build_payload(worker_count)
+            payload = self._build_payload(worker_count, target_trees)
             try:
                 # TIMING ADDESTRAMENTO
                 start_train = time.perf_counter()
@@ -216,10 +242,21 @@ class ScalabilityScenario(BaseTestScenario):
             "metrics_per_scale": results
         }
 
-    def _build_payload(self, worker_count):
+    def _build_payload(self, worker_count, target_trees):
         # Vedi BaseTestScenario._resolve_hyperparameters: fonte unica condivisa
         # con la baseline locale.
         hp = self._resolve_hyperparameters()
+        # Allinea SEMPRE n_estimators nel payload a target_trees (il valore
+        # realmente richiesto al cluster via target_alberi in run()): senza
+        # questo, con n_estimators_override attivo il cluster costruirebbe
+        # N alberi mentre il payload ne dichiarerebbe M dal manifesto — lo
+        # stesso disallineamento silenzioso che _resolve_target_trees
+        # (BaseTestScenario) esiste apposta per evitare. Quando l'override
+        # NON è attivo, target_trees è già uguale a hp['n_estimators']
+        # (stessa fonte), quindi questa riga è un no-op.
+        if hp.get("n_estimators") != target_trees:
+            hp = dict(hp)
+            hp["n_estimators"] = target_trees
         payload = {
             "job_id": f"test_scal_{worker_count}_{int(time.time())}",
             "dataset_type": self.config.get("dataset_type", "csv"),

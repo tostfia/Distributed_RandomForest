@@ -287,27 +287,46 @@ class BaseWorker(Service, ABC):
         # numero di worker attivi nel fleet (che sono isolati gli uni dagli altri).
         totale_core_macchina = os.cpu_count() or 1
 
-        if self.environment == "aws":
-            allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
-        else:
+        # Override esplicito per esperimenti di strong scaling: con WORKER_CORES
+        # impostata, questo worker usa SEMPRE quel numero fisso di processi,
+        # indipendentemente da quanti worker sono attivi sulla stessa macchina.
+        # Serve a far sì che ogni worker rappresenti 1 unità di calcolo
+        # comparabile a T_seq/T_1node della baseline: senza questo override, il
+        # calcolo dinamico sotto tiene volutamente costante la capacità TOTALE
+        # del cluster (si ridivide tra i worker attivi), e lo speedup misurato
+        # in locale/Docker resta piatto per costruzione qualunque sia il
+        # numero di worker.
+        _worker_cores_override = os.environ.get("WORKER_CORES")
+        allocated_cores = None
+        if _worker_cores_override:
             try:
-                workers_attivi = ServiceRegistry.get_available_workers(self.environment)
-                num_workers = max(1, len(workers_attivi))
+                allocated_cores = max(1, int(_worker_cores_override))
+                print(f"[{self.worker_name}] [LOG] WORKER_CORES={allocated_cores} (override esplicito attivo, calcolo dinamico bypassato).")
+            except ValueError:
+                print(f"[{self.worker_name}] [WARN] WORKER_CORES='{_worker_cores_override}' non è un intero valido: ignorato, ricado sul calcolo dinamico.")
 
-                if num_workers > 1:
-                    # Più worker rilevati sulla STESSA macchina fisica (locale/Docker
-                    # Compose): dividiamo i core disponibili tra tutti quelli
-                    # effettivamente attivi, per evitare sovra-allocazione.
-                    core_disponibili_rete = max(1, totale_core_macchina - 1)
-                    allocated_cores = max(1, int(core_disponibili_rete / num_workers))
-                    print(f"[{self.worker_name}] [LOG] Rilevati {num_workers} worker attivi (ambiente: {self.environment}).")
-                    print(f"[{self.worker_name}] [LOG] Allocazione dinamica: {allocated_cores} processi per questo pool.")
-                else:
-                    # Un solo worker rilevato: presumibilmente ha la macchina tutta per sé.
-                    allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
-            except Exception as e:
-                print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+        if allocated_cores is None:
+            if self.environment == "aws":
                 allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
+            else:
+                try:
+                    workers_attivi = ServiceRegistry.get_available_workers(self.environment)
+                    num_workers = max(1, len(workers_attivi))
+
+                    if num_workers > 1:
+                        # Più worker rilevati sulla STESSA macchina fisica (locale/Docker
+                        # Compose): dividiamo i core disponibili tra tutti quelli
+                        # effettivamente attivi, per evitare sovra-allocazione.
+                        core_disponibili_rete = max(1, totale_core_macchina - 1)
+                        allocated_cores = max(1, int(core_disponibili_rete / num_workers))
+                        print(f"[{self.worker_name}] [LOG] Rilevati {num_workers} worker attivi (ambiente: {self.environment}).")
+                        print(f"[{self.worker_name}] [LOG] Allocazione dinamica: {allocated_cores} processi per questo pool.")
+                    else:
+                        # Un solo worker rilevato: presumibilmente ha la macchina tutta per sé.
+                        allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
+                except Exception as e:
+                    print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
+                    allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
 
         # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
         if num_trees == 1:

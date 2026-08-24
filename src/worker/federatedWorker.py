@@ -67,7 +67,6 @@ def _train_single_fed_tree(args):
     if criterion is not None:
         kwargs["criterion"] = criterion
         
-    # 3. CONTROLLO CRUCIALE: Aggiungiamo class_weight solo se l'albero è un classificatore
     if class_weight is not None and "Classifier" in tree_class.__name__:
         kwargs["class_weight"] = class_weight
         
@@ -526,12 +525,6 @@ class FederatedWorker(BaseWorker):
 
             y_probs = None
             if not actual_is_regressor and len(rf.classes_) == 2:
-                # Probabilità della classe positiva, usata dall'Orchestratore per l'AUC.
-                # Usiamo rf.classes_ (impostate sopra dall'ordine GLOBALE ricevuto
-                # dall'Orchestratore, coerente su tutti i worker) per individuare la
-                # colonna corretta, invece di assumere ciecamente l'indice 1: se un
-                # worker vedesse solo una classe nel proprio shard locale, l'ordine
-                # delle colonne di predict_proba potrebbe altrimenti non coincidere.
                 proba_matrix = rf.predict_proba(self._cached_X_test)
                 positive_label = rf.classes_[-1]  # convenzione: classe con etichetta maggiore = positiva (es. 1 in 0/1)
                 positive_idx = int(np.where(rf.classes_ == positive_label)[0][0])

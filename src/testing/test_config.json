@@ -10,7 +10,7 @@
 
   "_NOTE_iperparametri": "I due blocchi qui sotto NON sono più la fonte primaria: valgono solo (a) come fallback quando il manifesto della baseline non esiste ancora su questa macchina, e (b) quando 'use_local_hyperparameters' è true. Se differiscono dal manifesto e vengono effettivamente usati, gli scenari lo dichiarano nei log con una riga [TEST CONFIG].",
   "hyperparameters_class": {
-    "n_estimators": 30,
+    "n_estimators": 100,
     "tree_type": "classifier"
   },
   "hyperparameters_regre": {
@@ -19,11 +19,13 @@
     "max_depth": 15
   },
 
-  "_NOTE_use_local_hyperparameters": "Impostare a true SOLO per un esperimento deliberatamente diverso dalla baseline (es. più alberi per dare al cluster abbastanza lavoro da ammortizzare l'overhead nei test di scalabilità). Con true, i tempi e le metriche del run NON sono confrontabili con T_seq/T_1node prodotti da run_baseline(): la scelta va quindi dichiarata anche in relazione.",
+  "_NOTE_use_local_hyperparameters": "Impostare a true SOLO per un esperimento deliberatamente diverso dalla baseline in TUTTI gli scenari (questo flag è globale: con true anche Performance/Rete/Guasti userebbero questi iperparametri invece del manifesto della baseline, perdendo la comparabilità diretta con T_seq/T_1node). Per alzare il carico SOLO nello scenario di Scalabilità, senza toccare gli altri, usare invece 'n_estimators_override' dentro 'scalability_test' qui sotto.",
   "use_local_hyperparameters": false,
 
   "scalability_test": {
-    "_NOTE": "I valori maggiori del numero di worker realmente registrati vengono scartati da ScalabilityScenario. Su AWS il tetto è il desired-count del worker-service: per testare 5 o 7 va prima scalato il service, altrimenti la curva di speedup resta a due soli punti.",
+    "_NOTE": "I valori maggiori del numero di worker realmente registrati vengono scartati da ScalabilityScenario. Su AWS il tetto è il desired-count del worker-service: per testare 5 o 7 va prima scalato il service, altrimenti la curva di speedup resta a due soli punti. Per un esperimento di strong scaling onesto in locale/Docker, lanciare con WORKER_CORES=1 (vedi .env/docker-compose.yml) cosicché ogni worker rappresenti 1 unità di calcolo, invece di dividersi dinamicamente i core della macchina host.",
+    "_NOTE_n_estimators_override": "Vale SOLO per questo scenario (ScalabilityScenario), non tocca gli altri: con pochi alberi (quelli tipici del manifesto della baseline) l'overhead di rete/orchestrazione domina il tempo totale e lo speedup resta rumore attorno a 1x qualunque sia il numero di worker (vedi 'Problema 2' del 24 agosto: 30 alberi -> ~1.25x, 100 alberi -> 6.51x/efficienza 0.93). Impostare a 0 o rimuovere la chiave per tornare al carico della baseline (comportamento di sempre).",
+    "n_estimators_override": 100,
     "worker_counts_to_test": [1, 3, 5, 7]
   },
 

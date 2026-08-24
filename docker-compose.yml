@@ -35,7 +35,7 @@ services:
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     ports:
       - "18861-18870:18861"
-    cpus: '2.0'
+    cpus: '${WORKER_CPUS:-2.0}'
     mem_limit: 2048m
     environment:
       - PYTHONDONTWRITEBYTECODE=1
@@ -47,6 +47,7 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-federated}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
+      - WORKER_CORES=${WORKER_CORES:-}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z

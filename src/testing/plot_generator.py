@@ -29,7 +29,6 @@ import json
 import os
 import pickle
 import traceback
-
 import matplotlib
 
 # Backend non interattivo: obbligatorio dentro container Docker/ECS, dove non
