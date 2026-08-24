@@ -1,83 +1,63 @@
 {
   "scalability": {
-    "scenario_description": "Strong scaling test completato per Addestramento ed Inferenza. Carico fisso di 100 alberi per ciascuna configurazione di worker testata.",
+    "scenario_description": "Strong scaling test completato per Addestramento ed Inferenza in ambiente local. Carico fisso di 40 alberi per ciascuna configurazione di worker testata.",
     "execution_mode": "local",
     "scaling_type": "strong",
     "baseline_worker_count": 1,
+    "total_available_workers": 3,
+    "inference_speedup_caveat": null,
     "metrics_per_scale": {
       "workers_1": {
         "training": {
-          "duration_seconds": 326.56,
-          "throughput_trees_per_s": 0.31,
-          "speedup": 1.0
+          "duration_seconds": 43.6,
+          "training_only_seconds": 38.39,
+          "training_only_instrumented": true,
+          "etl_seconds": 3.94,
+          "aggregation_seconds": 0.37,
+          "oob_estimation_seconds": 0.89,
+          "throughput_trees_per_s": 0.92,
+          "throughput_trees_per_s_training_only": 1.04,
+          "speedup": 1.0,
+          "speedup_training_only": 1.0,
+          "parallel_efficiency_training_only": 1.0
         },
         "inference": {
-          "duration_seconds": 236.94,
-          "throughput_samples_per_s": 84.41,
+          "duration_seconds": 41.2,
+          "throughput_samples_per_s": 485.43,
           "speedup": 1.0
         },
         "accuracy_metrics": {
-          "mse": 126.29966492792666,
-          "rmse": 11.238312370099287,
-          "mae": 8.78140646927323,
-          "r2": 0.9873432882780585,
+          "mse": 188.6659611718076,
+          "rmse": 13.735572837410444,
+          "mae": 10.267794218916546,
+          "r2": 0.981093451960801,
           "testing_set_size": 20000
         }
       },
       "workers_3": {
         "training": {
-          "duration_seconds": 70.39,
-          "throughput_trees_per_s": 1.42,
-          "speedup": 4.64
+          "duration_seconds": 17.88,
+          "training_only_seconds": 16.63,
+          "training_only_instrumented": true,
+          "etl_seconds": 0.0,
+          "aggregation_seconds": 0.46,
+          "oob_estimation_seconds": 0.7,
+          "throughput_trees_per_s": 2.24,
+          "throughput_trees_per_s_training_only": 2.4,
+          "speedup": 2.44,
+          "speedup_training_only": 2.31,
+          "parallel_efficiency_training_only": 0.769
         },
         "inference": {
-          "duration_seconds": 68.97,
-          "throughput_samples_per_s": 289.96,
-          "speedup": 3.44
+          "duration_seconds": 8.79,
+          "throughput_samples_per_s": 2276.07,
+          "speedup": 4.69
         },
         "accuracy_metrics": {
-          "mse": 126.29966492792666,
-          "rmse": 11.238312370099287,
-          "mae": 8.78140646927323,
-          "r2": 0.9873432882780585,
-          "testing_set_size": 20000
-        }
-      },
-      "workers_5": {
-        "training": {
-          "duration_seconds": 58.33,
-          "throughput_trees_per_s": 1.71,
-          "speedup": 5.6
-        },
-        "inference": {
-          "duration_seconds": 39.55,
-          "throughput_samples_per_s": 505.72,
-          "speedup": 5.99
-        },
-        "accuracy_metrics": {
-          "mse": 126.29966492792666,
-          "rmse": 11.238312370099287,
-          "mae": 8.781406469273232,
-          "r2": 0.9873432882780585,
-          "testing_set_size": 20000
-        }
-      },
-      "workers_7": {
-        "training": {
-          "duration_seconds": 50.2,
-          "throughput_trees_per_s": 1.99,
-          "speedup": 6.51
-        },
-        "inference": {
-          "duration_seconds": 20.33,
-          "throughput_samples_per_s": 983.76,
-          "speedup": 11.65
-        },
-        "accuracy_metrics": {
-          "mse": 126.29966492792666,
-          "rmse": 11.238312370099287,
-          "mae": 8.781406469273232,
-          "r2": 0.9873432882780585,
+          "mse": 188.6659611718076,
+          "rmse": 13.735572837410444,
+          "mae": 10.267794218916546,
+          "r2": 0.981093451960801,
           "testing_set_size": 20000
         }
       }

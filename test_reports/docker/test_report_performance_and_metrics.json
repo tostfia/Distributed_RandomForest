@@ -3,62 +3,24 @@
     "scenario_description": "Valutazione delle prestazioni pure di addestramento in esecuzione local.",
     "status": "SUCCESS",
     "execution_mode": "local",
-    "duration_seconds": 31.2336,
+    "duration_seconds": 22.8384,
     "timing_breakdown": {
-      "etl_seconds": 0.0,
-      "training_only_seconds": 0.0,
-      "aggregation_seconds": 0.0,
-      "oob_estimation_seconds": 0.0,
+      "etl_seconds": 3.6177,
+      "training_only_seconds": 18.0277,
+      "aggregation_seconds": 0.5566,
+      "oob_estimation_seconds": 0.6327,
       "_NOTA": "training_only_seconds e' il termine confrontabile con la baseline (T_seq monocore / T_1node multicore). duration_seconds include anche ETL, aggregazione e stima OOB, che la baseline non esegue.",
-      "unaccounted_seconds": 31.2336
+      "unaccounted_seconds": 0.0037
     },
-    "trees_built": 30,
-    "throughput_trees_per_sec": 0.9605,
-    "throughput_trees_per_sec_training_only": 0,
+    "trees_built": 40,
+    "throughput_trees_per_sec": 1.7514,
+    "throughput_trees_per_sec_training_only": 2.2188,
     "model_accuracy_metrics": {
-      "accuracy": 0.989295896863766,
-      "precision": 0.994739267337378,
-      "recall": 0.9421713038734315,
-      "f1_score": 0.967741935483871,
-      "auc": 0.9873853022468722,
-      "confusion_matrix": [
-        [
-          133708,
-          137
-        ],
-        [
-          1590,
-          25905
-        ]
-      ],
-      "classification_report": {
-        "0": {
-          "precision": 0.9882481633135745,
-          "recall": 0.9989764279577122,
-          "f1-score": 0.9935833367392055,
-          "support": 133845.0
-        },
-        "1": {
-          "precision": 0.994739267337378,
-          "recall": 0.9421713038734315,
-          "f1-score": 0.967741935483871,
-          "support": 27495.0
-        },
-        "accuracy": 0.989295896863766,
-        "macro avg": {
-          "precision": 0.9914937153254763,
-          "recall": 0.9705738659155718,
-          "f1-score": 0.9806626361115383,
-          "support": 161340.0
-        },
-        "weighted avg": {
-          "precision": 0.9893543546184863,
-          "recall": 0.989295896863766,
-          "f1-score": 0.9891795352794596,
-          "support": 161340.0
-        }
-      },
-      "testing_set_size": 161340
+      "mse": 188.6659611718076,
+      "rmse": 13.735572837410444,
+      "mae": 10.267794218916546,
+      "r2": 0.981093451960801,
+      "testing_set_size": 20000
     }
   }
 }

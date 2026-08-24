@@ -2,9 +2,9 @@
   "orchestrator_failover": {
     "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
     "status": "SUCCESS",
-    "original_leader": "orchestrator-federato-testing",
+    "original_leader": "orchestrator-centralizzato-testing",
     "recovered_by": "Master-2-Standby",
-    "duration_seconds": 496.1347163820001,
-    "trees_built": 16
+    "duration_seconds": 462.519081472994,
+    "trees_built": 40
   }
 }

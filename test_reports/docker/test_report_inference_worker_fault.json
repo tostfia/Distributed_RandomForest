@@ -3,12 +3,13 @@
     "scenario_description": "Crash improvviso Worker su thread/processi Python locali durante l'inferenza.",
     "execution_mode": "centralized",
     "status": "SUCCESS",
-    "duration_seconds": 20.71,
+    "duration_seconds": 9.68,
     "accuracy_metrics": {
-      "mse": 126.29966492792668,
-      "rmse": 11.238312370099289,
-      "mae": 8.781406469273232,
-      "r2": 0.9873432882780585
-    }
+      "mse": 188.6659611718076,
+      "rmse": 13.735572837410444,
+      "mae": 10.267794218916546,
+      "r2": 0.981093451960801
+    },
+    "fault_actually_triggered": false
   }
 }

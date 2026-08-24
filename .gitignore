@@ -25,17 +25,7 @@ __pycache__/
 outputs_baseline/*.pkl
 
 # === DATI LOCALI / DATABASE FINTO ===
-# I JSON del DynamoDB finto vivono in data/db_files/ e in .local_storage/
-# (quest'ultima già ignorata per intero più sotto): li escludiamo in modo
-# MIRATO invece che con un '*.json' globale.
-#
-# Il pattern globale precedente escludeva da Git anche file di progetto
-# essenziali — in primis src/testing/test_config.json e i manifesti
-# outputs_baseline/config_*.json — che finivano comunque nell'immagine Docker
-# (.dockerignore non li filtra) ma non nel repository: chi clonava il progetto
-# si ritrovava senza la configurazione dei test.
 data/db_files/
-
 dataset_cache/
 
 # Escludi i dataset CSV (sia il dataset originale che quello campionato)
@@ -68,13 +58,10 @@ env/
 !.local_storage/.gitkeep
 
 # Ignora i file di modello pesanti (.pkl) ma tieni la cartella
-# (era '!.saved_models/.gitkeep', con un punto di troppo: l'eccezione non ha
-#  mai funzionato e la cartella non veniva preservata)
 saved_models/*
 !saved_models/.gitkeep
 
 # Se hai la cartella dei dati sintetici, ignora i CSV giganti
-# (stesso refuso corretto: era '!.synthetic/.gitkeep')
 synthetic/*
 !synthetic/.gitkeep
 !synthetic/*.json
