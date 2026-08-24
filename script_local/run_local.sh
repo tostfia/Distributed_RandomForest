@@ -38,12 +38,78 @@ if ! [[ "$NUM_ORCHESTRATORS" =~ ^[1-2]$ ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------
+# Caricamento del .env
+# ---------------------------------------------------------------------
+#
+# VERSIONE PRECEDENTE:
+#
+#     export "$(echo "$line" | tr -d ' ')"
+#
+# 'tr -d " "' cancella TUTTI gli spazi della riga, non solo quelli attorno
+# all'uguale. Conseguenze concrete su questo progetto:
+#
+#   1) qualunque valore contenente spazi veniva silenziosamente corrotto. Il
+#      percorso del progetto stesso ne contiene uno
+#      ("~/Progetto SDCC-ML/Distributed_RandomForest"), quindi una riga come
+#
+#          DATASET_LOCAL_PATH=/home/gaia/Progetto SDCC-ML/dataset_cache
+#
+#      diventava ".../ProgettoSDCC-ML/dataset_cache": una cartella che non
+#      esiste, con un FileNotFoundError che sembra un errore di battitura
+#      dell'utente e non dello script;
+#
+#   2) le virgolette non venivano rimosse: VAR="valore" esportava il valore
+#      CON gli apici, e i confronti in Python fallivano contro la stringa nuda;
+#
+#   3) le righe con 'export ' davanti, i commenti indentati e le terminazioni
+#      di riga Windows (CRLF) non erano gestiti.
+#
+# Qui chiave e valore vengono separati al PRIMO '=' e trattati in modo diverso:
+# dalla chiave gli spazi si tolgono davvero (una variabile d'ambiente non può
+# contenerne), dal valore si tolgono solo quelli ai bordi. Il contenuto resta
+# intatto.
+# ---------------------------------------------------------------------
 if [ -f .env ]; then
-    while read -r line || [ -n "$line" ]; do
-        # Ignora commenti e righe vuote
-        [[ "$line" =~ ^#.*$ ]] && continue
-        [[ -z "$line" ]] && continue
-        export "$(echo "$line" | tr -d ' ')"
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Terminazioni di riga Windows: senza questo, l'ultimo carattere del
+        # valore sarebbe un \r invisibile.
+        line="${line%$'\r'}"
+
+        # Commenti, anche indentati (la versione precedente riconosceva solo
+        # quelli che iniziavano a colonna 1).
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Righe vuote o composte da soli spazi.
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+
+        # Righe senza '=': non sono assegnazioni, si ignorano invece di
+        # esportare qualcosa di malformato.
+        [[ "$line" != *=* ]] && continue
+
+        # Prefisso 'export ' opzionale, dopo aver tolto l'indentazione.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line#export }"
+
+        key="${line%%=*}"
+        value="${line#*=}"
+
+        # La CHIAVE non può contenere spazi: qui toglierli è corretto.
+        key="${key//[[:space:]]/}"
+        [[ -z "$key" ]] && continue
+
+        # Dal VALORE si tolgono solo gli spazi ai bordi.
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+
+        # Rimozione di UNA coppia di apici esterni, se presente.
+        if [[ ${#value} -ge 2 && "$value" == \"*\" ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ ${#value} -ge 2 && "$value" == \'*\' ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+
+        export "$key=$value"
     done < .env
 else
     echo "[ERRORE] File .env non trovato!"
@@ -82,7 +148,7 @@ for ((i=1; i<=NUM_ORCHESTRATORS; i++)); do
     echo "[START] Avvio Istanza Orchestratore #$i..."
     # Modificato: include anche la cartella /src nel PYTHONPATH
     $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; export ORCHESTRATOR_INDEX=$i; python -m src.master.orchestrator.main; exec bash"
-    sleep 1 
+    sleep 1
 done
 
 sleep 2
@@ -92,7 +158,7 @@ for ((i=1; i<=NUM_WORKERS; i++)); do
     WORKER_NAME=$(printf "Worker-Locale-%02d" $i)
     PORT=$((PORT_BASE + i - 1))
     echo "[START] Avvio $WORKER_NAME sulla porta $PORT..."
-    
+
     # Modificato: include anche la cartella /src nel PYTHONPATH
     $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; python \"${ROOT_DIR}/worker_supervisor.py\" -- python -m src.worker.main $WORKER_NAME $PORT ; exec bash"
 done
