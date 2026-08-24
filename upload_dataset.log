@@ -1,0 +1,2 @@
+nohup: ignoring input
+fatal error: An error occurred (NoSuchBucket) when calling the ListObjectsV2 operation: The specified bucket does not exist
