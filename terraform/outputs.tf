@@ -23,6 +23,11 @@ output "training_mode" {
   value       = var.training_mode
 }
 
+output "api_gateway_endpoint" {
+  description = "URL base dell'API Gateway. Da usare come API_GATEWAY_URL nel .env locale."
+  value       = aws_apigatewayv2_api.mljobs.api_endpoint
+}
+
 output "worker_service_names" {
   description = "Nomi dei Service worker creati (dipende dalla modalità)."
   value = var.training_mode == "federated" ? [
@@ -43,6 +48,7 @@ output "next_steps" {
          DATASETS_BUCKET_NAME=${aws_s3_bucket.datasets.bucket}
          AWS_DEFAULT_REGION=${var.aws_region}
          NUM_WORKERS=${var.num_workers}
+         API_GATEWAY_URL=${aws_apigatewayv2_api.mljobs.api_endpoint}
 
     2. Se training_mode=federated e non l'hai già fatto, esegui il provisioning
        degli shard PRIMA di sottomettere un job:
