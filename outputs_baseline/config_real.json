@@ -87,8 +87,8 @@
   ],
   "federated_partitioning": {
     "strategy": "iid",
-    "alpha": null,
-    "tree_allocation": "proportional"
+    "alpha": 0.5,
+    "tree_allocation": "equal"
   },
   "hyperparameters": {
     "n_estimators": 80,

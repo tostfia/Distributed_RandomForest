@@ -12,10 +12,10 @@ FROM python:3.10-slim AS builder
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
     /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Nota: nessuna libreria in requirements.txt richiede compilazione da sorgente
+# né dipende da PostgreSQL (libpq), quindi non installiamo gcc/libpq-dev qui.
+# Se in futuro aggiungete una libreria che richiede build da sorgente
+# (es. psycopg2 non-binary), reintroducete gcc + libpq-dev solo per quel caso.
 
 # Ambiente virtuale isolato: più facile da copiare "in blocco" nello stage finale
 RUN python -m venv /opt/venv
@@ -26,7 +26,14 @@ COPY requirements.txt .
 
 # --prefer-binary: forza pip a preferire le wheel precompilate quando disponibili,
 # evitando build da sorgente (spesso la causa principale di layer enormi)
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+# --timeout/--retries: la rete verso PyPI in questo ambiente è sia lenta che
+# instabile (le connessioni cadono a metà scaricamento, non solo lente), quindi
+# alziamo molto il timeout di lettura e il numero di tentativi per evitare
+# ReadTimeoutError su pacchetti grandi (es. pandas, scikit-learn, numpy)
+ENV PIP_DEFAULT_TIMEOUT=180
+RUN pip install --no-cache-dir --prefer-binary \
+    --timeout 180 --retries 15 \
+    -r requirements.txt
 
 # =====================================================================
 # STAGE 2: immagine finale — solo runtime, niente compilatori
@@ -37,7 +44,6 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.
     /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
     iproute2 \
     libcap2-bin \
     sudo \
