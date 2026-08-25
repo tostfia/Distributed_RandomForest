@@ -675,7 +675,7 @@ def handle_baseline_selection():
     print("\n=== PREPARAZIONE BASELINE LOCALE ===")
     
     print("Seleziona la sorgente dati per il calcolo della baseline:")
-    print("  [1] Esegui su Dataset Reale (1% probabilistic sampling)")
+    print("  [1] Esegui su Dataset Reale (Probabilistic Sampling)")
     print("  [2] Esegui su Dataset Sintetico (Stress Test)")
     choice = get_input("  Scelta [Default: 1]: ", "1")
     

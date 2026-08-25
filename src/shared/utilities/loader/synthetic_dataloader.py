@@ -54,7 +54,7 @@ class SyntheticDataLoader(DatasetLoader):
         self.n_samples = n_samples if n_samples is not None else config.get("n_samples", 300000)
         self.n_features = n_features if n_features is not None else config.get("n_features", 30)
         self.random_seed = random_seed
-        self.filename = filename if (filename := config.get("filename")) is not None else "synthetic_dataset.csv"
+        self.filename = filename if (filename := config.get("filename")) is not None else f"synthetic_dataset_{self.task}.csv"
         self.output_dir = output_dir if output_dir is not None else config.get("output_dir", "synthetic/")
 
         if self.task == "classification":

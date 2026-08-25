@@ -29,7 +29,7 @@ class CICIDSPreprocessor:
 
     def binarize_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        FASE 1 DI COLAB: Rimozione righe spurie e binarizzazione del target (Benign=0, rest=1).
+        Rimozione righe spurie e binarizzazione del target (Benign=0, rest=1).
         Eseguire sul dataset intero prima dello split per evitare crash sulle classi rare.
         """
         print("Pre-binarizzazione Target CIC-IDS2018...")
@@ -60,7 +60,7 @@ class CICIDSPreprocessor:
 
     def process(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        FASE 3 E 4 DI COLAB: Rimozione metadati e sanificazione NaN/inf.
+        Rimozione metadati e sanificazione NaN/inf.
         Da eseguire in modo indipendente sulle singole fette (Train e Test) dopo lo split.
         """
         df = df.copy()
