@@ -86,7 +86,7 @@
   ],
   "federated_partitioning": {
     "strategy": "iid",
-    "alpha": 0.5,
+    "alpha": null,
     "tree_allocation": "equal"
   },
   "hyperparameters": {

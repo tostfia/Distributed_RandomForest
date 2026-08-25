@@ -120,3 +120,7 @@ Inoltre, bisogna installare Terraform così che applicando Infrastructure as A C
 2. cd /tmp && curl -O https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
 3. unzip terraform_1.9.8_linux_amd64.zip
 4. sudo mv terraform /usr/local/bin/
+
+Per fare upload del dataset su s3 dopo aver fatto il deploy tramite terraform:
+chmod +x upload_dataset.sh
+e poi ./upload_dataset.sh
