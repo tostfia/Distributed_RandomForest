@@ -162,11 +162,6 @@ def analyze_n_estimators(X, y, tuned_hp):
         elapsed = time.perf_counter() - start
 
         oob_acc = rf.oob_score_
-        # Stesso fix di run_baseline.py/oob_hyperparameter_search (corretto
-        # due volte: sklearn riempie le righe senza copertura OOB di ZERI su
-        # tutte le classi, non NaN — verificato sul codice sorgente).
-        # oob_score_ (sopra) è già corretto: lo calcola sklearn internamente
-        # gestendo il caso correttamente.
         oob_decision = rf.oob_decision_function_
         valid_mask = oob_decision.sum(axis=1) != 0
         n_missing_oob = int((~valid_mask).sum())

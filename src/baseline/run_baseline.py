@@ -5,8 +5,8 @@ import numpy as np
 import pickle
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import RandomizedSearchCV, ParameterSampler, train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix, roc_curve
+from sklearn.model_selection import ParameterSampler, train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix
 from src.shared.config import SystemConfig
 
 # Import delle utility condivise e del loader con campionamento probabilistico
@@ -237,15 +237,7 @@ def run_baseline():
     SYNTHETIC_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_synthetic.json")
     dataset_type = "real"
     user_tree_type = "classifier"
-    # Default storico: partizionamento IID, invariato. Sovrascritti sotto se il
-    # boot config specifica una strategia non-IID per l'esperimento federato.
-    partition_strategy = "iid"
-    federated_alpha = 0.5
-    # Default: allocazione proporzionale alla dimensione dello shard (formula
-    # di FedAvg n_k/n applicata al numero di alberi). Irrilevante per il
-    # centralizzato, sovrascritta sotto se il boot config specifica "equal".
-    tree_allocation_strategy = "proportional"
-    
+
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
 
@@ -264,19 +256,6 @@ def run_baseline():
           "'outputs_baseline/config_real.json'")
     scelta_tuning = input("  Scelta [Default: 1]: ").strip() or "1"
     SKIP_TUNING = (scelta_tuning == "2")
-
-    # ---------------------------------------------------------
-    # SCELTA 2: includere la sezione 'federated_partitioning' nel manifesto.
-    # Utile per disattivarla quando si sta lavorando solo sul centralizzato
-    # e non si vuole propagare/mantenere allineata una configurazione
-    # federata non pertinente al run corrente.
-    # ---------------------------------------------------------
-    print("\nIncludere la sezione di partizionamento federato nel manifesto "
-          "('federated_partitioning')?")
-    print("  [1] Sì, includila (default) — necessaria se poi lanci un training federato")
-    print("  [2] No, omettila — solo per esperimenti centralizzati")
-    scelta_federato = input("  Scelta [Default: 1]: ").strip() or "1"
-    INCLUDE_FEDERATED_SECTION = (scelta_federato != "2")
 
     # ---------------------------------------------------------
     # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO 
@@ -305,14 +284,6 @@ def run_baseline():
 
                 dataset_type = boot_cfg.get("dataset_type", "real")
                 user_tree_type = boot_cfg.get("tree_type", "classifier")
-                # Iperparametro dell'ESPERIMENTO (partizionamento tra worker federati),
-                # non del modello: registrato qui nel manifesto così che
-                # provision_local_shards.py / provision_federated_shards.py possano
-                # essere lanciati con la stessa strategia usata per generare la
-                # baseline, invece di doverla ripetere a mano.
-                partition_strategy = boot_cfg.get("partition_strategy", "iid")
-                federated_alpha = boot_cfg.get("alpha", 0.5)
-                tree_allocation_strategy = boot_cfg.get("tree_allocation_strategy", "proportional")
                 if boot_cfg:
                     print(f" [INFO] Configurazione di boot letta con successo da '{BOOT_CONFIG_PATH}'")
             except Exception as e:
@@ -654,15 +625,6 @@ def run_baseline():
             "importance_threshold": IMPORTANCE_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
-            # Iperparametro dell'ESPERIMENTO federato (non del modello): tenuto
-            # separato da "hyperparameters" perché descrive come i dati vengono
-            # ripartiti tra i worker, non l'algoritmo di training. Va passato
-            # tal quale a provision_local_shards.py / provision_federated_shards.py.
-            "federated_partitioning": {
-                "strategy": partition_strategy,
-                "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
-                "tree_allocation": tree_allocation_strategy,
-            },
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),
                 "max_depth": best_params.get("max_depth") ,
@@ -677,9 +639,6 @@ def run_baseline():
                 "random_state": int(RANDOM_SEED)
             }
         }
-        
-        if not INCLUDE_FEDERATED_SECTION:
-            config_data.pop("federated_partitioning", None)
 
         with open(config_path_final, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
@@ -722,11 +681,6 @@ def run_baseline():
             "mode": "distributed",
             "dataset_type": "synthetic",
             "dataset_path": "synthetic",
-            "federated_partitioning": {
-                "strategy": partition_strategy,
-                "alpha": federated_alpha if partition_strategy == "dirichlet" else None,
-                "tree_allocation": tree_allocation_strategy,
-            },
             **dataset_gen_params,
             "feature_eliminata": dizionario_feature["eliminate"],
             "feature_selezionate": dizionario_feature["salvate"],
@@ -737,9 +691,6 @@ def run_baseline():
                 "random_state": int(RANDOM_SEED)
             }
         }
-
-        if not INCLUDE_FEDERATED_SECTION:
-            config_data.pop("federated_partitioning", None)
 
         # 'config_synthetic.json' è il manifesto ATTIVO: è quello letto sia da
         # SyntheticDataLoader (ricetta del dataset) sia dal client
@@ -769,9 +720,6 @@ def run_baseline():
         n_estimators=hp["n_estimators"],
         max_depth=hp["max_depth"],
         min_samples_split=hp["min_samples_split"],
-        # Esplicito e letto dal manifesto invece di affidarsi al default sklearn
-        # (che per il Regressor è 1.0 = nessun subsampling delle feature, cioè
-        # bagging puro, non vero Random Forest).
         max_features=hp.get("max_features", "sqrt" if user_tree_type == "classifier" else 1 / 3),
         bootstrap=hp["bootstrap"],
         n_jobs=1,
@@ -785,9 +733,6 @@ def run_baseline():
         rf_kwargs["criterion"] = hp["criterion"]
 
     if user_tree_type == "classifier":
-        # class_weight è ora presente in hp sia per il ramo reale (tuning
-        # diretto) sia per il ramo sintetico (ereditato da best_hp_reale):
-        # non serve più discriminare per dataset_type.
         rf_kwargs["class_weight"] = hp.get("class_weight")
         tree_clf = RandomForestClassifier(**rf_kwargs)
     else:
