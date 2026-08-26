@@ -30,32 +30,60 @@ def get_input(prompt: str, default: str = "") -> str:
     return user_input if user_input else default
 
 
-def load_federated_partitioning(dataset_type: str = "real") -> dict:
+def ask_federated_partitioning_choices() -> dict:
     """
-    Legge la sezione 'federated_partitioning' dal manifesto della baseline
-    (outputs_baseline/config_{dataset_type}.json) — la STESSA fonte usata per
-    generare gli shard via provision_local_shards.py / provision_federated_shards.py.
+    Chiede interattivamente all'utente la strategia di partizionamento
+    federato tra i worker (e l'allocazione del budget di alberi), con
+    default fissi (IID, alpha=0.5, allocazione proporzionale).
 
-    Letta da qui (dal manifesto) invece che da './.local_storage/config.json'
-    (il boot config), per garantire che il job effettivamente inviato sia
-    sempre coerente con l'ULTIMO manifesto realmente generato da
-    run_baseline(), non con un valore di boot config potenzialmente più
-    vecchio o diverso (es. se la baseline non è stata rilanciata dopo aver
-    cambiato il boot config).
+    NON legge alcun file di configurazione (né config_real.json né altro):
+    è una scelta indipendente fatta ogni volta dal client, sia nel flusso
+    della baseline (handle_baseline_selection) sia in quello del training
+    federato (handle_training), cosicché main.py non dipenda mai dal
+    manifesto generato da run_baseline.py per questi parametri.
 
-    Ritorna sempre {"strategy": "iid", "alpha": None} come fallback sicuro
-    se il manifesto non esiste o non contiene la sezione (es. dataset
-    sintetico, o manifesto generato con una versione precedente dello script).
+    Ritorna un dict {"strategy": str, "alpha": float | None, "tree_allocation": str}.
     """
-    config_path = os.path.join("outputs_baseline", f"config_{dataset_type}.json")
-    if not os.path.exists(config_path):
-        return {"strategy": "iid", "alpha": None}
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("federated_partitioning", {"strategy": "iid", "alpha": None})
-    except (json.JSONDecodeError, IOError):
-        return {"strategy": "iid", "alpha": None}
+    print("\n  Strategia di partizionamento tra i worker per il training FEDERATO:")
+    print("    [1] IID (comportamento storico, shard casuali equilibrati)")
+    print("    [2] Dirichlet (eterogeneità sintetica controllata da alpha)")
+    print("    [3] By day (partizionamento naturale per file/giorno di origine)")
+    partition_choice = get_input("  Scelta [Default: 1]: ", "1")
+    partition_strategy = {"1": "iid", "2": "dirichlet", "3": "by_day"}.get(partition_choice, "iid")
+
+    partition_alpha = None
+    if partition_strategy == "dirichlet":
+        alpha_raw = get_input(
+            "  alpha (piccolo = eterogeneità estrema, es. 0.1; grande = quasi-IID, es. 10) "
+            "[Default: 0.5]: ",
+            "0.5",
+        )
+        try:
+            partition_alpha = float(alpha_raw)
+        except ValueError:
+            print(f"  [ATTENZIONE] Valore non valido ('{alpha_raw}'), uso il default 0.5.")
+            partition_alpha = 0.5
+
+    print(f"  [INFO] Partizionamento federato: {partition_strategy.upper()}"
+          + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else ""))
+    print("  [ATTENZIONE] Questa scelta va replicata ANCHE nello script di provisioning degli shard "
+          "(script_local/provision_local_shards.py o script_aws/provision_federated_shards.py), "
+          "che è uno script separato e non legge questa configurazione automaticamente. "
+          "Usa gli stessi valori: --partition-strategy e --alpha (o le variabili d'ambiente "
+          "PARTITION_STRATEGY/ALPHA), con --force se stai cambiando strategia rispetto a un run precedente.")
+
+    print("\n  Allocazione del budget di alberi tra i worker federati:")
+    print("    [1] Proporzionale alla dimensione dello shard (default, formula FedAvg n_k/n)")
+    print("    [2] Equa (stessa quota a tutti i worker, indipendentemente dai dati posseduti)")
+    allocation_choice = get_input("  Scelta [Default: 1]: ", "1")
+    tree_allocation_strategy = {"1": "proportional", "2": "equal"}.get(allocation_choice, "proportional")
+    print(f"  [INFO] Allocazione alberi: {tree_allocation_strategy.upper()}")
+
+    return {
+        "strategy": partition_strategy,
+        "alpha": partition_alpha,
+        "tree_allocation": tree_allocation_strategy,
+    }
 
 
 def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> Hyperparameters:
@@ -595,14 +623,15 @@ def handle_training():
     # Rilevante SOLO per il training federato su dataset reale: il centralizzato
     # non partiziona mai i dati, e il sintetico non ha un manifesto di
     # partizionamento (ogni worker genera il proprio shard al boot).
+    # Scelta interattiva indipendente: NON legge config_real.json né alcun
+    # manifesto generato da run_baseline.py, esattamente come avviene nel
+    # flusso della baseline (handle_baseline_selection).
     if mode == "federated" and dataset_type == "real":
-        partitioning_info = load_federated_partitioning(dataset_type)
-        partition_strategy = partitioning_info.get("strategy", "iid")
-        partition_alpha = partitioning_info.get("alpha")
-        tree_allocation_strategy = partitioning_info.get("tree_allocation", "proportional")
-        print(f"  [OK] Partizionamento federato dichiarato nel manifesto: {partition_strategy.upper()}"
-              + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else "")
-              + f" | Allocazione alberi: {tree_allocation_strategy.upper()}")
+        print("\n[4bis] Configurazione Partizionamento Federato:")
+        partitioning_info = ask_federated_partitioning_choices()
+        partition_strategy = partitioning_info["strategy"]
+        partition_alpha = partitioning_info["alpha"]
+        tree_allocation_strategy = partitioning_info["tree_allocation"]
     else:
         partition_strategy = "iid"
         partition_alpha = None
@@ -700,37 +729,10 @@ def handle_baseline_selection():
     if dtype == "real":
         print("\n  Strategia di partizionamento tra i worker per il training FEDERATO")
         print("  (nessun effetto sul centralizzato, che non partiziona i dati):")
-        print("    [1] IID (comportamento storico, shard casuali equilibrati)")
-        print("    [2] Dirichlet (eterogeneità sintetica controllata da alpha)")
-        print("    [3] By day (partizionamento naturale per file/giorno di origine)")
-        partition_choice = get_input("  Scelta [Default: 1]: ", "1")
-        partition_strategy = {"1": "iid", "2": "dirichlet", "3": "by_day"}.get(partition_choice, "iid")
-
-        if partition_strategy == "dirichlet":
-            alpha_raw = get_input(
-                "  alpha (piccolo = eterogeneità estrema, es. 0.1; grande = quasi-IID, es. 10) [Default: 0.5]: ",
-                "0.5",
-            )
-            try:
-                federated_alpha = float(alpha_raw)
-            except ValueError:
-                print(f"  [ATTENZIONE] Valore non valido ('{alpha_raw}'), uso il default 0.5.")
-                federated_alpha = 0.5
-
-        print(f"  [INFO] Partizionamento federato: {partition_strategy.upper()}"
-              + (f" (alpha={federated_alpha})" if partition_strategy == "dirichlet" else ""))
-        print("  [ATTENZIONE] Questa scelta va replicata ANCHE nello script di provisioning degli shard "
-              "(script_local/provision_local_shards.py o script_aws/provision_federated_shards.py), "
-              "che è uno script separato e non legge questa configurazione automaticamente. "
-              "Usa gli stessi valori: --partition-strategy e --alpha (o le variabili d'ambiente "
-              "PARTITION_STRATEGY/ALPHA), con --force se stai cambiando strategia rispetto a un run precedente.")
-
-        print("\n  Allocazione del budget di alberi tra i worker federati:")
-        print("    [1] Proporzionale alla dimensione dello shard (default, formula FedAvg n_k/n)")
-        print("    [2] Equa (stessa quota a tutti i worker, indipendentemente dai dati posseduti)")
-        allocation_choice = get_input("  Scelta [Default: 1]: ", "1")
-        tree_allocation_strategy = {"1": "proportional", "2": "equal"}.get(allocation_choice, "proportional")
-        print(f"  [INFO] Allocazione alberi: {tree_allocation_strategy.upper()}")
+        partitioning_info = ask_federated_partitioning_choices()
+        partition_strategy = partitioning_info["strategy"]
+        federated_alpha = partitioning_info["alpha"] if partitioning_info["alpha"] is not None else 0.5
+        tree_allocation_strategy = partitioning_info["tree_allocation"]
 
     boot_config = {
         "dataset_type": dtype,
