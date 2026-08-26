@@ -20,15 +20,13 @@ Produce due evidenze:
      della variabilità naturale del target").
 
 Uso:
-    python analyze_regression_reference_config.py
+    python -m src.baseline.analyze_regression_reference_config
 """
-import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_regression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score, mean_squared_error
 
 # Stessi valori di run_baseline.py / SyntheticDataLoader per la regressione,
 # TRANNE n_samples: qui usiamo un sottocampione (30.000 invece di 300.000)
@@ -43,8 +41,6 @@ N_FEATURES = 30
 N_INFORMATIVE_REG = int(N_FEATURES * 0.5)  # 15, come in run_baseline.py
 NOISE = 10.0
 
-# Config di riferimento (SYNTHETIC_REGRESSOR_REFERENCE_HP), tranne n_estimators
-# che qui è la variabile indipendente dell'analisi.
 FIXED_RF_KWARGS = dict(
     max_depth=None,
     min_samples_split=2,
@@ -58,7 +54,6 @@ FIXED_RF_KWARGS = dict(
 )
 
 N_ESTIMATORS_GRID = [5, 10, 20, 30, 40, 60, 80, 120, 160, 200]
-
 
 def analyze_n_estimators(X, y):
     print("=" * 70)
