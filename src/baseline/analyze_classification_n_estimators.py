@@ -1,32 +1,37 @@
 """
-Diagnostica per giustificare gli iperparametri EFFETTIVAMENTE scelti dal
-tuning (RandomizedSearchCV) per la classificazione sul dataset reale.
+Diagnostica per giustificare gli iperparametri EFFETTIVAMENTE usati nella
+classificazione sul dataset reale.
 
-Importante: questo script NON sceglie un valore al posto tuo. Legge il
-n_estimators che il tuning ha selezionato in 'outputs_baseline/config_real.json'
-(prodotto da run_baseline.py) e mostra dove cade quel valore sulla curva di
-stabilizzazione dell'errore OOB — l'evidenza che porti al professore per
-giustificare la scelta è quella che leggi dall'output, non una decisione presa
-da questo script.
+Importante: questo script NON sceglie un valore al posto tuo. Legge
+n_estimators da 'outputs_baseline/config_real.json' (prodotto da
+run_baseline.py) e mostra dove cade quel valore sulla curva di
+stabilizzazione dell'errore OOB. NOTA: dopo l'introduzione
+dell'override deliberato in run_baseline.py (n_estimators impostato a un
+valore diverso da quello grezzo trovato dalla ricerca OOB, sulla base di
+QUESTO stesso script), il valore letto qui potrebbe non essere l'output
+originale del tuning ma una scelta successiva — per questo il grafico e la
+tabella etichettano il valore come "presente in config_real.json", non più
+genericamente "scelto dal tuning": è un'etichetta neutra, corretta in
+entrambi i casi.
 
 Se config_real.json non esiste ancora (tuning non ancora lanciato), lo script
 gira comunque e produce la curva "neutra" su una griglia di default, così puoi
-anche usarlo PRIMA del tuning per decidere il range della griglia di ricerca
-di RandomizedSearchCV, invece che solo dopo per giustificare il risultato.
+anche usarlo PRIMA del tuning per decidere il range della griglia di ricerca,
+invece che solo dopo per giustificare il risultato.
 
 Cosa fa:
   1. Riproduce la stessa pipeline di run_baseline.py fino al train set finale
      (stesso sample_fraction, stesso binarize+split+preprocess+feature
      selection via OOB permutation importance).
-  2. Se disponibile, legge n_estimators (e gli altri iperparametri tunati) da
+  2. Se disponibile, legge n_estimators (e gli altri iperparametri) da
      config_real.json, per addestrare la foresta di diagnostica con la STESSA
-     configurazione scelta dal tuning (a parte n_estimators, che è la
+     configurazione presente nel manifesto (a parte n_estimators, che è la
      variabile indipendente dell'analisi).
   3. Addestra una foresta con oob_score=True su una griglia di n_estimators
-     che include sempre il valore tunato (se presente), misurando OOB
-     accuracy e OOB F1.
+     che include sempre il valore letto dal manifesto (se presente),
+     misurando OOB accuracy e OOB F1.
   4. Stampa una tabella con i delta tra un valore e il successivo, e marca
-     esplicitamente la riga corrispondente al valore scelto dal tuning.
+     esplicitamente la riga corrispondente al valore presente nel manifesto.
   5. Salva un grafico (oob_accuracy_f1_vs_n_estimators_classification.png).
 
 Uso:
@@ -53,11 +58,6 @@ TEST_SIZE = 0.2
 SAMPLE_FRACTION = 0.05
 TARGET_COL = "Label"
 CONFIG_REAL_PATH = os.path.join("outputs_baseline", "config_real.json")
-
-# Griglia di default usata se config_real.json non esiste ancora (utile per
-# esplorare il range PRIMA di lanciare il tuning). Se invece config_real.json
-# esiste, il valore tunato viene aggiunto automaticamente alla griglia, anche
-# se non è uno di questi.
 DEFAULT_GRID = [5, 10, 20, 30, 40, 60, 80, 120, 160, 200]
 
 
@@ -178,7 +178,7 @@ def analyze_n_estimators(X, y, tuned_hp):
                   f"({n_missing_oob/len(y)*100:.2f}%) senza copertura OOB, escluse dall'F1.")
 
         delta = "" if prev_f1 is None else f"{oob_f1 - prev_f1:+.5f}"
-        marker = "  <-- VALORE SCELTO DAL TUNING" if n == tuned_n_estimators else ""
+        marker = "  <-- VALORE IN config_real.json" if n == tuned_n_estimators else ""
         print(f"  {n:<14} | {oob_acc:<13.5f} | {oob_f1:<10.5f} | {delta:<10} | {elapsed:8.2f}{marker}")
         results.append((n, oob_acc, oob_f1, elapsed))
         prev_f1 = oob_f1
@@ -201,7 +201,7 @@ def analyze_n_estimators(X, y, tuned_hp):
     ax1.plot(grid_vals, f1s, marker='s', color='#dc2626', linewidth=2, label='OOB F1')
     if tuned_n_estimators:
         ax1.axvline(x=tuned_n_estimators, color='#16a34a', linestyle='--', linewidth=1.5,
-                    label=f'n_estimators={tuned_n_estimators} (scelto dal tuning)')
+                    label=f'n_estimators={tuned_n_estimators} (valore in config_real.json)')
     ax1.set_xlabel("n_estimators")
     ax1.set_ylabel("Score OOB")
     ax1.set_title("Stabilizzazione OOB al crescere di n_estimators\n"

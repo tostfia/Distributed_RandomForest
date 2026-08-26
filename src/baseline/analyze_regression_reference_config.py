@@ -23,6 +23,9 @@ Uso:
     python analyze_regression_reference_config.py
 """
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from sklearn.datasets import make_regression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_squared_error
@@ -85,6 +88,25 @@ def analyze_n_estimators(X, y):
     print("  già piccolo (es. <0.001-0.002) attorno a 40, la scelta è difendibile come")
     print("  'punto di stabilizzazione della curva OOB, oltre il quale il guadagno")
     print("  marginale non giustifica il tempo di training aggiuntivo'.")
+
+    grid_vals = [r[0] for r in results]
+    r2s = [r[1] for r in results]
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.8), dpi=150)
+    ax.plot(grid_vals, r2s, marker='o', color='#2563eb', linewidth=2, label='OOB R²')
+    ax.axvline(x=80, color='#16a34a', linestyle='--', linewidth=1.5,
+               label='n_estimators=80 (config attuale)')
+    ax.set_xlabel("n_estimators")
+    ax.set_ylabel("OOB R²")
+    ax.set_title("Stabilizzazione dell'errore OOB al crescere di n_estimators\n"
+                  "(Random Forest Regressor, dataset sintetico di riferimento)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='lower right')
+    fig.tight_layout()
+    out_path = "oob_r2_vs_n_estimators_regression.png"
+    fig.savefig(out_path)
+    print(f"\n  Grafico salvato in: {out_path}")
+
     return results
 
 

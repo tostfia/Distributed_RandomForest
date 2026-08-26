@@ -37,6 +37,9 @@ dataset reali di dimensioni non piccole può richiedere alcuni minuti totali
 import os
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
@@ -148,6 +151,8 @@ def analyze_rf_n_estimators_stability(train_df):
     print("=" * 78)
     print(f"  {'rf_n_estimators':<17} | {'Spearman rho':<14} | {'Jaccard scartate':<17} | {'N. scartate'}")
     print("  " + "-" * 68)
+    rho_list = []
+    jac_list = []
     for n in RF_N_ESTIMATORS_GRID:
         series = importance_by_n[n]
         # Allinea sugli stessi indici (stesse feature candidate in tutti i run)
@@ -155,6 +160,8 @@ def analyze_rf_n_estimators_stability(train_df):
         rho, _ = spearmanr(series.loc[common_idx], reference.loc[common_idx])
         dropped = set(series[series <= CHOSEN_THRESHOLD].index)
         jac = jaccard(dropped, reference_dropped)
+        rho_list.append(rho)
+        jac_list.append(jac)
         marker = "  <-- config attuale" if n == CHOSEN_RF_N_ESTIMATORS else ""
         marker += "  (riferimento)" if n == REFERENCE_N_ESTIMATORS else ""
         print(f"  {n:<17} | {rho:<14.4f} | {jac:<17.4f} | {len(dropped)}{marker}")
@@ -165,6 +172,25 @@ def analyze_rf_n_estimators_stability(train_df):
     print(f"  l'insieme di feature scartate a soglia {CHOSEN_THRESHOLD} è già lo stesso")
     print(f"  del riferimento a {REFERENCE_N_ESTIMATORS} alberi: usare rf_n_estimators="
           f"{CHOSEN_RF_N_ESTIMATORS} non cambierebbe quali feature vengono eliminate.")
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.8), dpi=150)
+    ax.plot(RF_N_ESTIMATORS_GRID, rho_list, marker='o', color='#2563eb', linewidth=2,
+             label='Spearman rho (ranking vs riferimento)')
+    ax.plot(RF_N_ESTIMATORS_GRID, jac_list, marker='s', color='#dc2626', linewidth=2,
+             label='Jaccard (feature scartate vs riferimento)')
+    ax.axvline(x=CHOSEN_RF_N_ESTIMATORS, color='#16a34a', linestyle='--', linewidth=1.5,
+               label=f'rf_n_estimators={CHOSEN_RF_N_ESTIMATORS} (config attuale)')
+    ax.set_xlabel("rf_n_estimators (foresta preliminare)")
+    ax.set_ylabel("Similarità col riferimento (400 alberi)")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Stabilità del ranking di importanza al crescere di rf_n_estimators\n"
+                  "(OOB permutation importance, dataset reale CICIDS)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='lower right')
+    fig.tight_layout()
+    stability_plot_path = "permutation_importance_rf_n_estimators_stability.png"
+    fig.savefig(stability_plot_path)
+    print(f"\n  Grafico salvato in: {stability_plot_path}")
 
     return importance_by_n, reference
 
@@ -213,12 +239,27 @@ def analyze_importance_threshold(reference_importance):
             status = "SCARTATA" if val <= CHOSEN_THRESHOLD else "TRATTENUTA"
             print(f"    {feat:<40} {val:+7.2f}%  [{status}]")
 
+    fig, ax = plt.subplots(figsize=(7.5, 4.8), dpi=150)
+    ax.hist(reference_importance.values, bins=bins, color='#2563eb', alpha=0.75, edgecolor='white')
+    ax.axvline(x=CHOSEN_THRESHOLD, color='#dc2626', linestyle='--', linewidth=1.5,
+               label=f'importance_threshold={CHOSEN_THRESHOLD} (soglia scelta)')
+    ax.set_xlabel("Importanza OOB (percent increase in misclassification rate)")
+    ax.set_ylabel("Numero di feature")
+    ax.set_title("Distribuzione dell'importanza OOB delle feature\n"
+                  f"(foresta di riferimento, {REFERENCE_N_ESTIMATORS} alberi)")
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='upper right')
+    fig.tight_layout()
+    histogram_plot_path = "permutation_importance_threshold_distribution.png"
+    fig.savefig(histogram_plot_path)
+    print(f"\n  Grafico salvato in: {histogram_plot_path}")
+
 
 def main():
     train_df = prepare_preprocessed_train_set()
     importance_by_n, reference = analyze_rf_n_estimators_stability(train_df)
     analyze_importance_threshold(reference)
-    print("\n[OK] Copia le due tabelle e l'istogramma nella relazione come giustificazione "
+    print("\n[OK] Copia le due tabelle e i due grafici nella relazione come giustificazione "
           "empirica di rf_n_estimators=200 e importance_threshold=0.0.")
 
 

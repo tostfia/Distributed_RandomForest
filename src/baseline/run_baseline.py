@@ -248,7 +248,36 @@ def run_baseline():
     
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
-    
+
+    # ---------------------------------------------------------
+    # SCELTA 1: eseguire il tuning OOB (FASE 2, ~50 fit, costoso) o riusare
+    # gli iperparametri già presenti in un config_real.json esistente
+    # (salta la ricerca, va dritto alla FASE 4 con quegli iperparametri).
+    # Utile per iterare rapidamente su altre parti della pipeline (es.
+    # preprocessing, feature selection, dimensione campione) senza dover
+    # rifare mezz'ora di ricerca ogni volta che non serve.
+    # ---------------------------------------------------------
+    print("\nEseguire il tuning iperparametrico (FASE 2) o riusare gli iperparametri "
+          "già presenti in un manifesto esistente?")
+    print("  [1] Esegui il tuning (default) — ~50 combinazioni via stima OOB, richiede tempo")
+    print("  [2] Salta il tuning — riusa gli iperparametri già presenti in "
+          "'outputs_baseline/config_real.json'")
+    scelta_tuning = input("  Scelta [Default: 1]: ").strip() or "1"
+    SKIP_TUNING = (scelta_tuning == "2")
+
+    # ---------------------------------------------------------
+    # SCELTA 2: includere la sezione 'federated_partitioning' nel manifesto.
+    # Utile per disattivarla quando si sta lavorando solo sul centralizzato
+    # e non si vuole propagare/mantenere allineata una configurazione
+    # federata non pertinente al run corrente.
+    # ---------------------------------------------------------
+    print("\nIncludere la sezione di partizionamento federato nel manifesto "
+          "('federated_partitioning')?")
+    print("  [1] Sì, includila (default) — necessaria se poi lanci un training federato")
+    print("  [2] No, omettila — solo per esperimenti centralizzati")
+    scelta_federato = input("  Scelta [Default: 1]: ").strip() or "1"
+    INCLUDE_FEDERATED_SECTION = (scelta_federato != "2")
+
     # ---------------------------------------------------------
     # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO 
     # ---------------------------------------------------------
@@ -506,53 +535,105 @@ def run_baseline():
     # ---------------------------------------------------------
     # FASE 2: TUNING BASATO SU STIMA OOB (Breiman 2001, Sec. 3.1)
     # ---------------------------------------------------------
-        print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB)...")
-        # 'max_features' fissato a 'sqrt' e non incluso nella ricerca: è la
-        # convenzione standard per la classificazione (equivalente pratico di
-        # int(log2(M)+1) usato da Breiman 2001 per M nel range tipico dei
-        # nostri dati), e Breiman stesso osserva (Sec. 6, Fig. 1) che
-        # l'errore è poco sensibile al valore esatto di F una volta superata
-        # una soglia minima — non è quindi la leva con il maggior impatto
-        # atteso sull'accuratezza. Escluderlo dalla ricerca è una scelta a
-        # priori per contenere lo spazio entro un budget di tempo sostenibile
-        # su CPU.
-        #
-        # bootstrap=False non è più esplorato: la stima OOB (Sec. 3.1, vedi
-        # oob_hyperparameter_search sopra) richiede bootstrap=True per
-        # definizione, ed è proprio il campionamento bootstrap a essere il
-        # tratto costitutivo dell'algoritmo di Breiman (Definition 1.1). Non
-        # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
-        # coerente con l'algoritmo di riferimento del progetto.
-        param_dist = {
-            'n_estimators': [10, 20, 30, 40, 60, 80],
-            'max_depth': [10, 25, None],
-            'min_samples_split': [2, 5, 10],
-            'max_features': ['sqrt'],
-            'criterion': ['gini', 'entropy'],
-            'class_weight': [None, 'balanced'],
-            'bootstrap': [True],
-            'max_samples': [0.5, 0.7, 0.8, 1.0],
-        }
+        if SKIP_TUNING:
+            print("\n>>> FASE 2: SALTATA su richiesta — riuso iperparametri da "
+                  f"'{REAL_CONFIG_PATH}'...")
+            if not os.path.exists(REAL_CONFIG_PATH):
+                raise FileNotFoundError(
+                    f"Hai scelto di saltare il tuning, ma '{REAL_CONFIG_PATH}' non esiste "
+                    f"ancora: serve un manifesto precedente da cui leggere gli iperparametri. "
+                    f"Esegui prima il tuning almeno una volta (Scelta 1)."
+                )
+            with open(REAL_CONFIG_PATH, "r") as f:
+                existing_config = json.load(f)
+            best_params = dict(existing_config["hyperparameters"])
+            print(f"[OK] Iperparametri riusati da '{REAL_CONFIG_PATH}': {best_params}")
+            oob_search_results = None
+            tempo_tuning = 0.0
+            tempo_medio_fit_tuning = 0.0
+        else:
+            print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB)...")
+            # 'max_features' fissato a 'sqrt' e non incluso nella ricerca: è la
+            # convenzione standard per la classificazione (equivalente pratico di
+            # int(log2(M)+1) usato da Breiman 2001 per M nel range tipico dei
+            # nostri dati), e Breiman stesso osserva (Sec. 6, Fig. 1) che
+            # l'errore è poco sensibile al valore esatto di F una volta superata
+            # una soglia minima — non è quindi la leva con il maggior impatto
+            # atteso sull'accuratezza. Escluderlo dalla ricerca è una scelta a
+            # priori per contenere lo spazio entro un budget di tempo sostenibile
+            # su CPU.
+            #
+            # bootstrap=False non è più esplorato: la stima OOB (Sec. 3.1, vedi
+            # oob_hyperparameter_search sopra) richiede bootstrap=True per
+            # definizione, ed è proprio il campionamento bootstrap a essere il
+            # tratto costitutivo dell'algoritmo di Breiman (Definition 1.1). Non
+            # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
+            # coerente con l'algoritmo di riferimento del progetto.
+            param_dist = {
+                'n_estimators': [10, 20, 30, 40, 60, 80],
+                'max_depth': [10, 25, None],
+                'min_samples_split': [2, 5, 10],
+                'max_features': ['sqrt'],
+                'criterion': ['gini', 'entropy'],
+                'class_weight': [None, 'balanced'],
+                'bootstrap': [True],
+                'max_samples': [0.5, 0.7, 0.8, 1.0],
+            }
 
-        # n_iter=50: stesso budget computazionale TOTALE della versione
-        # precedente (n_iter=10 * cv=5 = 50 fit), ma ora ogni combinazione
-        # richiede UN SOLO fit invece di 5 (niente k-fold, vedi
-        # oob_hyperparameter_search) — quindi a parità di tempo si esplorano
-        # 50 combinazioni diverse invece di 10. Lo spazio di ricerca è stato
-        # anche ampliato (n_estimators fino a 80, coerente con la diagnostica
-        # OOB già discussa) proprio perché il budget lo consente.
-        N_ITER_TUNING = 50
-        start_tuning = time.perf_counter()
-        best_params, oob_search_results = oob_hyperparameter_search(
-            X_train, y_train,
-            param_distributions=param_dist,
-            n_iter=N_ITER_TUNING,
-            random_state=RANDOM_SEED,
-            refit_metric="f1",
-        )
-        tempo_tuning = time.perf_counter() - start_tuning
-        print(f"[OK] Tuning completato ({len(oob_search_results)} combinazioni esplorate via OOB). "
-              f"Iperparametri ottimali: {best_params}")
+            # n_iter=50: stesso budget computazionale TOTALE della versione
+            # precedente (n_iter=10 * cv=5 = 50 fit), ma ora ogni combinazione
+            # richiede UN SOLO fit invece di 5 (niente k-fold, vedi
+            # oob_hyperparameter_search) — quindi a parità di tempo si esplorano
+            # 50 combinazioni diverse invece di 10. Lo spazio di ricerca è stato
+            # anche ampliato (n_estimators fino a 80, coerente con la diagnostica
+            # OOB già discussa) proprio perché il budget lo consente.
+            N_ITER_TUNING = 50
+            start_tuning = time.perf_counter()
+            best_params, oob_search_results = oob_hyperparameter_search(
+                X_train, y_train,
+                param_distributions=param_dist,
+                n_iter=N_ITER_TUNING,
+                random_state=RANDOM_SEED,
+                refit_metric="f1",
+            )
+            tempo_tuning = time.perf_counter() - start_tuning
+            print(f"[OK] Tuning completato ({len(oob_search_results)} combinazioni esplorate via OOB). "
+                  f"Iperparametri ottimali: {best_params}")
+            tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
+
+        # ---------------------------------------------------------------
+        # OVERRIDE DELIBERATO: n_estimators
+        #
+        # La ricerca OOB ha trovato n_estimators=80 come ottimo nello spazio
+        # di ricerca CONGIUNTO (7 iperparametri insieme). Una diagnostica
+        # dedicata (analyze_classification_n_estimators.py), che isola
+        # n_estimators tenendo fissi gli altri iperparametri scelti dal
+        # tuning, mostra che il guadagno da 30 a 80 alberi è statisticamente
+        # trascurabile:
+        #   n_estimators=30 -> OOB F1=0.96662, tempo di fit=25.07s
+        #   n_estimators=80 -> OOB F1=0.96669, tempo di fit=64.92s
+        # Delta F1 = 0.00007 (quarta cifra decimale) a fronte di un fit
+        # 2.6x più lento. Per l'ampio numero di configurazioni sperimentali
+        # successive (scalabilità, due dimensioni, federato — vedi piano
+        # esperimenti), si adotta n_estimators=30 ovunque (baseline inclusa,
+        # per restare "a parità di condizioni" col distribuito, come
+        # indicato dal professore nel ricevimento SDCC), riducendo il costo
+        # computazionale complessivo senza perdita misurabile di qualità.
+        #
+        # Applicato DOPO entrambi i rami sopra (tuning fresco o riuso da
+        # manifesto esistente): così il valore finale è sempre 30, anche se
+        # il config_real.json riletto in caso di SKIP_TUNING contenesse
+        # ancora il vecchio 80 salvato prima di questa scelta ingegneristica.
+        #
+        # La ricerca (best_params originale, con n_estimators=80 se rifatta
+        # in questa run) resta comunque documentata nel report sopra e nei
+        # log: questo override è una scelta INGEGNERISTICA dichiarata
+        # esplicitamente, non una modifica silenziosa del risultato.
+        N_ESTIMATORS_OVERRIDE = 30
+        print(f"[OVERRIDE] n_estimators: {best_params.get('n_estimators')} (dal tuning/manifesto) "
+              f"-> {N_ESTIMATORS_OVERRIDE} (scelta post-diagnostica, vedi commento nel codice).")
+        best_params = dict(best_params)
+        best_params["n_estimators"] = N_ESTIMATORS_OVERRIDE
 
         # Configurazione e creazione cartella di output dedicata
         OUTPUT_DIR = "./outputs_baseline"
@@ -597,19 +678,12 @@ def run_baseline():
             }
         }
         
+        if not INCLUDE_FEDERATED_SECTION:
+            config_data.pop("federated_partitioning", None)
+
         with open(config_path_final, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
         print(f"[OK] Manifesto 'config_real.json' salvato correttamente in: '{config_path_final}'")
-
-        # tempo_medio_fit_tuning: tempo medio di UN fit tra tutte le
-        # combinazioni esplorate (non più "tempo medio per fold", perché non
-        # ci sono più fold — un solo fit per combinazione, vedi
-        # oob_hyperparameter_search). Riflette un fit PARALLELO (n_jobs =
-        # cpu_count-1 di default, non più forzato a 1): non è quindi un
-        # tempo single-core, e non va confuso con t_seq (quello sì misurato
-        # a un solo core, per la vera comparazione di scalabilità col
-        # cluster distribuito, calcolato altrove sul modello finale).
-        tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
 
     else:
         print("\n>>> FASE 2: SALTATA — riuso iperparametri ottenuti dal tuning sul dataset reale")
@@ -663,6 +737,9 @@ def run_baseline():
                 "random_state": int(RANDOM_SEED)
             }
         }
+
+        if not INCLUDE_FEDERATED_SECTION:
+            config_data.pop("federated_partitioning", None)
 
         # 'config_synthetic.json' è il manifesto ATTIVO: è quello letto sia da
         # SyntheticDataLoader (ricetta del dataset) sia dal client
