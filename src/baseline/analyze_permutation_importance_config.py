@@ -50,6 +50,22 @@ TEST_SIZE = 0.2
 SAMPLE_FRACTION = 0.05
 TARGET_COL = "Label"
 
+# Sottocampione SOLO per questa diagnostica (non per run_baseline.py, che
+# resta sul train set completo). Motivazione: la griglia sotto addestra 7
+# foreste preliminari COMPLETE (fit + intero ciclo di permutation
+# importance) — sul train set pieno (~645k righe), il solo caso
+# rf_n_estimators=100 ha già richiesto ~13 minuti nel run reale; scalando
+# linearmente sull'intera griglia fino a 400 alberi il tempo totale stimato
+# supera le 2 ore. La STABILITA' DEL RANKING (quello che questa diagnostica
+# misura: Spearman rho e Jaccard tra le feature scartate a diversi
+# rf_n_estimators) è governata dal numero di alberi, non dalla dimensione
+# del dataset — stessa logica già applicata alla diagnostica di regressione
+# per n_estimators. Riduce il tempo totale a un ordine di grandezza gestibile
+# (~15-20 minuti), pur restando un campione ampio (100k righe, non un
+# giocattolo). Il risultato di produzione (quali feature scartare davvero)
+# resta quello calcolato da run_baseline.py sul dataset completo.
+DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
+
 RF_N_ESTIMATORS_GRID = [20, 50, 100, 150, 200, 300, 400]
 REFERENCE_N_ESTIMATORS = 400  # il più grande della griglia, usato come "verità" approssimata
 CHOSEN_RF_N_ESTIMATORS = 200  # valore attuale in CICIDSFeatureSelector
@@ -80,6 +96,23 @@ def prepare_preprocessed_train_set():
     df_binarized = preprocessor.binarize_target(df_raw)
     train_df, _ = splitter.split(df_binarized)
     train_df = preprocessor.process(train_df)
+
+    if len(train_df) > DIAGNOSTIC_SUBSAMPLE_SIZE:
+        print(f"[3/3] Sottocampionamento diagnostico: {len(train_df):,} -> "
+              f"{DIAGNOSTIC_SUBSAMPLE_SIZE:,} righe (stratificato per classe, "
+              f"seed={RANDOM_SEED}). Solo per questa diagnostica — vedi commento "
+              f"su DIAGNOSTIC_SUBSAMPLE_SIZE.".replace(",", "."))
+        from sklearn.model_selection import train_test_split
+        train_df, _ = train_test_split(
+            train_df,
+            train_size=DIAGNOSTIC_SUBSAMPLE_SIZE,
+            stratify=train_df[TARGET_COL],
+            random_state=RANDOM_SEED,
+        )
+        train_df = train_df.reset_index(drop=True)
+        print(f"       Dimensione dopo il sottocampionamento: {len(train_df):,} righe "
+              f"({train_df[TARGET_COL].value_counts().to_dict()})".replace(",", "."))
+
     return train_df
 
 
