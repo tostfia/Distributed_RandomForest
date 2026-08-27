@@ -1,0 +1,14 @@
+{
+  "orchestrator_election_concurrency": {
+    "scenario_description": "Verifica la mutua esclusione del lock di leadership (OrchestratorLocks) sotto concorrenza reale: N candidati sincronizzati con threading.Barrier competono sullo stesso lock_key in ogni round. Complementare a OrchestratorFailoverScenario, che verifica liveness/recovery ma avvia i contendenti in sequenza, non sotto vera concorrenza.",
+    "status": "SUCCESS",
+    "backend": "Mock locale su file (fcntl.flock, LOCK_EX)",
+    "environment": "local",
+    "num_rounds": 20,
+    "num_candidates_per_round": 5,
+    "lock_ttl_seconds": 5,
+    "rounds_with_exactly_one_winner": 20,
+    "violations": [],
+    "duration_seconds": 0.07
+  }
+}

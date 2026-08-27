@@ -61,6 +61,13 @@
     "max_monitor_timeout_seconds": 450
   },
 
+  "orchestrator_election_concurrency": {
+    "_NOTE": "Scenario 9 - verifica la mutua esclusione del lock di leadership sotto concorrenza reale (N candidati sincronizzati con threading.Barrier), non un test di failover: nessun job/dataset coinvolto. Su AWS le chiamate a DynamoDB reale sono più lente: valutare di abbassare num_rounds per contenere tempo/costo nel Learner Lab (vedi 'aws.suggested_overrides' sotto).",
+    "num_rounds": 20,
+    "num_candidates": 5,
+    "lock_ttl_seconds": 5
+  },
+
   "aws": {
     "_NOTE": "Sezione letta dagli scenari per individuare cluster, region e nomi dei service ECS. Le credenziali AWS restano SOLO in ~/.aws/credentials e nel ruolo IAM dei task, MAI qui.",
     "ecs_cluster_name": "forest-cluster",
@@ -87,6 +94,9 @@
         "docker_kill_delay_seconds": 5,
         "failover_detection_margin_seconds": 120,
         "max_monitor_timeout_seconds": 550
+      },
+      "orchestrator_election_concurrency": {
+        "num_rounds": 5
       }
     }
   }
