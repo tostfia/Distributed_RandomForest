@@ -4,7 +4,7 @@
   "_NOTE_dataset": "ATTENZIONE ai percorsi: 'dataset_path' viene inviato TALE E QUALE all'orchestratore, che su AWS gira dentro un container Fargate. Un percorso locale (es. 'dataset_cache/') lì non esiste e il job fallisce con FileNotFoundError, viene rimesso in coda da SQS e riparte in loop — dall'esterno sembra che il test sia bloccato. Per 'dataset_type': 'real' su AWS il valore corretto è l'URI S3 ('s3://<bucket>/real/'), la stessa convenzione usata dal client (main.py: default_data_url = f's3://{bucket_name}/real/'). 'dataset_cache/' è valido SOLO in locale/Docker.",
   "selected_task": "regressor",
   "dataset_type": "synthetic",
-  "dataset_path": "synthetic/synthetic_dataset.csv",
+  "dataset_path": "synthetic/synthetic_dataset_regression.csv",
 
   "_NOTE_selected_task": "Deve coincidere con il 'tree_type' del manifesto della baseline effettivamente in uso, altrimenti _resolve_hyperparameters stampa un [ATTENZIONE] e il run gira con un selected_task incoerente rispetto al modello davvero addestrato. Verifica con: python3 -c \"import json;print(json.load(open('outputs_baseline/config_synthetic.json'))['hyperparameters'])\"",
 
@@ -14,9 +14,9 @@
     "tree_type": "classifier"
   },
   "hyperparameters_regre": {
-    "n_estimators": 100,
+    "n_estimators": 35,
     "tree_type": "regressor",
-    "max_depth": 15
+    "max_depth": null
   },
 
   "_NOTE_use_local_hyperparameters": "Impostare a true SOLO per un esperimento deliberatamente diverso dalla baseline in TUTTI gli scenari (questo flag è globale: con true anche Performance/Rete/Guasti userebbero questi iperparametri invece del manifesto della baseline, perdendo la comparabilità diretta con T_seq/T_1node). Per alzare il carico SOLO nello scenario di Scalabilità, senza toccare gli altri, usare invece 'n_estimators_override' dentro 'scalability_test' qui sotto.",
@@ -25,7 +25,7 @@
   "scalability_test": {
     "_NOTE": "I valori maggiori del numero di worker realmente registrati vengono scartati da ScalabilityScenario. Su AWS il tetto è il desired-count del worker-service: per testare 5 o 7 va prima scalato il service, altrimenti la curva di speedup resta a due soli punti. Per un esperimento di strong scaling onesto in locale/Docker, lanciare con WORKER_CORES=1 (vedi .env/docker-compose.yml) cosicché ogni worker rappresenti 1 unità di calcolo, invece di dividersi dinamicamente i core della macchina host.",
     "_NOTE_n_estimators_override": "Vale SOLO per questo scenario (ScalabilityScenario), non tocca gli altri: con pochi alberi (quelli tipici del manifesto della baseline) l'overhead di rete/orchestrazione domina il tempo totale e lo speedup resta rumore attorno a 1x qualunque sia il numero di worker (vedi 'Problema 2' del 24 agosto: 30 alberi -> ~1.25x, 100 alberi -> 6.51x/efficienza 0.93). Impostare a 0 o rimuovere la chiave per tornare al carico della baseline (comportamento di sempre).",
-    "n_estimators_override": 100,
+    "n_estimators_override": 35,
     "worker_counts_to_test": [1, 3, 5, 7]
   },
 

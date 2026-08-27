@@ -32,6 +32,10 @@ ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
 ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
 ENV_REGION=$(get_env_var "AWS_DEFAULT_REGION")
 ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
+ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
+ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
+RPC_SYNC_TIMEOUT_SECONDS="${ENV_RPC_SYNC_TIMEOUT:-1800}"
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900}"
 
 if [ "$ENV_ENV_MODE" != "aws" ]; then
   echo "[ERRORE] ENV_MODE nel .env è '$ENV_ENV_MODE', non 'aws'."
@@ -167,7 +171,9 @@ cat <<EOF > /tmp/test-engine-task-def.json
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
-        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"}
+        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"},
+        {"name": "RPC_SYNC_TIMEOUT_SECONDS", "value": "${RPC_SYNC_TIMEOUT_SECONDS}"},
+        {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"}
       ],
       "command": ["sh", "-c", "sleep infinity"],
       "linuxParameters": {"initProcessEnabled": true},

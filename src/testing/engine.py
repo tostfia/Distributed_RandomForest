@@ -29,6 +29,7 @@ class TestEngine:
         self.global_reports = {}
         self.orchestrator = None
         self.worker_processes = []
+        self.n_samples_label = os.environ.get("SYNTHETIC_N_SAMPLES", "").strip()
 
         self._initialize_infrastructure()
 
@@ -254,7 +255,8 @@ class TestEngine:
         else:
             output_dir = "./test_reports/local"
         test_name = "all_tests" if len(self.global_reports) != 1 else next(iter(self.global_reports.keys()))
-        output_path = os.path.join(output_dir, f"test_report_{test_name}.json")
+        suffix = f"_n{self.n_samples_label}" if self.n_samples_label else ""
+        output_path = os.path.join(output_dir, f"test_report_{test_name}{suffix}.json")
 
         try:
 
@@ -268,9 +270,9 @@ class TestEngine:
             print(f"[ENGINE ERRORE] Impossibile salvare il report su disco: {e}")
 
         if self.env == "aws":
-            self._upload_report_to_s3(output_path, test_name)
+            self._upload_report_to_s3(output_path, test_name, suffix)
 
-    def _upload_report_to_s3(self, local_path: str, test_name: str):
+    def _upload_report_to_s3(self, local_path: str, test_name: str, suffix: str = ""):
         bucket_name = os.environ.get("DATASETS_BUCKET_NAME")
         if not bucket_name:
             print("[ENGINE] [WARN] DATASETS_BUCKET_NAME non impostata: salto l'upload del report su S3.")
@@ -279,7 +281,7 @@ class TestEngine:
             region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
             s3_client = boto3.client("s3", region_name=region)
             timestamp = int(time.time())
-            s3_key = f"test_reports/aws/test_report_{test_name}_{timestamp}.json"
+            s3_key = f"test_reports/aws/test_report_{test_name}{suffix}_{timestamp}.json"
             s3_client.upload_file(local_path, bucket_name, s3_key)
             print(f"[ENGINE SYSTEM] Report caricato anche su S3: s3://{bucket_name}/{s3_key}")
         except Exception as e:

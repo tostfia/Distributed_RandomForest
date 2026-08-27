@@ -85,13 +85,8 @@
     "Idle Max",
     "Idle Min"
   ],
-  "federated_partitioning": {
-    "strategy": "iid",
-    "alpha": 0.5,
-    "tree_allocation": "equal"
-  },
   "hyperparameters": {
-    "n_estimators": 80,
+    "n_estimators": 30,
     "max_depth": null,
     "min_samples_split": 10,
     "max_features": "sqrt",

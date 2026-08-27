@@ -33,35 +33,11 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 # del dataset) dalla complessità del modello.
 # ---------------------------------------------------------------------------
 SYNTHETIC_REGRESSOR_REFERENCE_HP = {
-    # n_estimators=80: punto scelto sulla curva di stabilizzazione OOB
-    # verificata empiricamente (analyze_regression_reference_config.py,
-    # stessa max_features=1/3, bootstrap=True, max_samples=1.0 di questa
-    # config; grafico: oob_r2_vs_n_estimators.png). Il delta di OOB R² da 60
-    # a 80 alberi è +0.0058, contro il +0.014 che si osservava ancora da 30 a
-    # 40 (valore precedente, scartato perché non rappresentava un vero punto
-    # di plateau). Da 80 in poi il guadagno resta piccolo e decrescente
-    # (+0.0056 fino a 120, +0.0033 fino a 160, +0.0018 fino a 200): 80 è il
-    # primo punto in cui il rendimento marginale scende sotto la soglia
-    # 0.006 scelta come criterio di "stabilizzazione pratica", bilanciando
-    # accuratezza e tempo di training (comparabile tra baseline locale e
-    # ogni configurazione del cluster distribuito).
-    "n_estimators": 80,
+  
+    "n_estimators": 35,
     "max_depth": None,
     "min_samples_split": 2,
-    # Esplicito perché il default sklearn per RandomForestRegressor è 1.0
-    # (usa TUTTE le feature ad ogni split, cioè bagging puro): senza questo
-    # override anche il regressore "di riferimento" non sarebbe un vero
-    # Random Forest.
-    #
-    # NOTA CITAZIONE: 1/3 non è dichiarato esplicitamente da Breiman (2001)
-    # per la regressione — nel paper (Sec. 11-12, Forest-RC) usa combinazioni
-    # lineari casuali di L=3 input con F=2 o F=8 feature derivate, non una
-    # frazione fissa delle feature originali. Il valore p/3 è un'euristica
-    # diventata standard DOPO il 2001 (Hastie, Tibshirani & Friedman,
-    # "Elements of Statistical Learning"), ripresa da scikit-learn come
-    # default storico per RandomForestRegressor. Va citata come tale in
-    # relazione — non attribuita direttamente al paper del 2001 — per non
-    # esporsi a una contestazione sulla precisione della citazione.
+
     "max_features": 1 / 3,
     "criterion": "squared_error",
     "bootstrap": True,
