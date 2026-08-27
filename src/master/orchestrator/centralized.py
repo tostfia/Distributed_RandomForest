@@ -20,6 +20,11 @@ from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
+from src.shared.utilities.task_storage import (
+    load_task_from_shared_storage,
+    save_bytes_to_shared_storage,
+    load_bytes_from_shared_storage,
+)
 
 
 TEST_SIZE = 0.2
@@ -422,7 +427,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         try:
                             self.chunk_sent_event.set()
 
-                            result_raw = worker_conn.root.train_subset_forest(
+                            ack_raw = worker_conn.root.train_subset_forest(
                                 source_info=source_info,
                                 num_trees=quota_chunk,       
                                 base_seed=chunk_seed,    
@@ -435,9 +440,31 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 bootstrap=bootstrap,
                                 max_samples=max_samples
                             )
-                            
-                            # Deserializzazione sicura dei byte trasmessi via rete
-                            result_trees = pickle.loads(obtain(result_raw))
+
+                            # Il worker NON restituisce più il blob degli alberi
+                            # (fino a 1+ GB su scenari di scalabilità) come valore
+                            # di ritorno RPC: lo ha già persistito nello storage
+                            # condiviso (S3/locale) prima di rispondere, e qui ci
+                            # limitiamo a un piccolo ack + rilettura diretta dallo
+                            # storage. Evita l'hang osservato quando RPyC deve
+                            # trasportare un payload sincrono molto grande come
+                            # valore di ritorno (vedi Scenario 2 - Scalabilità).
+                            ack = obtain(ack_raw)
+                            if not isinstance(ack, dict) or not ack.get("ack"):
+                                raise RuntimeError(
+                                    f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
+                                )
+
+                            result_trees_bytes = load_task_from_shared_storage(
+                                source_info, chunk_seed, quota_chunk,
+                                self.environment, self.orchestrator_name
+                            )
+                            if result_trees_bytes is None:
+                                raise RuntimeError(
+                                    f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
+                                    f"non è stato trovato nello storage condiviso."
+                                )
+                            result_trees = pickle.loads(result_trees_bytes)
                             
                             # SEZIONE CRITICA MINIMA: solo l'aggiornamento della
                             # lista condivisa e uno snapshot immutabile. L'upload
@@ -726,7 +753,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
             if tree_start not in already_done_ranges:
                 chunk_estimators = all_trees[tree_start:tree_end]
                 serialized_chunk_trees = pickle.dumps(chunk_estimators)
-                task_queue.put((task_id_counter, tree_start, tree_end, serialized_chunk_trees))
+                # Il chunk di alberi NON viaggia più come argomento della RPC
+                # (fino a 1+ GB con pochi worker attivi, stesso problema già
+                # risolto in training - vedi hang/timeout SSM osservato in
+                # Scenario 2): lo carichiamo una volta sullo storage condiviso
+                # e passiamo al worker solo la chiave, che lo riscarica da sé.
+                chunk_key = f"inference_chunks/{job_id}/chunk_{tree_start}_{tree_end}.pkl"
+                save_bytes_to_shared_storage(chunk_key, serialized_chunk_trees, self.environment, self.orchestrator_name)
+                task_queue.put((task_id_counter, tree_start, tree_end, chunk_key))
                 task_id_counter += 1
             else: 
                 print(f"[SHORT-CIRCUIT] Chunk {tree_start}-{tree_end} già completato. Skip.")
@@ -758,7 +792,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 while True:
                     try:
-                        task_id, start_idx, end_idx, chunk_trees_bytes = task_queue.get(timeout=2)
+                        task_id, start_idx, end_idx, chunk_key = task_queue.get(timeout=2)
                         rounds_done += 1
                     except queue.Empty:
                         break
@@ -769,9 +803,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     try:
                         self.chunk_sent_event.set()
                         
-                        # Invocazione remota sul metodo esposto dal BaseWorker
+                        # Invocazione remota sul metodo esposto dal BaseWorker:
+                        # 'chunk_key' è solo il riferimento allo storage condiviso,
+                        # non il blob — il worker lo scarica direttamente da lì.
                         raw_response = worker_conn.root.predict_subset_forest(
-                            chunk_trees_bytes, 
+                            chunk_key, 
                             serialized_X_test,
                             tree_type,
                             global_classes
@@ -805,7 +841,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         else:
                             # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
                             self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="REQUEUED")
-                            task_queue.put((task_id, start_idx, end_idx, chunk_trees_bytes))
+                            task_queue.put((task_id, start_idx, end_idx, chunk_key))
                             print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
                         
                         with results_lock:

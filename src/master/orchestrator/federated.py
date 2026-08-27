@@ -15,6 +15,7 @@ import re
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
+from src.shared.utilities.task_storage import load_task_from_shared_storage
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
@@ -521,19 +522,53 @@ class FederatedOrchestrator(BaseOrchestrator):
                         print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
                         self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
                         self.chunk_sent_event.set()
-                        result_raw = worker_conn.root.exposed_train_local_federated_forest(
+                        effective_seed = chunk_seed + (idx * 1000)
+                        ack_raw = worker_conn.root.exposed_train_local_federated_forest(
                             job_id=self.current_job_id,
                             dataset_type=self._resolve_dataset_type(payload),
                             n_estimators_local=quota_chunk,
                             worker_index=idx,
                             hyperparameters={
                                 **hp,
-                                "random_state": chunk_seed + (idx * 1000),
+                                "random_state": effective_seed,
                                 "feature_selezionate": feature_selezionate,
 
                             },
                         )
-                        result_trees = pickle.loads(obtain(result_raw))
+
+                        # Il worker NON restituisce più gli alberi per intero via
+                        # RPC: li ha già persistiti nello storage condiviso prima
+                        # di rispondere (vedi federatedWorker.py,
+                        # exposed_train_local_federated_forest), e qui ci
+                        # limitiamo a un piccolo ack + rilettura diretta dallo
+                        # storage. Stesso fix già applicato al path centralizzato
+                        # per evitare l'hang osservato quando RPyC deve
+                        # trasportare un payload sincrono molto grande come
+                        # valore di ritorno (Scenario 2 - Scalabilità).
+                        ack = obtain(ack_raw)
+                        if not isinstance(ack, dict) or not ack.get("ack"):
+                            raise RuntimeError(
+                                f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
+                            )
+
+                        # 'source_info' sintetico: il federato non usa un path di
+                        # dataset per il training locale (ogni worker ha già il
+                        # proprio shard in cache), quindi costruiamo la stessa
+                        # stringa 'shared_train_<job_id>.csv' usata lato worker
+                        # per derivare la medesima chiave di storage — riusa
+                        # load_task_from_shared_storage/get_task_storage_paths
+                        # senza modificarle.
+                        synthetic_source_info = f"shared_train_{self.current_job_id}.csv"
+                        result_trees_bytes = load_task_from_shared_storage(
+                            synthetic_source_info, effective_seed, quota_chunk,
+                            self.environment, self.orchestrator_name
+                        )
+                        if result_trees_bytes is None:
+                            raise RuntimeError(
+                                f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
+                                f"non è stato trovato nello storage condiviso."
+                            )
+                        result_trees = pickle.loads(result_trees_bytes)
                         # SEZIONE CRITICA MINIMA: solo l'aggiornamento della lista
                         # condivisa e uno snapshot immutabile. Upload su S3 e
                         # scrittura su DynamoDB sono spostati fuori (vedi sotto).
@@ -676,7 +711,14 @@ class FederatedOrchestrator(BaseOrchestrator):
             raise RuntimeError("Nessun worker disponibile per l'inferenza federata.")
         print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
-        forest_bytes = pickle.dumps(all_trees)
+        # Non serializziamo più l'intera foresta per rimandarla via RPC: il
+        # modello è già su storage condiviso a 'model_path' (l'abbiamo appena
+        # caricato da lì), quindi passiamo solo quel riferimento a ciascun
+        # worker, che lo scarica e deserializza da sé. Prima veniva rifatto
+        # pickle.dumps(all_trees) una volta qui E il blob risultante (fino a
+        # 1+ GB) veniva ritrasmesso per intero via RPC UNA VOLTA PER OGNI
+        # WORKER — peggio ancora del path centralizzato, dove almeno la
+        # foresta viene divisa in chunk tra i worker invece di essere ripetuta.
         feature_selezionate = (
             None if self.environment == "aws"
             else self.select_from_config(self._resolve_dataset_type(payload))
@@ -751,9 +793,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                     if tree_type == "classifier" and hasattr(global_model, "classes_"):
                         worker_hyperparameters["global_classes"] = global_model.classes_.tolist()
                     # ----------------------------------------------------------------------------
-                    print(f"[{self.orchestrator_name}-InfThread] Invio foresta completa ({total_trees} alberi) a {w_name}...")
+                    print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
+                          f"({total_trees} alberi, {model_path}) a {w_name}...")
                     raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
-                        "forest": forest_bytes,
+                        "model_path": model_path,
                         "job_id": job_id,
                         "worker_index": idx,
                         "hyperparameters": worker_hyperparameters

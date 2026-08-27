@@ -140,6 +140,20 @@ class ScalabilityScenario(BaseTestScenario):
                 }
             finally:
                 ServiceRegistry.get_available_workers = original_get_workers
+                # Questo scenario chiama _execute_training_step/_execute_inference_step
+                # DIRETTAMENTE, bypassando _process_job (dove normalmente avviene la
+                # pulizia post-job): senza questa chiamata esplicita, _trees_cache
+                # dell'orchestratore (lista di oggetti DecisionTree VIVI in memoria,
+                # non compressi) si accumula per ogni job_id di questo scenario senza
+                # mai essere liberata, fino a saturare la memoria del container dopo
+                # poche configurazioni di worker. Non tocca modello/metriche/dataset
+                # già salvati su S3 (path separati), solo stato transitorio/di resume
+                # ormai inutile a job concluso.
+                try:
+                    self.orchestrator._clean_checkpoint(payload["job_id"])
+                except Exception as e_clean:
+                    print(f"[SCALABILITY {execution_mode.upper()}] [WARN] Pulizia checkpoint per "
+                          f"'{payload['job_id']}' fallita (non bloccante): {e_clean}")
         # ─── FASE 2: CALCOLO SPEEDUP E STAMPA IN MODO ELEGANTE ───
         baseline_w = min(workers_to_test)
         base_train_time = raw_metrics[baseline_w]["train_duration"]

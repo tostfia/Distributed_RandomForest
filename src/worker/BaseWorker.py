@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError
 
 from src.shared.config import SystemConfig
 from src.shared.binding.serviceregistry import ServiceRegistry
+from src.shared.utilities.task_storage import load_bytes_from_shared_storage
 
 _child_X  = None
 _child_y  = None
@@ -269,8 +270,9 @@ class BaseWorker(Service, ABC):
               f"({'da richiesta' if bootstrap is not None else 'da configurazione di boot'}).")
         cached_task_bytes = self._load_task_from_shared_storage(source_info, base_seed, num_trees)
         if cached_task_bytes is not None:
-            print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Restituisco i byte.")
-            return cached_task_bytes
+            print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Invio solo ack "
+                  f"(l'Orchestratore rilegge il blob direttamente dallo storage condiviso).")
+            return {"ack": True, "num_trees": num_trees}
         # 1. Recupero dati e classe dell'albero dalle classi figlie
         X, y = self._load_data(source_info)
         tree_class = self._get_tree_class()
@@ -361,7 +363,7 @@ class BaseWorker(Service, ABC):
                                       min_samples_split, class_weight, criterion))
             local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
 
-        print(f"[+] Calcolo di {num_trees} alberi completato. Invio in corso via pickle...")
+        print(f"[+] Calcolo di {num_trees} alberi completato. Salvataggio su storage condiviso...")
         serialized_task = pickle.dumps(local_trees)
         try:
             self._save_task_to_shared_storage(source_info, base_seed, num_trees, serialized_task)
@@ -375,13 +377,29 @@ class BaseWorker(Service, ABC):
                   f"ma il salvataggio nello storage condiviso è fallito. Il task viene "
                   f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
             raise
-        print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio completato.")
-        return serialized_task
+        print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio ack "
+              f"(niente più blob via RPC).")
+        # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
+        # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
+        # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
+        # più veloce e affidabile di un ritorno RPC su un payload di queste
+        # dimensioni — vedi hang osservato in Scenario 2 (Scalabilità).
+        return {"ack": True, "num_trees": num_trees}
 
-    def exposed_predict_subset_forest(self, serialized_trees, serialized_X_test=None, tree_type=None, global_classes=None):
+    def exposed_predict_subset_forest(self, serialized_trees_or_key, serialized_X_test=None, tree_type=None, global_classes=None):
         """
-        Riceve un sottoinsieme di alberi serializzati dall'Orchestratore e calcola
-        le predizioni parziali sui dati di test sfruttando il C nativo di Scikit-Learn.
+        Riceve un sottoinsieme di alberi dall'Orchestratore e calcola le
+        predizioni parziali sui dati di test sfruttando il C nativo di Scikit-Learn.
+
+        'serialized_trees_or_key' può essere:
+          - una stringa: chiave nello storage condiviso (S3/locale) da cui il
+            worker scarica da sé il blob. È il caso normale ora: passare
+            l'intero chunk di alberi (fino a 1+ GB con pochi worker attivi)
+            come argomento RPC causava hang/timeout di sessione (stesso
+            problema già risolto per il ritorno degli alberi in fase di
+            training - vedi exposed_train_subset_forest).
+          - bytes: i byte già serializzati, per retrocompatibilità con
+            eventuali chiamanti che li passano ancora direttamente.
 
         Per la classificazione restituiamo le probabilità per-albero (predict_proba),
         non le etichette dure: è lo stesso meccanismo di "soft voting" che sklearn
@@ -392,7 +410,19 @@ class BaseWorker(Service, ABC):
         """
         print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
 
-        # 1. Ricostruiamo gli alberi inviati dal Master
+        # 1. Ricostruiamo gli alberi: se è una chiave (str), li scarichiamo
+        #    dallo storage condiviso; se sono già byte, li usiamo direttamente.
+        if isinstance(serialized_trees_or_key, str):
+            serialized_trees = load_bytes_from_shared_storage(
+                serialized_trees_or_key, self.environment, self.worker_name
+            )
+            if serialized_trees is None:
+                raise RuntimeError(
+                    f"[{self.worker_name}] Impossibile scaricare il chunk di alberi "
+                    f"dalla chiave '{serialized_trees_or_key}' nello storage condiviso."
+                )
+        else:
+            serialized_trees = serialized_trees_or_key
         trees = pickle.loads(serialized_trees)
         print(f"[{self.worker_name}] Decodificati {len(trees)} alberi per il calcolo.")
 

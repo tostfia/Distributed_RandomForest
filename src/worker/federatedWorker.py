@@ -348,8 +348,36 @@ class FederatedWorker(BaseWorker):
                 print(f"[{self.worker_name}] Mapping parallelo in corso su shard locale...")
                 local_trees = pool.map(_train_single_fed_tree, worker_tasks)
 
-        print(f"[+] [{self.worker_name}] Addestramento completato. Serializzazione in corso...")
-        return pickle.dumps(local_trees)
+        print(f"[+] [{self.worker_name}] Addestramento completato. Salvataggio su storage condiviso...")
+        serialized_task = pickle.dumps(local_trees)
+        # Riusiamo lo stesso schema di storage del path centralizzato (vedi
+        # BaseWorker._save_task_to_shared_storage / _get_task_storage_paths,
+        # ereditati da questa classe): quelle funzioni derivano il job_id da un
+        # 'source_info' del tipo 'shared_train_<job_id>.csv'. Il federato non usa
+        # un path di dataset per il training locale (ogni worker ha già il
+        # proprio shard in cache), quindi costruiamo una stringa sintetica solo
+        # per ottenere la STESSA chiave che l'Orchestratore userà in lettura
+        # (vedi federated.py, worker_thread_consumer).
+        synthetic_source_info = f"shared_train_{job_id}.csv"
+        try:
+            self._save_task_to_shared_storage(synthetic_source_info, base_seed, n_estimators_local, serialized_task)
+        except Exception as e:
+            # Il task NON deve risultare "completato con successo" se non è stato
+            # persistito nello storage condiviso: rilanciamo l'eccezione così RPyC
+            # la propaga all'Orchestratore, che potrà marcare il task come fallito
+            # e decidere se ritentarlo, invece di credere erroneamente che sia
+            # andato tutto bene.
+            print(f"[!] [{self.worker_name}] ERRORE CRITICO: gli alberi sono stati calcolati "
+                  f"ma il salvataggio nello storage condiviso è fallito. Il task viene "
+                  f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
+            raise
+        print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio ack "
+              f"(niente più blob via RPC).")
+        # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore li
+        # rilegge dallo storage condiviso con lo stesso 'source_info' sintetico
+        # (vedi federated.py). Stesso fix già applicato al path centralizzato per
+        # evitare l'hang su payload grandi come valore di ritorno RPC sincrono.
+        return {"ack": True, "num_trees": n_estimators_local}
 
     def _resolve_selected_features(self, dataset_type: str, hyperparameters: dict):
         """
@@ -478,7 +506,16 @@ class FederatedWorker(BaseWorker):
 
     def exposed_predict_subset_forest(self, payload: dict) -> bytes:
         payload = pickle.loads(payload)
-        forest = payload["forest"]
+        # 'model_path' (nuovo, preferito): il modello globale è già su storage
+        # condiviso (l'Orchestratore lo ha appena caricato da lì per ottenere
+        # 'all_trees'), quindi lo riscarichiamo e deserializziamo da soli
+        # invece di riceverlo per intero via RPC. Prima veniva ripetuto questo
+        # trasferimento (fino a 1+ GB) UNA VOLTA PER OGNI WORKER — peggio
+        # ancora del path centralizzato, dove almeno viene diviso in chunk.
+        # 'forest' (retrocompatibilità): byte già serializzati, usati se
+        # 'model_path' non è presente.
+        model_path = payload.get("model_path")
+        forest = payload.get("forest")
         job_id = payload.get("job_id", None)
         worker_index = payload.get("worker_index", None)
         hyperparameters = payload.get("hyperparameters", {})
@@ -493,7 +530,21 @@ class FederatedWorker(BaseWorker):
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
         self._cached_job_id = job_id
 
-        unpacked_model = pickle.loads(forest)
+        if model_path is not None:
+            from src.dataset.checkpoint_dao import CheckpointDAOFactory
+            print(f"[{self.worker_name}] Caricamento del modello globale da storage condiviso: {model_path}")
+            checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
+            loaded_model = checkpoint_dao.load(model_path)
+            # Normalizziamo sempre a LISTA di alberi (coerente col resto del
+            # metodo, che si aspetta 'unpacked_model' come lista): il file
+            # salvato è l'oggetto RandomForest{Classifier,Regressor} completo.
+            unpacked_model = loaded_model.estimators_ if hasattr(loaded_model, "estimators_") else loaded_model
+        elif forest is not None:
+            unpacked_model = pickle.loads(forest)
+        else:
+            raise ValueError(
+                f"[{self.worker_name}] Payload di inferenza privo sia di 'model_path' sia di 'forest'."
+            )
 
         if isinstance(unpacked_model, list):
             from sklearn.tree import DecisionTreeRegressor as DTR
