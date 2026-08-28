@@ -2,7 +2,7 @@
   "mode": "distributed",
   "dataset_type": "synthetic",
   "dataset_path": "synthetic",
-  "n_samples": 500000,
+  "n_samples": 750000,
   "n_features": 30,
   "target_column": "Target",
   "random_seed": 123,

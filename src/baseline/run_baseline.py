@@ -549,33 +549,7 @@ def run_baseline():
             tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
 
         # ---------------------------------------------------------------
-        # OVERRIDE DELIBERATO: n_estimators
-        #
-        # La ricerca OOB ha trovato n_estimators=80 come ottimo nello spazio
-        # di ricerca CONGIUNTO (7 iperparametri insieme). Una diagnostica
-        # dedicata (analyze_classification_n_estimators.py), che isola
-        # n_estimators tenendo fissi gli altri iperparametri scelti dal
-        # tuning, mostra che il guadagno da 30 a 80 alberi è statisticamente
-        # trascurabile:
-        #   n_estimators=30 -> OOB F1=0.96662, tempo di fit=25.07s
-        #   n_estimators=80 -> OOB F1=0.96669, tempo di fit=64.92s
-        # Delta F1 = 0.00007 (quarta cifra decimale) a fronte di un fit
-        # 2.6x più lento. Per l'ampio numero di configurazioni sperimentali
-        # successive (scalabilità, due dimensioni, federato — vedi piano
-        # esperimenti), si adotta n_estimators=30 ovunque (baseline inclusa,
-        # per restare "a parità di condizioni" col distribuito, come
-        # indicato dal professore nel ricevimento SDCC), riducendo il costo
-        # computazionale complessivo senza perdita misurabile di qualità.
-        #
-        # Applicato DOPO entrambi i rami sopra (tuning fresco o riuso da
-        # manifesto esistente): così il valore finale è sempre 30, anche se
-        # il config_real.json riletto in caso di SKIP_TUNING contenesse
-        # ancora il vecchio 80 salvato prima di questa scelta ingegneristica.
-        #
-        # La ricerca (best_params originale, con n_estimators=80 se rifatta
-        # in questa run) resta comunque documentata nel report sopra e nei
-        # log: questo override è una scelta INGEGNERISTICA dichiarata
-        # esplicitamente, non una modifica silenziosa del risultato.
+        
         N_ESTIMATORS_OVERRIDE = 30
         print(f"[OVERRIDE] n_estimators: {best_params.get('n_estimators')} (dal tuning/manifesto) "
               f"-> {N_ESTIMATORS_OVERRIDE} (scelta post-diagnostica, vedi commento nel codice).")
