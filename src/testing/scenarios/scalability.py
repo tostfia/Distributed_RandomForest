@@ -260,14 +260,12 @@ class ScalabilityScenario(BaseTestScenario):
         # Vedi BaseTestScenario._resolve_hyperparameters: fonte unica condivisa
         # con la baseline locale.
         hp = self._resolve_hyperparameters()
-        # Allinea SEMPRE n_estimators nel payload a target_trees (il valore
-        # realmente richiesto al cluster via target_alberi in run()): senza
-        # questo, con n_estimators_override attivo il cluster costruirebbe
-        # N alberi mentre il payload ne dichiarerebbe M dal manifesto — lo
-        # stesso disallineamento silenzioso che _resolve_target_trees
-        # (BaseTestScenario) esiste apposta per evitare. Quando l'override
-        # NON è attivo, target_trees è già uguale a hp['n_estimators']
-        # (stessa fonte), quindi questa riga è un no-op.
+        # _resolve_hyperparameters() legge SOLO la sotto-chiave 'hyperparameters'
+        # del manifesto. n_samples/n_features/noise vivono a livello radice,
+        # sibling di 'hyperparameters': senza questa unione esplicita non
+        # arrivano mai nel payload di test.
+        dataset_shape = self._resolve_dataset_shape()
+        hp = {**hp, **{k: v for k, v in dataset_shape.items() if v is not None}}
         if hp.get("n_estimators") != target_trees:
             hp = dict(hp)
             hp["n_estimators"] = target_trees

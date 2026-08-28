@@ -18,6 +18,14 @@ class Hyperparameters(BaseModel):
     target_column: Optional[str] = None
     max_features: Optional[Union[str, float]] = None
     criterion: Optional[str] = None
+    # Parametri di GENERAZIONE del dataset sintetico (ignorati per dataset
+    # 'real'): servono a SyntheticDataLoader lato worker per costruire
+    # esattamente lo stesso dataset dichiarato nel manifesto di baseline,
+    # invece di ricadere sui default hardcoded del loader.
+    n_samples: Optional[int] = None
+    n_features: Optional[int] = None
+    noise: Optional[float] = None
+    n_informative_reg: Optional[int] = None
 
     @field_validator("n_estimators")
     @classmethod

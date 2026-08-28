@@ -99,7 +99,7 @@ DEPLOYMENT_CONFIG="minimumHealthyPercent=0,maximumPercent=100"
 # un errore di capacita' su create-service/run-task, abbassare questo valore
 # (es. a 2048/8192) e ripetere.
 WORKER_CPU=4096
-WORKER_MEMORY=16384
+WORKER_MEMORY=8192
 ORCH_CPU=2048
 ORCH_MEMORY=8192
 

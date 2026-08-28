@@ -26,7 +26,7 @@
     "_NOTE": "I valori maggiori del numero di worker realmente registrati vengono scartati da ScalabilityScenario. Su AWS il tetto è il desired-count del worker-service: per testare 5 o 7 va prima scalato il service, altrimenti la curva di speedup resta a due soli punti. Per un esperimento di strong scaling onesto in locale/Docker, lanciare con WORKER_CORES=1 (vedi .env/docker-compose.yml) cosicché ogni worker rappresenti 1 unità di calcolo, invece di dividersi dinamicamente i core della macchina host.",
     "_NOTE_n_estimators_override": "Vale SOLO per questo scenario (ScalabilityScenario), non tocca gli altri: con pochi alberi (quelli tipici del manifesto della baseline) l'overhead di rete/orchestrazione domina il tempo totale e lo speedup resta rumore attorno a 1x qualunque sia il numero di worker (vedi 'Problema 2' del 24 agosto: 30 alberi -> ~1.25x, 100 alberi -> 6.51x/efficienza 0.93). Impostare a 0 o rimuovere la chiave per tornare al carico della baseline (comportamento di sempre).",
     "n_estimators_override": 35,
-    "worker_counts_to_test": [1,3,7,12,15]
+    "worker_counts_to_test": [1,3,7,10]
   },
 
   "network_simulation": {

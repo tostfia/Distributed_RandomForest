@@ -476,7 +476,7 @@ class FederatedWorker(BaseWorker):
         seed = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
         task = "regression" if self.is_regression() else "classification"
         target_column = "Target" if task == "regression" else "Label"
-        n_samples = 166666
+        n_samples = hyperparameters.get("n_samples", 166666)
         loader = SyntheticDataLoader(task=task,n_samples=n_samples, random_seed=seed, target_column=target_column,output_dir=self.local_cache_dir)
         df = loader.load()
 

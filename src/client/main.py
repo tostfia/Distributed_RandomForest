@@ -52,7 +52,18 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
     if mode == "federated":
         hp_data["bootstrap"] = False
         hp_data["max_samples"] = 1.0
-    hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
+        hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
+
+    # n_samples/n_features/noise/n_informative_reg vivono a livello RADICE
+    # del manifesto (sibling di 'hyperparameters'), non dentro raw_hp:
+    # vanno letti separatamente, e solo per il sintetico (per il 'real' non
+    # hanno senso, il dataset è già su disco).
+    if dataset_type == "synthetic":
+        hp_data["n_samples"] = baseline_data.get("n_samples")
+        hp_data["n_features"] = baseline_data.get("n_features")
+        hp_data["noise"] = baseline_data.get("noise")
+        hp_data["n_informative_reg"] = baseline_data.get("n_informative_reg")
+
     return Hyperparameters(**hp_data)
 
 

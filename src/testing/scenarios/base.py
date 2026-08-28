@@ -397,3 +397,32 @@ class BaseTestScenario(ABC):
             )
         except Exception as e:
             print(f"[TEST WARN] Impossibile finalizzare lo stato del job {job_id[:8]}: {e}")
+
+
+
+    def _resolve_dataset_shape(self) -> dict:
+        """
+        Parametri di GENERAZIONE del dataset sintetico (n_samples, n_features,
+        noise, n_informative_reg) — SIBLING di 'hyperparameters' nel manifesto,
+        non al suo interno: _resolve_hyperparameters() li ignora di proposito
+        (restituisce solo gli iperparametri sklearn confrontabili con la
+        baseline). Senza questo metodo separato, n_samples del manifesto non
+        arriva MAI ai worker: SyntheticDataLoader lato worker riceve solo il
+        sotto-dizionario 'hyperparameters' e ricade sui propri default.
+        """
+        if self.config.get("dataset_type", "real") != "synthetic":
+            return {}
+        manifest_path = os.path.join(BASELINE_MANIFEST_DIR, "config_synthetic.json")
+        if not os.path.exists(manifest_path):
+            return {}
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f) or {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return {
+            "n_samples": manifest.get("n_samples"),
+            "n_features": manifest.get("n_features"),
+            "noise": manifest.get("noise"),
+            "n_informative_reg": manifest.get("n_informative_reg"),
+        }
