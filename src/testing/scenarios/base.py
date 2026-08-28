@@ -172,7 +172,15 @@ class BaseTestScenario(ABC):
 
         dataset_type = self.config.get("dataset_type", "real")
         if dataset_type != "real":
-            return default
+            # Il dataset sintetico non ha shard fisici di dimensione variabile
+            # (ogni worker genera la stessa n_samples): 'proportional' finirebbe
+            # comunque per ricadere su un'allocazione equa dopo una probe RPC a
+            # vuoto (vedi WARN "Nessuna dimensione di shard rilevata" in
+            # federated.py._allocate_tree_quotas). Dichiariamo 'equal' esplicitamente
+            # così quella probe inutile viene saltata del tutto (vedi
+            # tree_allocation_strategy == "equal" in
+            # FederatedOrchestrator._execute_training_step).
+            return {"strategy": "iid", "alpha": None, "tree_allocation": "equal"}
 
         manifest_path = os.path.join(BASELINE_MANIFEST_DIR, "config_real.json")
         if not os.path.exists(manifest_path):

@@ -428,10 +428,30 @@ class BaseWorker(Service, ABC):
 
         # 2. Gestione asimmetrica Centralizzato vs Federato
         if serialized_X_test is not None:
+            # 'serialized_X_test' può essere:
+            #  - una stringa: chiave nello storage condiviso, da scaricare da sé
+            #    (caso normale ora, stesso pattern di 'serialized_trees_or_key').
+            #  - bytes: già serializzati, per retrocompatibilità con chiamanti
+            #    che non sono ancora passati al pattern a chiave.
+            # In entrambi i casi la cache è chiavata sul valore RICEVUTO (la chiave
+            # stringa, o i bytes grezzi), NON sul contenuto decodificato: se il
+            # worker riceve la stessa chiave/stessi bytes di prima, evita sia il
+            # download sia il re-pickle.
             if self._cached_X_test_bytes != serialized_X_test:
+                if isinstance(serialized_X_test, str):
+                    downloaded = load_bytes_from_shared_storage(
+                        serialized_X_test, self.environment, self.worker_name
+                    )
+                    if downloaded is None:
+                        raise RuntimeError(
+                            f"[{self.worker_name}] Impossibile scaricare il testing set "
+                            f"dalla chiave '{serialized_X_test}' nello storage condiviso."
+                        )
+                    self._cached_X_eval = pickle.loads(downloaded)
+                else:
+                    self._cached_X_eval = pickle.loads(serialized_X_test)
                 self._cached_X_test_bytes = serialized_X_test
-                self._cached_X_eval = pickle.loads(serialized_X_test)
-                print(f"[{self.worker_name}] Decodificato il testing set centralizzato (Shape: {self._cached_X_eval.shape}).")
+                print(f"[{self.worker_name}] Testing set centralizzato scaricato/decodificato (Shape: {self._cached_X_eval.shape}).")
             else:
                 print(f"[{self.worker_name}] Utilizzo del testing set centralizzato già in cache (Shape: {self._cached_X_eval.shape}).")
             X_eval = self._cached_X_eval

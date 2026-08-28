@@ -119,7 +119,19 @@ if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
   exit 1
 fi
 echo "    Service trovati: ${TARGET_SERVICES[*]}"
-aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "${TARGET_SERVICES[@]}" --region "$REGION"
+
+# L'API ECS (sia 'describe-services' sia il waiter 'services-stable' che la
+# usa sotto) accetta al massimo 10 nomi di servizio per chiamata. Con
+# NUM_WORKERS alto + orchestrator-service si supera facilmente il limite,
+# quindi spezziamo la lista in chunk da 10 e aspettiamo ogni chunk
+# separatamente invece che tutti insieme in una singola chiamata.
+CHUNK_SIZE=10
+TOTAL_SERVICES="${#TARGET_SERVICES[@]}"
+for ((i=0; i<TOTAL_SERVICES; i+=CHUNK_SIZE)); do
+  CHUNK=("${TARGET_SERVICES[@]:i:CHUNK_SIZE}")
+  echo "    Attendo stabilità per: ${CHUNK[*]}"
+  aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "${CHUNK[@]}" --region "$REGION"
+done
 echo "    OK, infrastruttura pronta."
 
 echo "==> [3/6] Recupero VPC/subnet/Security Group (stessi usati da deploy.sh)..."
@@ -175,7 +187,7 @@ cat <<EOF > /tmp/test-engine-task-def.json
         {"name": "RPC_SYNC_TIMEOUT_SECONDS", "value": "${RPC_SYNC_TIMEOUT_SECONDS}"},
         {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"}
       ],
-      "command": ["sh", "-c", "sleep infinity"],
+      "command": ["sh", "-c", "timeout 7200 sleep infinity"],
       "linuxParameters": {"initProcessEnabled": true},
       "logConfiguration": {
         "logDriver": "awslogs",

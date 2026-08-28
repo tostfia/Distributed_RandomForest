@@ -32,9 +32,7 @@ if [ -f "$ENV_FILE" ]; then
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
   ENV_NUM_WORKERS=$(get_env_var "NUM_WORKERS")
-  # Timeout RPC (in secondi) verso i worker: letti dal .env se presenti,
-  # altrimenti default identici a quelli finora hardcoded nel codice
-  # dell'orchestratore (1800s training, 900s inferenza).
+  ENV_DATASET_TYPE=$(get_env_var "DATASET_TYPE")
   ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
   ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
 
@@ -42,6 +40,7 @@ if [ -f "$ENV_FILE" ]; then
   DETECTED_MODE="${1:-${ENV_TRAINING_MODE:-centralized}}"
   DETECTED_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
   DETECTED_BUCKET="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
+  DETECTED_DATASET_TYPE="${ENV_DATASET_TYPE:-real}"
   DETECTED_WORKERS="${ENV_NUM_WORKERS:-2}"
   DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800}"
   DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900}"
@@ -51,6 +50,7 @@ else
   DETECTED_REGION="us-east-1"
   DETECTED_BUCKET="my-cluster-datasets-bucket-759804778194-us-east-1-an"
   DETECTED_WORKERS="2"
+  DETECTED_DATASET_TYPE="real"
   DETECTED_RPC_SYNC_TIMEOUT="1800"
   DETECTED_RPC_INFERENCE_SYNC_TIMEOUT="900"
 fi
@@ -105,6 +105,7 @@ ORCH_MEMORY=8192
 
 BUCKET_NAME="$DETECTED_BUCKET"
 TRAINING_MODE="$DETECTED_MODE"
+DATASET_TYPE="$DETECTED_DATASET_TYPE"
 
 if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; then
   echo "ERRORE: TRAINING_MODE deve essere 'centralized' o 'federated', ricevuto: '$TRAINING_MODE'"
@@ -217,7 +218,7 @@ else
   echo "    Cluster già attivo: $CLUSTER_NAME"
 fi
 
-if [ "$TRAINING_MODE" == "federated" ]; then
+if [ "$TRAINING_MODE" == "federated" ] && [ "$DATASET_TYPE" != "synthetic" ]; then
   echo "==> [7b/10] Verifica provisioning shard federati su S3..."
   MISSING_SHARD=0
   for i in $(seq 1 "$WORKER_DESIRED_COUNT"); do
@@ -229,6 +230,9 @@ if [ "$TRAINING_MODE" == "federated" ]; then
     exit 1
   fi
   echo "    OK: shard presenti per tutti i $WORKER_DESIRED_COUNT worker."
+elif [ "$TRAINING_MODE" == "federated" ]; then
+  echo "==> [7b/10] Dataset SINTETICO rilevato: nessun controllo shard su S3 necessario"
+  echo "    (ogni worker genera autonomamente il proprio shard con scikit-learn)."
 fi
 
 if [ "$TRAINING_MODE" == "federated" ]; then
@@ -260,7 +264,8 @@ if [ "$TRAINING_MODE" == "federated" ]; then
         {"name": "EC2_ID", "value": "Fargate"},
         {"name": "RUNNING_IN_DOCKER", "value": "true"},
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
-        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"}
+        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"},
+        {"name": "DATASET_TYPE", "value": "${DATASET_TYPE}"}
       ],
       "command": [
         "sh", "-c",

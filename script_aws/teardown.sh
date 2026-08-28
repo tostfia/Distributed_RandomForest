@@ -29,6 +29,22 @@ else
   TRAINING_MODE="centralized"
 fi
 
+echo "==> [0/6] Arresto di eventuali task one-off del test-engine ancora attivi..."
+STRAY_ENGINE_TASKS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" \
+  --family "rf-test-engine-task" --desired-status RUNNING \
+  --query "taskArns[]" --output text --region "$REGION" 2>/dev/null || echo "")
+
+if [ -n "$STRAY_ENGINE_TASKS" ]; then
+  for task_arn in $STRAY_ENGINE_TASKS; do
+    echo "    Trovato task-engine orfano ancora RUNNING: $task_arn"
+    aws ecs stop-task --cluster "$CLUSTER_NAME" --task "$task_arn" --region "$REGION" > /dev/null 2>&1 \
+      && echo "    Fermato." \
+      || echo "    (stop fallito, verifica manualmente)"
+  done
+else
+  echo "    Nessun task-engine orfano trovato."
+fi
+
 # ---------------------------------------------------------------------
 # Flag opzionali da riga di comando.
 # --purge-shards: elimina anche gli shard federati su S3

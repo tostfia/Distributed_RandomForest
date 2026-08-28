@@ -531,6 +531,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             hyperparameters={
                                 **hp,
                                 "random_state": effective_seed,
+                                "dataset_random_state": seed,
                                 "feature_selezionate": feature_selezionate,
 
                             },
@@ -1009,6 +1010,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                 # col formato a parti, altrimenti reintrodurrebbe un monolitico.
                 self._purge_trees_checkpoint(job_id)
                 self._persist_trees_delta(job_id, alberi_reali, 0, 0)
+                checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
                 print(f"[{self.orchestrator_name}] Checkpoint alberi salvato in {checkpoint_trees_path}.")
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile salvare checkpoint alberi: {e}")

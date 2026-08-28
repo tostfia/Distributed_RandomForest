@@ -149,11 +149,12 @@ class FederatedWorker(BaseWorker):
             self.local_cache_dir = f"/tmp/{self.worker_name}_cache"
             os.makedirs(self.local_cache_dir, exist_ok=True)
 
-            # Download SINCRONO e bloccante, PRIMA che il worker si registri
-            # come disponibile (la registrazione avviene dopo, in
-            # BaseWorker.start_server): quando comincia a servire richieste
-            # ha già tutto in locale.
-            self._bootstrap_local_data_from_s3()
+            dataset_type_env = os.environ.get("DATASET_TYPE", "real").strip().lower()
+            if dataset_type_env == "synthetic":
+                print(f"[{self.worker_name}] [PROVISIONING] Dataset SINTETICO: nessuno shard reale da "
+                      f"scaricare (verrà generato autonomamente al momento del job).")
+            else:
+                self._bootstrap_local_data_from_s3()
         else:
             # Siamo in ambiente "local" (Docker Compose Replicas)
             # Acquisiamo un indice atomico non-bloccante tramite fcntl
@@ -292,8 +293,7 @@ class FederatedWorker(BaseWorker):
         self.y_test = test_df[self.target_column]
         return True
 
-    def exposed_load_local_shard(self):
-        return self._load_data("real")
+
     
     def exposed_train_local_federated_forest(self, job_id: str, dataset_type: str, n_estimators_local: int, worker_index: int, hyperparameters: dict) -> list:
         hyperparameters = obtain(hyperparameters)
@@ -473,7 +473,7 @@ class FederatedWorker(BaseWorker):
 
     def _load_synthetic_data(self, hyperparameters: dict):
         hyperparameters = obtain(hyperparameters)
-        seed = hyperparameters.get("random_state", 123)
+        seed = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
         task = "regression" if self.is_regression() else "classification"
         target_column = "Target" if task == "regression" else "Label"
         n_samples = 166666

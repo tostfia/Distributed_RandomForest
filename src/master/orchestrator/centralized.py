@@ -724,6 +724,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
         X_test = test_df.drop(columns=[actual_target]).to_numpy(dtype=np.float64)
         y_test = test_df[actual_target].to_numpy()
         serialized_X_test = pickle.dumps(X_test)
+        X_test_key = f"inference_testset/{job_id}.pkl"
+        save_bytes_to_shared_storage(X_test_key, serialized_X_test, self.environment, self.orchestrator_name)
 
         # 4. SCOPERTA WORKER E INIZIALIZZAZIONE STRUTTURE FAULT-TOLERANT
         available_workers = ServiceRegistry.get_available_workers(self.environment)
@@ -808,7 +810,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         # non il blob — il worker lo scarica direttamente da lì.
                         raw_response = worker_conn.root.predict_subset_forest(
                             chunk_key, 
-                            serialized_X_test,
+                            X_test_key,
                             tree_type,
                             global_classes
                         )
