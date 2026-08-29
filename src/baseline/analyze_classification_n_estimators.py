@@ -5,6 +5,21 @@ REALE, con la STESSA metodologia già applicata alla regressione
 differenze specifiche alla classificazione. Vedi quel file per la
 descrizione estesa del metodo.
 
+RUOLO NELLA PIPELINE (per confronto con la regressione): a differenza della
+regressione, qui il "Passo 1" (ricerca congiunta degli iperparametri,
+n_estimators incluso) è già dentro run_baseline.py
+(oob_hyperparameter_search) e non viene toccato da questo refactor. Questo
+script resta un raffinamento POST-ricerca: parte dalla combinazione
+vincente in config_real.json e verifica se un n_estimators più basso di
+quello trovato dalla ricerca congiunta mantiene prestazioni equivalenti,
+per risparmiare tempo di training (stesso principio già applicato: 80 ->
+30, ΔF1 trascurabile — vedi commento "OVERRIDE DELIBERATO" in
+run_baseline.py). A differenza della regressione, qui n_estimators FA parte
+dello spazio di ricerca del Passo 1, quindi la combinazione vincente non è
+mai stata scelta ignorando l'effetto dell'ensemble size — la differenza tra
+i due task è quindi solo su COME n_estimators viene raffinato ulteriormente
+dopo, non su come viene scelto la prima volta.
+
 Questo script NON sceglie un valore al posto tuo: produce la curva OOB e
 un punto di verifica Kneedle, ma il criterio primario resta la lettura
 VISIVA del grafico (come dichiarato esplicitamente nell'esempio ufficiale
@@ -30,10 +45,17 @@ METODOLOGIA -- allineata all'esempio ufficiale di scikit-learn:
     la stima OOB è quella di UNA foresta con bootstrap=True, non un
     artefatto di più foreste indipendenti confrontate tra loro.
 
-    LETTURA: il criterio primario per scegliere n_estimators è la lettura
-    VISIVA del grafico -- il Kneedle algorithm (Satopaa et al. 2011) è
-    mantenuto SOLO come verifica di coerenza automatica sovrapposta al
-    grafico, non come criterio sostitutivo.
+    LETTURA: il criterio per scegliere n_estimators è la lettura VISIVA del
+    grafico. Non viene usato alcun algoritmo di knee-detection automatico
+    (rimosso: il Kneedle semplificato usato in una versione precedente di
+    questo script segnala sistematicamente un ginocchio troppo basso su
+    curve che saturano rapidamente -- individua il punto di massima
+    curvatura, non il punto di reale stabilità, e su un plateau lungo la
+    corda del chord-diagram passa quasi rasente alla curva stessa, facendo
+    apparire "massima" la distanza proprio subito dopo la salita iniziale).
+    Come riferimento numerico supplementare resta il punto in cui la
+    copertura OOB raggiunge il 100% (limite INFERIORE assoluto, non un
+    target).
 
 CORREZIONE DEL BIAS OOB A n_estimators BASSO -- stessa correzione già
 applicata in analyze_regression_reference_config.py e nel bug fix di
@@ -203,24 +225,6 @@ def prepare_train_set():
     return X_train, y_train
 
 
-def find_knee_point(grid, values):
-    """
-    Kneedle semplificato (Satopaa et al. 2011), caso concavo/monotono/
-    singolo ginocchio: punto a distanza massima dalla retta che congiunge
-    primo e ultimo punto della curva, dopo normalizzazione min-max. Stessa
-    funzione usata in analyze_regression_reference_config.py. Usato qui
-    SOLO come verifica di coerenza sulla curva F1 corretta, non come
-    criterio sostitutivo della lettura visiva del grafico.
-    """
-    x = np.array(grid, dtype=float)
-    y = np.array(values, dtype=float)
-    x_norm = (x - x.min()) / (x.max() - x.min())
-    y_norm = (y - y.min()) / (y.max() - y.min())
-    diff = y_norm - x_norm
-    knee_idx = int(np.argmax(diff))
-    return grid[knee_idx]
-
-
 def analyze_n_estimators(X, y, tuned_hp):
     # Gli altri iperparametri vengono presi DAL TUNING se disponibili, così
     # la foresta di diagnostica è la stessa che il tuning ha selezionato —
@@ -329,15 +333,6 @@ def analyze_n_estimators(X, y, tuned_hp):
     print("  la classe maggioritaria) — verificare nella tabella quanto è ampio lo scarto")
     print("  ai valori più bassi di n_estimators.")
 
-    f1_corr_values = [r["f1_corr"] for r in rows]
-    valid_for_knee = [(r["n"], r["f1_corr"]) for r in rows if not np.isnan(r["f1_corr"])]
-    knee_grid = [g for g, _ in valid_for_knee]
-    knee_vals = [v for _, v in valid_for_knee]
-    knee_n = find_knee_point(knee_grid, knee_vals) if knee_vals else None
-    print(f"\n  VERIFICA DI COERENZA (Kneedle sulla curva F1 CORRETTA, non su quella naive):")
-    print(f"  ginocchio a n_estimators={knee_n}. Da confermare/correggere leggendo il grafico —")
-    print(f"  questo è un supporto alla lettura visiva, non la sostituisce.")
-
     grid_vals = [r["n"] for r in rows]
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 11), dpi=150, sharex=True)
 
@@ -352,9 +347,6 @@ def analyze_n_estimators(X, y, tuned_hp):
     if tuned_n_estimators:
         ax1.axvline(x=tuned_n_estimators, color='#16a34a', linestyle='--', linewidth=1.5,
                     label=f'n_estimators={tuned_n_estimators} (valore in config_real.json)')
-    if knee_n is not None:
-        ax1.axvline(x=knee_n, color='#7c3aed', linestyle=':', linewidth=1.5,
-                    label=f'Kneedle su F1 corretta: n={knee_n} (verifica)')
     ax1.set_ylabel("Score OOB")
     ax1.set_title("Stabilizzazione OOB al crescere di n_estimators (warm_start)\n"
                    "Random Forest Classifier, dataset reale CICIDS — leggi a occhio dove le curve piene si appiattiscono")
@@ -378,29 +370,31 @@ def analyze_n_estimators(X, y, tuned_hp):
     fig.savefig(out_path)
     print(f"\n  Grafico salvato in: {out_path}")
     print("  Usa questo grafico per la lettura visiva del punto di stabilizzazione:")
-    print("  guarda le curve piene (corrette) nel pannello superiore.")
+    print("  guarda le curve piene (corrette) nel pannello superiore -- dove smettono di")
+    print("  salire in modo apprezzabile e' il valore da riportare in run_baseline.py.")
 
-    return knee_n, rows
+    return rows
 
 
 def main():
     tuned_hp = load_tuned_hyperparameters()
     X, y = prepare_train_set()
-    knee_n, rows = analyze_n_estimators(X, y, tuned_hp)
+    rows = analyze_n_estimators(X, y, tuned_hp)
 
     print("\n" + "=" * 100)
     print("  PROSSIMO PASSO")
     print("=" * 100)
     print("  1. Apri oob_curve_warmstart_classification.png e leggi a occhio dove le curve")
-    print("     BLU/ROSSA piene (accuracy/F1 OOB corrette) si appiattiscono — criterio primario.")
-    print(f"  2. Confronta con il punto di verifica Kneedle stampato sopra (n={knee_n}).")
+    print("     BLU/ROSSA piene (accuracy/F1 OOB corrette) si appiattiscono — unico criterio.")
+    print("  2. Verifica che il valore scelto sia >= al n_estimators a cui la copertura OOB")
+    print("     raggiunge il 100% (stampato sopra): sotto quella soglia la stima OOB è")
+    print("     matematicamente incompleta, a prescindere da come appare la curva.")
     print("  3. Solo dopo aver deciso il valore finale, aggiorna N_ESTIMATORS_OVERRIDE in")
     print("     run_baseline.py e il relativo commento con i numeri (F1 corretta, tempo di")
     print("     fit) letti dalla tabella qui sopra per i punti che confronti, citando:")
     print("     (a) l'esempio ufficiale scikit-learn per il metodo warm_start,")
     print("     (b) la correzione del bias di copertura OOB spiegata in questo script,")
-    print("     (c) Kneedle/Satopaa et al. 2011 solo come verifica di coerenza,")
-    print("     (d) Breiman 2001 Sec. 3.1 per la stima OOB come base del criterio stesso.")
+    print("     (c) Breiman 2001 Sec. 3.1 per la stima OOB come base del criterio stesso.")
 
 
 if __name__ == "__main__":

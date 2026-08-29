@@ -7,6 +7,7 @@ import pickle
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import ParameterSampler, train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix
+from src.shared.utilities.deduplication import remove_near_duplicate_rows
 from src.shared.config import SystemConfig
 
 # Import delle utility condivise e del loader con campionamento probabilistico
@@ -439,6 +440,11 @@ def run_baseline():
     
         print(" • Binarizzazione sul dato intero...")
         df_binarized = preprocessor.binarize_target(df_raw)
+
+        print(" • Deduplicazione righe quasi-duplicate (vedi analyze_train_test_leakage.py")
+        print("   per la diagnostica che giustifica questo passo: ~25% di ridondanza")
+        print("   intra-set misurata sul dataset grezzo, indipendente dallo split)...")
+        df_binarized = remove_near_duplicate_rows(df_binarized, target_column=target_col)
         
         print(" • Esecuzione Split Stratificato...")
         train_df, test_df = splitter.split(df_binarized)
@@ -517,7 +523,7 @@ def run_baseline():
             # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
             # coerente con l'algoritmo di riferimento del progetto.
             param_dist = {
-                'n_estimators': [10, 20, 30, 40, 60, 80],
+                'n_estimators': [10, 20, 30, 40, 60, 80,100],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
                 'max_features': ['sqrt'],

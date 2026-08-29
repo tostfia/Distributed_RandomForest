@@ -1,0 +1,316 @@
+"""
+Ricerca iperparametrica per RandomForestRegressor sul dataset sintetico di
+regressione (make_regression), analoga per filosofia a
+oob_hyperparameter_search in run_baseline.py (usata per il classificatore
+sul dataset reale) — stessa giustificazione teorica (Breiman 2001, Sec.
+3.1: la stima OOB è non distorta e non richiede un k-fold separato), stesso
+uso di ParameterSampler per una ricerca random invece di grid search
+esaustiva.
+
+PASSO 1 di 2 nel processo di scelta della configurazione di riferimento per
+la regressione (SYNTHETIC_REGRESSOR_REFERENCE_HP in run_baseline.py):
+
+    PASSO 1 (questo script) -- studia max_depth, min_samples_split,
+    criterion, max_samples con n_estimators FISSATO a un valore generoso
+    (non campionato: vedi "PERCHE' n_estimators E' FISSATO QUI" sotto).
+    Scrive il vincitore in un manifesto JSON.
+
+    PASSO 2 (analyze_regression_reference_config.py, da rilanciare DOPO
+    questo script) -- legge il manifesto del Passo 1 e studia SOLO
+    n_estimators, con la tecnica a curva OOB via warm_start (stesso
+    principio dell'esempio ufficiale scikit-learn "OOB Errors for Random
+    Forests", la stessa che il professore mostra nel suo notebook di
+    riferimento: curva costruita facendo crescere UNA foresta invece di
+    rifittare da zero a ogni punto della griglia).
+
+'max_features' NON è incluso nella ricerca: resta fisso a 1/3, la stessa
+euristica standard (Hastie/Tibshirani/Friedman, post-Breiman-2001, ripresa
+da scikit-learn come default storico per RandomForestRegressor) già
+giustificata per citazione in run_baseline.py. Vedi il commento "NOTA
+CITAZIONE" lì per il dettaglio della citazione.
+
+PERCHE' n_estimators E' FISSATO QUI (non campionato insieme al resto):
+    Includere n_estimators nello stesso spazio di ricerca random di
+    max_depth/min_samples_split/ecc. (come fa oob_hyperparameter_search
+    per il classificatore) produce un problema quando poi si vuole
+    RIDURRE n_estimators per efficienza in un secondo momento: la
+    combinazione vincente sarebbe stata scelta valutando ciascuna
+    combinazione di (max_depth, ...) a un n_estimators DIVERSO da quello
+    campionato per le altre — un confronto "iniquo" tra combinazioni, in
+    cui una combinazione può vincere semplicemente perché è stata valutata
+    con più alberi, non perché è intrinsecamente migliore (Breiman 2001,
+    Sec. 2: Var = rho*sigma^2 + (1-rho)/n * sigma^2 — a n basso il secondo
+    termine pesa ancora molto e può dominare la differenza tra
+    combinazioni, mascherando la vera differenza in rho e sigma^2).
+
+    Fissando n_estimators a un valore generoso E UGUALE per tutte le
+    combinazioni (qui 150, vedi N_ESTIMATORS_FOR_SEARCH sotto), il secondo
+    termine (1-rho)/n * sigma^2 è reso trascurabile e comparabile per
+    tutte le combinazioni: il ranking tra combinazioni riflette quindi la
+    vera qualità (rho*sigma^2 all'asintoto), non un artefatto della
+    variabilità residua di ensemble piccoli. Il Passo 2 (curva warm-start)
+    verifica poi, sulla combinazione vincente, se un n_estimators più
+    basso di 150 raggiunge già prestazioni equivalenti — a quel punto il
+    confronto è legittimo perché si guarda la traiettoria di UNA sola
+    foresta che cresce, non un confronto tra foreste diverse.
+
+SOTTOCAMPIONAMENTO DIAGNOSTICO: come per analyze_classification_n_estimators.py
+(DIAGNOSTIC_SUBSAMPLE_SIZE), questa ricerca gira su un sottocampione ridotto
+del dataset sintetico (50.000 invece di 300.000) solo per contenere il
+tempo totale (decine di fit, ciascuno con 150 alberi). L'esperimento finale
+in run_baseline.py resta sui 300.000 campioni completi, con la
+combinazione vincente qui trovata.
+
+Uso:
+    python -m src.baseline.analyze_regression_hyperparameter_search
+"""
+import os
+import json
+import time
+import numpy as np
+from sklearn.datasets import make_regression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import ParameterSampler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+try:
+    from sklearn.ensemble._forest import _generate_sample_indices
+    _COVERAGE_CHECK_AVAILABLE = True
+except ImportError:
+    _COVERAGE_CHECK_AVAILABLE = False
+    print("[ATTENZIONE] sklearn.ensemble._forest._generate_sample_indices non "
+          "disponibile in questa versione di sklearn: la correzione del bias OOB "
+          "verra' saltata (si usera' oob_prediction_ cosi' come fornito da "
+          "sklearn, con lo stesso bias pessimistico spiegato in "
+          "analyze_regression_reference_config.py).")
+
+# Stessi valori di dataset di analyze_regression_reference_config.py /
+# run_baseline.py / SyntheticDataLoader — aggiornare in entrambi i posti se
+# cambi la ricetta del dataset.
+RANDOM_SEED = 123
+N_SAMPLES_FULL = 300_000
+N_FEATURES = 30
+N_INFORMATIVE_REG = int(N_FEATURES * 0.5)  # 15
+NOISE = 10.0
+
+# Sottocampione SOLO per questa ricerca (non per run_baseline.py, che resta
+# sui 300.000 campioni completi con la combinazione vincente). Vedi
+# "SOTTOCAMPIONAMENTO DIAGNOSTICO" in cima al file.
+DIAGNOSTIC_SUBSAMPLE_SIZE = 50_000
+
+FIXED_MAX_FEATURES = 1 / 3  # da run_baseline.py, giustificato per citazione (non qui)
+
+# Vedi "PERCHE' n_estimators E' FISSATO QUI" in cima al file.
+N_ESTIMATORS_FOR_SEARCH = 150
+
+N_ITER_SEARCH = 40  # combinazioni random campionate da ParameterSampler
+
+PARAM_DIST = {
+    'max_depth': [10, 25, None],
+    'min_samples_split': [2, 5, 10],
+    # 'absolute_error' e' molto piu' lento di 'squared_error' (richiede il
+    # calcolo della mediana ad ogni split, O(n log n) contro O(n) di
+    # 'squared_error'): con N_ITER_SEARCH=40 e N_ESTIMATORS_FOR_SEARCH=150,
+    # le combinazioni con 'absolute_error' possono dominare il tempo totale.
+    # Lasciato nello spazio di ricerca deliberatamente ("non lasciare nulla
+    # al caso"): se il tempo totale non e' sostenibile nella finestra di
+    # credenziali AWS Academy, rimuovi 'absolute_error' da questa lista
+    # invece di ridurre N_ITER_SEARCH (altrimenti si esplora peggio lo
+    # spazio invece di ridurre onestamente lo spazio stesso).
+    'criterion': ['squared_error', 'absolute_error'],
+    'max_samples': [0.5, 0.7, 0.8, 1.0],
+}
+
+OUTPUT_DIR = "outputs_baseline"
+OUTPUT_MANIFEST_PATH = os.path.join(OUTPUT_DIR, "config_synthetic_regressor_search.json")
+
+
+def oob_hyperparameter_search_regressor(X_train, y_train, param_distributions, n_iter,
+                                         n_estimators_fixed, random_state,
+                                         refit_metric="r2", n_jobs=None):
+    """
+    Ricerca iperparametrica per RandomForestRegressor basata su stima OOB
+    invece che su k-fold Cross-Validation — stessa metodologia di
+    oob_hyperparameter_search in run_baseline.py (versione classificatore),
+    stessa giustificazione teorica (Breiman 2001, Sec. 3.1).
+
+    A differenza della versione classificatore, n_estimators non fa parte
+    di param_distributions: è passato separatamente e fissato uguale per
+    tutte le combinazioni (vedi "PERCHE' n_estimators E' FISSATO QUI" nel
+    docstring del modulo).
+
+    CORREZIONE DEL BIAS OOB (stessa di analyze_regression_reference_config.py):
+    a differenza della classificazione, per la regressione una riga mai
+    out-of-bag riempita da sklearn con 0.0 è indistinguibile da una vera
+    predizione 0.0 — non basta un controllo "somma == 0". Si ricostruisce
+    quindi la copertura dagli indici di bootstrap
+    (sklearn.ensemble._forest._generate_sample_indices, stessa API privata
+    usata in analyze_regression_reference_config.py) ed R²/MAE/MSE sono
+    calcolati SOLO sulle righe realmente coperte da almeno un albero.
+
+    Ritorna (best_params, results): best_params è un dict SENZA
+    n_estimators (va aggiunto dal chiamante, che conosce
+    n_estimators_fixed); results è una lista di dict con le metriche OOB e
+    il tempo di fit per ogni combinazione esplorata.
+    """
+    if n_jobs is None:
+        cpu_count = os.cpu_count() or 2
+        n_jobs = max(1, cpu_count - 1)
+
+    n_samples = X_train.shape[0]
+    sampler = list(ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state))
+    results = []
+    total = len(sampler)
+
+    print(f"[OOB search regressore] {total} combinazioni da esplorare, "
+          f"n_estimators fissato a {n_estimators_fixed} per tutte, ogni fit userà "
+          f"n_jobs={n_jobs}. ATTENZIONE: le combinazioni con max_depth=None e "
+          f"criterion='absolute_error' possono richiedere qualche minuto CIASCUNA.", flush=True)
+
+    for i, params in enumerate(sampler, start=1):
+        print(f"[OOB search regressore] ({i}/{total}) in corso: {params} ...", flush=True)
+
+        rf_kwargs = dict(params)
+        rf_kwargs["n_estimators"] = n_estimators_fixed
+        rf_kwargs["max_features"] = FIXED_MAX_FEATURES
+        rf_kwargs["bootstrap"] = True  # richiesto dalla stima OOB, non negoziabile qui
+        rf_kwargs["random_state"] = random_state
+        rf_kwargs["oob_score"] = True
+        rf_kwargs["n_jobs"] = n_jobs
+
+        rf = RandomForestRegressor(**rf_kwargs)
+        start = time.perf_counter()
+        rf.fit(X_train, y_train)
+        fit_time = time.perf_counter() - start
+
+        if _COVERAGE_CHECK_AVAILABLE:
+            covered = np.zeros(n_samples, dtype=bool)
+            for tree in rf.estimators_:
+                in_bag = _generate_sample_indices(tree.random_state, n_samples, n_samples)
+                in_bag_mask = np.zeros(n_samples, dtype=bool)
+                in_bag_mask[in_bag] = True
+                covered |= ~in_bag_mask
+            n_missing_oob = int((~covered).sum())
+            y_valid = y_train[covered]
+            pred_valid = rf.oob_prediction_[covered]
+        else:
+            n_missing_oob = 0
+            y_valid = y_train
+            pred_valid = rf.oob_prediction_
+
+        oob_r2 = r2_score(y_valid, pred_valid)
+        oob_mae = mean_absolute_error(y_valid, pred_valid)
+        oob_mse = mean_squared_error(y_valid, pred_valid)
+
+        print(f"[OOB search regressore] ({i}/{total}) completata in {fit_time:.1f}s — "
+              f"OOB R²={oob_r2:.5f}, OOB MSE={oob_mse:.3f}", flush=True)
+
+        if n_missing_oob > 0:
+            pct_missing = n_missing_oob / n_samples * 100
+            print(f"   [OOB] max_samples={params.get('max_samples')}: {n_missing_oob} righe "
+                  f"({pct_missing:.3f}%) senza copertura OOB, escluse dal calcolo delle metriche.")
+
+        results.append({
+            "params": params,
+            "oob_r2": oob_r2,
+            "oob_mae": oob_mae,
+            "oob_mse": oob_mse,
+            "fit_time": fit_time,
+            "n_missing_oob": n_missing_oob,
+        })
+
+    metric_key = f"oob_{refit_metric}"
+    minimize = refit_metric in ("mae", "mse")  # per MAE/MSE piu' basso e' meglio
+    results.sort(key=lambda r: r[metric_key], reverse=not minimize)
+    best_params = dict(results[0]["params"])
+
+    return best_params, results
+
+
+def prepare_diagnostic_subsample():
+    print(f"Generazione dataset sintetico di riferimento (n_samples={N_SAMPLES_FULL}, "
+          f"n_features={N_FEATURES}, n_informative={N_INFORMATIVE_REG}, noise={NOISE}, "
+          f"seed={RANDOM_SEED})...")
+    X, y = make_regression(
+        n_samples=N_SAMPLES_FULL, n_features=N_FEATURES,
+        n_informative=N_INFORMATIVE_REG, noise=NOISE, random_state=RANDOM_SEED,
+    )
+    if N_SAMPLES_FULL > DIAGNOSTIC_SUBSAMPLE_SIZE:
+        print(f"Sottocampionamento diagnostico: {N_SAMPLES_FULL:,} -> "
+              f"{DIAGNOSTIC_SUBSAMPLE_SIZE:,} righe (seed={RANDOM_SEED}). Solo per questa "
+              f"ricerca — vedi 'SOTTOCAMPIONAMENTO DIAGNOSTICO'.".replace(",", "."))
+        rng = np.random.RandomState(RANDOM_SEED)
+        idx = rng.choice(N_SAMPLES_FULL, size=DIAGNOSTIC_SUBSAMPLE_SIZE, replace=False)
+        X, y = X[idx], y[idx]
+    return X, y
+
+
+def main():
+    X, y = prepare_diagnostic_subsample()
+
+    best_params, results = oob_hyperparameter_search_regressor(
+        X, y,
+        param_distributions=PARAM_DIST,
+        n_iter=N_ITER_SEARCH,
+        n_estimators_fixed=N_ESTIMATORS_FOR_SEARCH,
+        random_state=RANDOM_SEED,
+        refit_metric="r2",
+    )
+
+    results_sorted = sorted(results, key=lambda r: r["oob_r2"], reverse=True)
+    top_n = min(15, len(results_sorted))
+    print("\n" + "=" * 100)
+    print(f"  RICERCA IPERPARAMETRICA VIA STIMA OOB — RandomForestRegressor "
+          f"(n_estimators={N_ESTIMATORS_FOR_SEARCH} fisso, max_features={FIXED_MAX_FEATURES:.4f} fisso)")
+    print("=" * 100)
+    print(f"  {len(results_sorted)} combinazioni esplorate, un solo fit ciascuna (nessuna k-fold CV).")
+    print(f"  Le {top_n} migliori per OOB R²:")
+    print("  " + "-" * 96)
+    print(f"  {'Rank':<5} | {'depth':<6} | {'min_split':<10} | {'criterion':<14} | "
+          f"{'max_samples':<12} | {'OOB R²':<10} | {'OOB MSE':<10} | {'Tempo(s)'}")
+    print("  " + "-" * 96)
+    for rank, r in enumerate(results_sorted[:top_n], start=1):
+        p = r["params"]
+        depth_str = str(p.get("max_depth")) if p.get("max_depth") is not None else "None"
+        print(f"  {rank:<5} | {depth_str:<6} | {p.get('min_samples_split'):<10} | "
+              f"{p.get('criterion'):<14} | {p.get('max_samples'):<12} | "
+              f"{r['oob_r2']:<10.5f} | {r['oob_mse']:<10.3f} | {r['fit_time']:8.2f}")
+    print("  " + "-" * 96)
+
+    print(f"\n  Combinazione vincente: {best_params}")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    manifest = {
+        "search_metadata": {
+            "n_estimators_fixed_during_search": N_ESTIMATORS_FOR_SEARCH,
+            "max_features_fixed": FIXED_MAX_FEATURES,
+            "diagnostic_subsample_size": DIAGNOSTIC_SUBSAMPLE_SIZE,
+            "n_iter": N_ITER_SEARCH,
+            "random_state": RANDOM_SEED,
+        },
+        "hyperparameters": {
+            "max_depth": best_params.get("max_depth"),
+            "min_samples_split": int(best_params.get("min_samples_split")),
+            "max_features": FIXED_MAX_FEATURES,
+            "criterion": best_params.get("criterion"),
+            "bootstrap": True,
+            "max_samples": float(best_params.get("max_samples")),
+        },
+    }
+    with open(OUTPUT_MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\n  Manifesto salvato in: {OUTPUT_MANIFEST_PATH}")
+
+    print("\n" + "=" * 100)
+    print("  PROSSIMO PASSO")
+    print("=" * 100)
+    print("  Rilancia analyze_regression_reference_config.py: leggerà automaticamente questo")
+    print(f"  manifesto ({OUTPUT_MANIFEST_PATH}) per max_depth/min_samples_split/criterion/")
+    print("  max_samples, e studierà SOLO n_estimators con la curva OOB a warm_start —")
+    print(f"  verificando se un valore più basso di {N_ESTIMATORS_FOR_SEARCH} raggiunge già")
+    print("  prestazioni equivalenti (stesso principio già applicato con successo alla")
+    print("  classificazione: n_estimators 80 -> 30, delta F1 trascurabile).")
+
+
+if __name__ == "__main__":
+    main()

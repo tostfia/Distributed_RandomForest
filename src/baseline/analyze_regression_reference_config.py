@@ -2,6 +2,17 @@
 Diagnostica per la config di riferimento della regressione sintetica
 (SYNTHETIC_REGRESSOR_REFERENCE_HP in run_baseline.py).
 
+PASSO 2 di 2 nel processo di scelta della configurazione di riferimento:
+esegui PRIMA analyze_regression_hyperparameter_search.py (Passo 1), che
+studia max_depth/min_samples_split/criterion/max_samples con n_estimators
+fissato a un valore generoso e scrive il vincitore in
+outputs_baseline/config_synthetic_regressor_search.json. Questo script
+(Passo 2) legge quel manifesto e studia SOLO n_estimators, verificando se
+un valore più basso di quello usato nel Passo 1 raggiunge già prestazioni
+equivalenti. Se il manifesto non esiste ancora, questo script gira comunque
+con valori di default neutri, ma il risultato non va usato per aggiornare
+run_baseline.py finché il Passo 1 non è stato eseguito.
+
 Il dataset e' interamente sintetico (sklearn.make_regression): nessun file
 esterno necessario, lo script gira standalone e riproduce esattamente la
 ricetta usata da SyntheticDataLoader per il task di regressione.
@@ -23,14 +34,18 @@ METODOLOGIA -- allineata all'esempio ufficiale di scikit-learn:
     la curva confronta foreste diverse punto per punto, non la stessa
     foresta osservata a diversi stadi).
 
-    LETTURA: come nell'esempio ufficiale, il criterio primario per scegliere
+    LETTURA: come nell'esempio ufficiale, il criterio per scegliere
     n_estimators e' la lettura VISIVA del grafico -- il professore lo
     dichiara esplicitamente ("the resulting plot allows a practitioner to
     approximate a suitable value of n_estimators at which the error
-    stabilizes"). Il Kneedle algorithm (Satopaa et al. 2011, vedi versione
-    precedente di questo script) viene mantenuto SOLO come verifica di
-    coerenza automatica sovrapposta al grafico, non come criterio
-    sostitutivo della lettura visiva.
+    stabilizes"). Non viene usato alcun algoritmo di knee-detection
+    automatico (rimosso: il Kneedle semplificato usato in una versione
+    precedente di questo script tende a segnalare un ginocchio
+    sistematicamente troppo basso su curve che saturano rapidamente,
+    perche' individua il punto di massima curvatura e non il punto di
+    reale stabilita' -- vedi discussione a parte). Come riferimento
+    numerico supplementare resta il punto in cui la copertura OOB
+    raggiunge il 100% (limite INFERIORE assoluto, non un target).
 
 CORREZIONE IMPORTANTE (bias nell'OOB score di sklearn a n_estimators bassi):
     Quando pochi alberi sono stati addestrati, alcuni campioni di training
@@ -69,8 +84,8 @@ CORREZIONE IMPORTANTE (bias nell'OOB score di sklearn a n_estimators bassi):
 Produce quattro evidenze:
 
   1. n_estimators -- curva OOB (naive vs corretta) al crescere del numero
-     di alberi via warm_start, con punto di verifica Kneedle sovrapposto
-     alla curva corretta.
+     di alberi via warm_start. Nessun punto "ottimo" automatico: la scelta
+     resta la lettura visiva del grafico.
 
   2. max_features=1/3 -- NON selezionato empiricamente: e' un valore
      dichiarato a priori in run_baseline.py, giustificato per citazione
@@ -83,6 +98,8 @@ Produce quattro evidenze:
 Uso:
     python -m src.baseline.analyze_regression_reference_config
 """
+import os
+import json
 import time
 import numpy as np
 import matplotlib
@@ -101,6 +118,43 @@ except ImportError:
           "disponibile in questa versione di sklearn: la correzione del bias OOB "
           "verra' saltata, verra' mostrata solo la curva 'naive'. Verificare "
           "manualmente la versione di sklearn installata.")
+
+# ---------------------------------------------------------------------------
+# PASSO 2 di 2: questo script assume che PASSO 1
+# (analyze_regression_hyperparameter_search.py) sia già stato eseguito.
+# Legge il suo manifesto per max_depth/min_samples_split/criterion/
+# max_samples, e studia SOLO n_estimators via curva OOB a warm_start.
+# Stesso pattern già usato da analyze_classification_n_estimators.py con
+# config_real.json (load_tuned_hyperparameters()).
+# ---------------------------------------------------------------------------
+SEARCH_MANIFEST_PATH = os.path.join("outputs_baseline", "config_synthetic_regressor_search.json")
+
+
+def load_searched_hyperparameters():
+    """
+    Ritorna il dizionario 'hyperparameters' scritto da
+    analyze_regression_hyperparameter_search.py (Passo 1) se esiste,
+    altrimenti None. Non decide nulla: si limita a leggere cosa la ricerca
+    ha già scelto, così la curva di n_estimators viene costruita intorno
+    alla combinazione realmente vincente, non a un'ipotesi arbitraria.
+    """
+    if not os.path.exists(SEARCH_MANIFEST_PATH):
+        print(f"[ATTENZIONE] '{SEARCH_MANIFEST_PATH}' non trovato: il Passo 1 "
+              f"(analyze_regression_hyperparameter_search.py) non è ancora stato "
+              f"eseguito. Uso valori di default neutri (max_depth=None, "
+              f"min_samples_split=2, criterion='squared_error', max_samples=1.0) "
+              f"SOLO per un'esplorazione preliminare — il risultato di questa run "
+              f"NON va usato per aggiornare SYNTHETIC_REGRESSOR_REFERENCE_HP finché "
+              f"il Passo 1 non è stato eseguito e questo script rilanciato.")
+        return None
+    with open(SEARCH_MANIFEST_PATH, "r") as f:
+        manifest = json.load(f)
+    hp = manifest.get("hyperparameters")
+    if not hp:
+        print(f"[ATTENZIONE] '{SEARCH_MANIFEST_PATH}' trovato ma senza sezione 'hyperparameters'.")
+        return None
+    print(f"[INFO] Iperparametri dal Passo 1 letti da '{SEARCH_MANIFEST_PATH}': {hp}")
+    return hp
 
 # ---------------------------------------------------------------------------
 # Config del dataset -- stessi valori di run_baseline.py / SyntheticDataLoader
@@ -128,40 +182,40 @@ N_ESTIMATORS_GRID = list(range(MIN_ESTIMATORS, MAX_ESTIMATORS + 1, STEP_ESTIMATO
 
 MAX_FEATURES_GRID = [1 / 10, 1 / 5, 1 / 3, 1 / 2, 1.0]  # solo descrittivo, vedi punto 2
 
+# n_estimators usato SOLO per lo sweep descrittivo di max_features (punto 2),
+# non e' una proposta di valore finale. Aggiornalo a mano dopo aver letto a
+# occhio il grafico del punto 1 (oob_curve_warmstart_regression.png).
+REFERENCE_N_ESTIMATORS_FOR_SWEEP = 100
 
-def find_knee_point(grid, values):
-    """
-    Kneedle semplificato (Satopaa et al. 2011), caso concavo/monotono/
-    singolo ginocchio: punto a distanza massima dalla retta che congiunge
-    primo e ultimo punto della curva, dopo normalizzazione min-max.
-    Usato qui SOLO come verifica di coerenza sulla curva corretta, non come
-    criterio sostitutivo della lettura visiva del grafico.
-    """
-    x = np.array(grid, dtype=float)
-    y = np.array(values, dtype=float)
-    x_norm = (x - x.min()) / (x.max() - x.min())
-    y_norm = (y - y.min()) / (y.max() - y.min())
-    diff = y_norm - x_norm
-    knee_idx = int(np.argmax(diff))
-    return grid[knee_idx]
 
-def analyze_n_estimators(X, y):
+def analyze_n_estimators(X, y, searched_hp):
+    if searched_hp:
+        base_kwargs = dict(
+            max_depth=searched_hp.get("max_depth"),
+            min_samples_split=int(searched_hp.get("min_samples_split", 2)),
+            criterion=searched_hp.get("criterion", "squared_error"),
+            max_samples=float(searched_hp.get("max_samples", 1.0)),
+        )
+    else:
+        base_kwargs = dict(
+            max_depth=None, min_samples_split=2,
+            criterion="squared_error", max_samples=1.0,
+        )
+
     print("=" * 84)
     print("  1. CURVA OOB CON warm_start (metodo: esempio ufficiale scikit-learn)")
     print(f"     seed={RANDOM_SEED}, griglia {MIN_ESTIMATORS}..{MAX_ESTIMATORS} step {STEP_ESTIMATORS}")
+    print(f"     altri iperparametri (dal Passo 1): {base_kwargs}")
     print("=" * 84)
 
     rf = RandomForestRegressor(
         warm_start=True,
         oob_score=True,
         max_features=FIXED_MAX_FEATURES,
-        max_depth=None,
-        min_samples_split=2,
-        criterion="squared_error",
         bootstrap=True,
-        max_samples=1.0,
         n_jobs=-1,
         random_state=RANDOM_SEED,
+        **base_kwargs,
     )
 
     covered = np.zeros(N_SAMPLES, dtype=bool)
@@ -225,15 +279,7 @@ def analyze_n_estimators(X, y):
         print("  OOB (sklearn li riempie con predizione=0.0 invece di escluderli). Verificare")
         print("  nella tabella sopra quanto e' ampio lo scarto ai valori piu' bassi di n.")
 
-        r2_corrected_values = [r["r2_corrected"] for r in rows]
-        knee_n = find_knee_point(N_ESTIMATORS_GRID, r2_corrected_values)
-        print(f"\n  VERIFICA DI COERENZA (Kneedle sulla curva CORRETTA, non su quella naive):")
-        print(f"  ginocchio a n_estimators={knee_n}. Da confermare/correggere leggendo il")
-        print(f"  grafico -- questo e' un supporto alla lettura visiva, non la sostituisce.")
-    else:
-        knee_n = None
-
-    # --- Grafico: naive vs corretta, stile esempio ufficiale + marcatore Kneedle ---
+    # --- Grafico: naive vs corretta, stile esempio ufficiale ---
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 11), dpi=150, sharex=True)
 
     ax1.plot(N_ESTIMATORS_GRID, [r["r2_naive"] for r in rows], marker='o', markersize=3,
@@ -241,9 +287,6 @@ def analyze_n_estimators(X, y):
     if _COVERAGE_CHECK_AVAILABLE:
         ax1.plot(N_ESTIMATORS_GRID, [r["r2_corrected"] for r in rows], marker='o', markersize=3,
                  color='#2563eb', linewidth=2, label="R² OOB corretto (solo campioni davvero OOB)")
-        if knee_n is not None:
-            ax1.axvline(x=knee_n, color='#16a34a', linestyle='--', linewidth=1.5,
-                        label=f'Kneedle su curva corretta: n={knee_n} (verifica)')
     ax1.set_ylabel("OOB R²")
     ax1.set_title("Curva OOB al crescere di n_estimators (warm_start)\n"
                    "Leggi a occhio dove la curva BLU si appiattisce -- criterio primario")
@@ -268,12 +311,24 @@ def analyze_n_estimators(X, y):
     fig.savefig(out_path)
     print(f"\n  Grafico salvato in: {out_path}")
     print("  Usa questo grafico per la lettura visiva del punto di stabilizzazione:")
-    print("  guarda la curva blu (corretta) nel pannello superiore.")
+    print("  guarda la curva blu (corretta) nel pannello superiore -- dove smette di")
+    print("  salire in modo apprezzabile e' il valore da riportare in run_baseline.py.")
 
-    return knee_n
 
+def analyze_max_features_descriptive(X, y, reference_n_estimators, searched_hp):
+    if searched_hp:
+        base_kwargs = dict(
+            max_depth=searched_hp.get("max_depth"),
+            min_samples_split=int(searched_hp.get("min_samples_split", 2)),
+            criterion=searched_hp.get("criterion", "squared_error"),
+            max_samples=float(searched_hp.get("max_samples", 1.0)),
+        )
+    else:
+        base_kwargs = dict(
+            max_depth=None, min_samples_split=2,
+            criterion="squared_error", max_samples=1.0,
+        )
 
-def analyze_max_features_descriptive(X, y, reference_n_estimators):
     print("\n" + "=" * 84)
     print(f"  2. max_features -- SWEEP DESCRITTIVA (n_estimators={reference_n_estimators})")
     print("=" * 84)
@@ -285,9 +340,9 @@ def analyze_max_features_descriptive(X, y, reference_n_estimators):
 
     for mf in MAX_FEATURES_GRID:
         rf = RandomForestRegressor(
-            n_estimators=reference_n_estimators, max_features=mf, max_depth=None,
-            min_samples_split=2, criterion="squared_error", bootstrap=True,
-            max_samples=1.0, n_jobs=-1, random_state=RANDOM_SEED, oob_score=True,
+            n_estimators=reference_n_estimators, max_features=mf,
+            bootstrap=True, n_jobs=-1, random_state=RANDOM_SEED, oob_score=True,
+            **base_kwargs,
         )
         start = time.perf_counter()
         rf.fit(X, y)
@@ -335,9 +390,15 @@ def main():
         n_informative=N_INFORMATIVE_REG, noise=NOISE, random_state=RANDOM_SEED,
     )
 
-    knee_n = analyze_n_estimators(X, y)
-    reference_n = knee_n if knee_n is not None else 80
-    analyze_max_features_descriptive(X, y, reference_n)
+    searched_hp = load_searched_hyperparameters()
+
+    analyze_n_estimators(X, y, searched_hp)
+    # Valore di riferimento per lo sweep descrittivo di max_features: fisso,
+    # non piu' derivato da un ginocchio automatico. Se dopo la lettura
+    # visiva del grafico punto 1 scegli un n_estimators diverso, aggiorna
+    # questa costante e rilancia solo questa parte.
+    reference_n = REFERENCE_N_ESTIMATORS_FOR_SWEEP
+    analyze_max_features_descriptive(X, y, reference_n, searched_hp)
     analyze_noise()
 
     print("\n" + "=" * 84)
@@ -351,14 +412,23 @@ def main():
     print("\n" + "=" * 84)
     print("  PROSSIMO PASSO")
     print("=" * 84)
+    if searched_hp is None:
+        print("  ATTENZIONE: questa run ha usato valori di default neutri per max_depth/")
+        print("  min_samples_split/criterion/max_samples (Passo 1 non ancora eseguito). Esegui")
+        print("  prima analyze_regression_hyperparameter_search.py, poi rilancia questo script")
+        print("  prima di usare i numeri qui sopra per aggiornare run_baseline.py.")
     print("  1. Apri oob_curve_warmstart_regression.png e leggi a occhio dove la curva blu")
-    print("     (R² OOB corretto) si appiattisce -- questo e' il criterio primario.")
-    print(f"  2. Confronta con il punto di verifica Kneedle stampato sopra (n={reference_n}).")
+    print("     (R² OOB corretto) si appiattisce -- questo e' l'unico criterio.")
+    print("  2. Verifica che il valore scelto sia >= al n_estimators a cui la copertura OOB")
+    print("     raggiunge il 100% (stampato sopra): sotto quella soglia la stima OOB e'")
+    print("     matematicamente incompleta, a prescindere da come appare la curva.")
     print("  3. Solo dopo aver deciso il valore finale, aggiorna")
-    print("     SYNTHETIC_REGRESSOR_REFERENCE_HP in run_baseline.py e il relativo commento,")
-    print("     citando: (a) l'esempio ufficiale scikit-learn per il metodo warm_start,")
-    print("     (b) la correzione del bias di copertura OOB spiegata in questo script,")
-    print("     (c) Kneedle/Satopaa et al. 2011 solo come verifica di coerenza.")
+    print("     SYNTHETIC_REGRESSOR_REFERENCE_HP in run_baseline.py (n_estimators E gli")
+    print("     altri iperparametri, che ora vengono dal Passo 1, non piu' da valori")
+    print("     dichiarati a priori) e il relativo commento, citando: (a) l'esempio")
+    print("     ufficiale scikit-learn per il metodo warm_start, (b) la correzione del")
+    print("     bias di copertura OOB spiegata in questo script, (c) la ricerca OOB")
+    print("     congiunta del Passo 1 per gli altri iperparametri.")
 
 
 if __name__ == "__main__":

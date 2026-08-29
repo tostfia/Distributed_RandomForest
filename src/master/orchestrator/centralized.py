@@ -10,6 +10,7 @@ from rpyc.utils.classic import obtain
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
+from src.shared.utilities.deduplication import remove_near_duplicate_rows
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
@@ -153,7 +154,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
             print(f"[DEBUG] dataset_path ricevuto = {repr(dataset_path)}")
-            loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.01, dataset_seed=base_seed)
+            loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.05, dataset_seed=base_seed)
             df_raw = loader.load()
             
             # Istanziamo il nuovo preprocessor modificato
@@ -161,6 +162,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             # ─── FASE 1: BINARIZZAZIONE SUL DATO INTERO ───
             df_binarized = preprocessor.binarize_target(df_raw)
             del df_raw
+            df_binarized = remove_near_duplicate_rows(df_binarized, target_column=target_col)
             # ─── FASE 2: SPLIT STRATIFICATO ADESSO SICURO ───
             print(f"[{self.orchestrator_name}] Esecuzione Split Stratificato...")
             train_df, test_df = splitter.split(df_binarized)
