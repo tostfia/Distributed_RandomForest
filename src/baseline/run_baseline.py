@@ -34,7 +34,7 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 # del dataset) dalla complessità del modello.
 # ---------------------------------------------------------------------------
 SYNTHETIC_REGRESSOR_REFERENCE_HP = {
-  
+
     "n_estimators": 35,
     "max_depth": None,
     "min_samples_split": 2,
@@ -136,21 +136,6 @@ def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, ran
         start = time.perf_counter()
         rf.fit(X_train, y_train)
         fit_time = time.perf_counter() - start
-
-        # BUG FIX (corretto due volte: la prima versione controllava NaN, ma
-        # verificando il codice sorgente di scikit-learn le righe senza
-        # copertura OOB vengono riempite di ZERI su tutte le classi, non NaN
-        # — np.isnan non le avrebbe mai trovate). Quando n_estimators è basso
-        # (specie con max_samples alto), alcune righe del training set non
-        # finiscono MAI nel set OOB di nessun albero — sklearn le lascia a
-        # [0, 0, ...] in oob_decision_function_ (da qui il warning "Some
-        # inputs do not have OOB scores"). Senza questo controllo, np.argmax
-        # su una riga di soli zeri restituisce silenziosamente l'indice 0
-        # (classe Benign) come se fosse una predizione valida, distorcendo
-        # accuracy/F1 verso la classe maggioritaria — l'opposto della
-        # proprietà "non distorta" che giustifica il metodo (Breiman 2001,
-        # Sec. 3.1). Le righe senza copertura OOB vengono escluse dal
-        # calcolo, non trattate come predizioni "gratuite" sulla classe 0.
         oob_decision = rf.oob_decision_function_
         valid_mask = oob_decision.sum(axis=1) != 0
         n_missing_oob = int((~valid_mask).sum())
@@ -189,6 +174,121 @@ def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, ran
     return best_params, results
 
 
+# ---------------------------------------------------------------------------
+# SELEZIONE INTERATTIVA DI n_estimators A VALLE DEL TUNING OOB
+#
+# MOTIVAZIONE: la ricerca OOB (oob_hyperparameter_search) massimizza l'F1 su
+# tutto lo spazio degli iperparametri esplorato, ma il guadagno marginale di
+# alberi aggiuntivi tende a saturare rapidamente (proprietà nota delle random
+# forest, si veda anche l'esempio ufficiale scikit-learn "OOB Errors for
+# Random Forests") mentre il costo di training cresce all'incirca linearmente
+# con n_estimators. Per la baseline locale — che deve girare su CPU in tempi
+# ragionevoli, si veda il ricevimento del 22/05/2026 con il Prof. Russo Russo
+# ("riducete il numero di alberi banalmente" se l'addestramento è troppo
+# lento) — può convenire accettare un F1 leggermente più basso in cambio di
+# un training molto più rapido.
+#
+# A DIFFERENZA della vecchia versione (N_ESTIMATORS_OVERRIDE = 30, valore
+# letterale fisso e non giustificato in questo file), qui il valore candidato
+# NON è hardcoded: viene ricalcolato ad ogni run come il più piccolo
+# n_estimators fra quelli ESPLORATI dalla ricerca OOB il cui F1 resta entro
+# OOB_F1_TOLERANCE dal migliore assoluto. La motivazione "guadagno
+# trascurabile" è quindi sempre verificata sui dati di QUESTO run (dataset,
+# seed, campionamento correnti), non ereditata da un run precedente
+# potenzialmente diverso (es. con un altro sample_fraction o un'altra
+# versione della pipeline di preprocessing).
+#
+# La scelta finale resta ESPLICITA a runtime, sullo stesso modello di
+# SKIP_TUNING più sopra: chi lancia lo script vede il trade-off misurato e
+# decide, invece di ereditare in silenzio un valore scritto una volta e mai
+# più rivisto.
+# ---------------------------------------------------------------------------
+def scegli_n_estimators(best_params, oob_search_results, tolerance=0.005):
+    """
+    Restituisce (best_params_aggiornato, motivazione_str) dopo aver chiesto
+    all'utente se accettare l'n_estimators trovato dal tuning OOB o applicare
+    una riduzione per contenere i tempi della baseline locale.
+
+    tolerance: soglia di F1 OOB (in punti, es. 0.005 = 0.5pp) entro cui un
+    n_estimators più basso di quello ottimo è considerato "equivalente" ai
+    fini pratici.
+
+    Se oob_search_results è None (tuning saltato, iperparametri riusati da
+    un manifesto esistente), non c'è alcuna analisi di trade-off disponibile
+    per QUESTO run: la funzione lo dichiara esplicitamente e ritorna
+    best_params invariato.
+    """
+    best_params = dict(best_params)
+
+    if oob_search_results is None:
+        print(f"\n  [INFO] Tuning saltato (iperparametri riusati da manifesto esistente): "
+              f"nessuna analisi di trade-off su n_estimators disponibile in questo run. "
+              f"Uso n_estimators dal manifesto: {best_params.get('n_estimators')}.")
+        return best_params, "n_estimators riusato da manifesto esistente (tuning saltato in questo run)."
+
+    tuned_n = best_params.get("n_estimators")
+    tuned_row = next(r for r in oob_search_results if r["params"]["n_estimators"] == tuned_n)
+    best_f1 = tuned_row["oob_f1"]
+
+    candidates = [r for r in oob_search_results if best_f1 - r["oob_f1"] <= tolerance]
+    suggested_row = min(candidates, key=lambda r: r["params"]["n_estimators"])
+    suggested_n = suggested_row["params"]["n_estimators"]
+
+    print(f"\n  n_estimators trovato dal tuning: {tuned_n} "
+          f"(OOB F1={best_f1 * 100:.2f}%, fit_time={tuned_row['fit_time']:.1f}s).")
+    if suggested_n < tuned_n:
+        print(f"  Il più piccolo n_estimators esplorato con OOB F1 entro "
+              f"{tolerance * 100:.1f}pp dal migliore è {suggested_n} "
+              f"(OOB F1={suggested_row['oob_f1'] * 100:.2f}%, fit_time={suggested_row['fit_time']:.1f}s).")
+    else:
+        print("  Nessun n_estimators più basso resta entro la tolleranza: "
+              "il valore del tuning è già il più efficiente disponibile.")
+
+    print("\n  [1] Usa il valore ottimo del tuning")
+    if suggested_n < tuned_n:
+        print(f"  [2] Applica la riduzione suggerita ({suggested_n}) — default")
+    else:
+        print("  [2] (non disponibile: nessuna riduzione entro tolleranza)")
+    print("  [3] Inserisci un valore custom")
+    scelta_override = input("  Scelta [Default: 2]: ").strip() or "2"
+
+    if scelta_override == "1" or (scelta_override == "2" and suggested_n >= tuned_n):
+        motivazione = (f"n_estimators confermato al valore del tuning: {tuned_n} "
+                        f"(OOB F1={best_f1 * 100:.2f}%).")
+        print(f"[OK] {motivazione}")
+        return best_params, motivazione
+
+    if scelta_override == "3":
+        custom = input("  Inserisci n_estimators desiderato: ").strip()
+        try:
+            custom_n = int(custom)
+        except ValueError:
+            motivazione = f"Valore custom non valido, mantengo il valore del tuning ({tuned_n})."
+            print(f"[ATTENZIONE] {motivazione}")
+            return best_params, motivazione
+
+        custom_row = next((r for r in oob_search_results
+                            if r["params"]["n_estimators"] == custom_n), None)
+        extra = (f" (OOB F1={custom_row['oob_f1'] * 100:.2f}%, misurato)"
+                 if custom_row else " (non esplorato dal tuning, nessuna stima OOB disponibile)")
+        motivazione = (f"n_estimators: {tuned_n} -> {custom_n} "
+                        f"(valore custom inserito dall'utente{extra}).")
+        print(f"[OVERRIDE] {motivazione}")
+        best_params["n_estimators"] = custom_n
+        return best_params, motivazione
+
+    # scelta_override == "2" e suggested_n < tuned_n: applica la riduzione suggerita.
+    motivazione = (f"n_estimators: {tuned_n} (OOB F1={best_f1 * 100:.2f}%, "
+                    f"fit_time={tuned_row['fit_time']:.1f}s) -> {suggested_n} "
+                    f"(OOB F1={suggested_row['oob_f1'] * 100:.2f}%, "
+                    f"fit_time={suggested_row['fit_time']:.1f}s, "
+                    f"delta F1 <= {tolerance * 100:.1f}pp). Scelta per contenere i tempi della "
+                    f"baseline locale su CPU (vedi Ricevimento 22/05/2026).")
+    print(f"[OVERRIDE] {motivazione}")
+    best_params["n_estimators"] = suggested_n
+    return best_params, motivazione
+
+
 def run_baseline():
     # --- CONFIGURAZIONE STILISTICA REPORT ---
     LUNGHEZZA_LINEA = 80
@@ -206,6 +306,9 @@ def run_baseline():
     # Feature selection: OOB permutation importance, fedele a Breiman (2001)
     # Sec. 10 — unico criterio, vedi CICIDSFeatureSelector.
     IMPORTANCE_THRESHOLD = 0.0
+    # Soglia di tolleranza per la riduzione di n_estimators post-tuning
+    # (vedi scegli_n_estimators): 0.005 = 0.5 punti percentuali di F1 OOB.
+    OOB_F1_TOLERANCE = 0.005
 
     target_col = "Label"
     BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
@@ -555,12 +658,15 @@ def run_baseline():
             tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
 
         # ---------------------------------------------------------------
-        
-        N_ESTIMATORS_OVERRIDE = 30
-        print(f"[OVERRIDE] n_estimators: {best_params.get('n_estimators')} (dal tuning/manifesto) "
-              f"-> {N_ESTIMATORS_OVERRIDE} (scelta post-diagnostica, vedi commento nel codice).")
-        best_params = dict(best_params)
-        best_params["n_estimators"] = N_ESTIMATORS_OVERRIDE
+        # SCELTA 2: accettare l'n_estimators trovato dal tuning OOB, o
+        # applicare una riduzione per contenere i tempi della baseline
+        # locale? Vedi il commento esteso sopra scegli_n_estimators() per
+        # la motivazione completa. La riga [OVERRIDE]/[OK] stampata qui
+        # sostituisce il vecchio "N_ESTIMATORS_OVERRIDE = 30" hardcoded.
+        # ---------------------------------------------------------------
+        best_params, motivazione_n_estimators = scegli_n_estimators(
+            best_params, oob_search_results, tolerance=OOB_F1_TOLERANCE
+        )
 
         # Configurazione e creazione cartella di output dedicata
         OUTPUT_DIR = "./outputs_baseline"
@@ -581,6 +687,11 @@ def run_baseline():
             "importance_threshold": IMPORTANCE_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
+            # Motivazione della scelta di n_estimators persistita nel manifesto
+            # stesso: leggendo config_real.json in un secondo momento (o dal
+            # cluster, che legge questo file) resta tracciabile PERCHÉ questo
+            # valore è stato scelto, non solo quale valore è stato scelto.
+            "n_estimators_note": motivazione_n_estimators,
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),
                 "max_depth": best_params.get("max_depth") ,
@@ -856,6 +967,10 @@ def run_baseline():
             media = np.mean(array) * 100
             dev_std = np.std(array) * 100
             print(f"  ▸ {nome:<25} : {media:6.2f}%  (± {dev_std:.2f}%)")
+
+        print(f"\n2b. SCELTA FINALE DI n_estimators")
+        print(LINEA_SINGOLA)
+        print(f"  ▸ {motivazione_n_estimators}")
     else:
         print(f"\n1-2. TUNING SALTATO — iperparametri riusati dal tuning sul dataset reale")
         print(LINEA_SINGOLA)

@@ -12,8 +12,7 @@
     "Fwd Blk Rate Avg",
     "Bwd Byts/b Avg",
     "Bwd Pkts/b Avg",
-    "Bwd Blk Rate Avg",
-    "Fwd URG Flags"
+    "Bwd Blk Rate Avg"
   ],
   "feature_selezionate": [
     "Protocol",
@@ -47,6 +46,7 @@
     "Bwd IAT Max",
     "Bwd IAT Min",
     "Fwd PSH Flags",
+    "Fwd URG Flags",
     "Fwd Header Len",
     "Bwd Header Len",
     "Fwd Pkts/s",
@@ -85,10 +85,11 @@
     "Idle Max",
     "Idle Min"
   ],
+  "n_estimators_note": "n_estimators confermato al valore del tuning: 60 (OOB F1=96.16%).",
   "hyperparameters": {
-    "n_estimators": 30,
-    "max_depth": null,
-    "min_samples_split": 10,
+    "n_estimators": 60,
+    "max_depth": 25,
+    "min_samples_split": 5,
     "max_features": "sqrt",
     "criterion": "gini",
     "class_weight": null,
