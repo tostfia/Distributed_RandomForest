@@ -303,9 +303,29 @@ def run_baseline():
     RANDOM_SEED = 123
     TEST_SIZE = 0.2
     SAMPLE_FRACTION = 0.05
+    # Campionamento RIBILANCIATO per giorno di cattura, al posto della
+    # sample_fraction uniforme (che favorisce sistematicamente i giorni più
+    # grandi — es. Thuesday-20-02-2018, da solo quasi la metà del dataset
+    # totale). Vincolo: deve restare sotto il file più piccolo tra i 10
+    # (Thursday-01-03-2018, 331.125 righe), altrimenti quel giorno smette di
+    # contribuire alla pari con gli altri. 100.000 è stato scelto per
+    # restare con margine sotto quella soglia, pur raddoppiando circa il
+    # volume grezzo complessivo rispetto al precedente SAMPLE_FRACTION=0.05
+    # (~811.650 -> ~1.000.000 righe), per aumentare la varietà del train set
+    # e verificare se questo sposta in avanti il plateau di n_estimators
+    # osservato nella diagnostica OOB (vedi analyze_classification_n_estimators.py).
+    # SAMPLE_FRACTION resta definita sopra ma viene ignorata quando
+    # TARGET_ROWS_PER_DAY non è None (vedi RawCSVDataLoader).
+    TARGET_ROWS_PER_DAY = 100_000
     # Feature selection: OOB permutation importance, fedele a Breiman (2001)
-    # Sec. 10 — unico criterio, vedi CICIDSFeatureSelector.
+    # Sec. 10 — criterio primario, vedi CICIDSFeatureSelector.
     IMPORTANCE_THRESHOLD = 0.0
+    # Secondo criterio (dopo quello sopra): riduzione della multicollinearità
+    # via clustering gerarchico — vedi reduce_multicollinearity() in
+    # CICIDSFeatureSelector per la motivazione completa e il significato
+    # della soglia (distanza 1-|correlazione di Spearman|; 0.3 ~ raggruppa
+    # feature con |correlazione| >= 0.7).
+    MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.3
     # Soglia di tolleranza per la riduzione di n_estimators post-tuning
     # (vedi scegli_n_estimators): 0.005 = 0.5 punti percentuali di F1 OOB.
     OOB_F1_TOLERANCE = 0.005
@@ -529,10 +549,16 @@ def run_baseline():
             )
 
         print(f" • Cartella sorgente identificata per dati reali: '{data_folder}'")
-        print(f" • Tipo Dataset: Reale (Campionamento probabilistico {SAMPLE_FRACTION*100:.0f}%, Seed: {RANDOM_SEED})")
+        print(f" • Tipo Dataset: Reale (Campionamento RIBILANCIATO per giorno, "
+              f"target ~{TARGET_ROWS_PER_DAY} righe/giorno, Seed: {RANDOM_SEED})")
 
         io_start_time = time.perf_counter()
-        loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=SAMPLE_FRACTION, dataset_seed=RANDOM_SEED)
+        loader = RawCSVDataLoader(
+            data_url=data_folder,
+            sample_fraction=SAMPLE_FRACTION,  # ignorata: target_rows_per_day ha priorità
+            dataset_seed=RANDOM_SEED,
+            target_rows_per_day=TARGET_ROWS_PER_DAY,
+        )
         df_raw = loader.load()
         io_time = time.perf_counter() - io_start_time
         print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
@@ -558,11 +584,14 @@ def run_baseline():
         print(" • Preprocessing indipendente sul Test Set...")
         test_df = preprocessor.process(test_df)
 
-        print(" • Applicazione Feature Selection (OOB Permutation Importance)...")
+        print(" • Applicazione Feature Selection (OOB Permutation Importance + "
+              "riduzione multicollinearità)...")
         fs = CICIDSFeatureSelector(
             target_column=target_col,
             importance_threshold=IMPORTANCE_THRESHOLD,
             rf_random_state=RANDOM_SEED,
+            reduce_multicollinearity=True,
+            multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
         )
         train_df = fs.fit_transform(train_df)
         test_df = fs.transform(test_df)
@@ -609,15 +638,28 @@ def run_baseline():
             tempo_medio_fit_tuning = 0.0
         else:
             print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB)...")
-            # 'max_features' fissato a 'sqrt' e non incluso nella ricerca: è la
-            # convenzione standard per la classificazione (equivalente pratico di
-            # int(log2(M)+1) usato da Breiman 2001 per M nel range tipico dei
-            # nostri dati), e Breiman stesso osserva (Sec. 6, Fig. 1) che
-            # l'errore è poco sensibile al valore esatto di F una volta superata
-            # una soglia minima — non è quindi la leva con il maggior impatto
-            # atteso sull'accuratezza. Escluderlo dalla ricerca è una scelta a
-            # priori per contenere lo spazio entro un budget di tempo sostenibile
-            # su CPU.
+            # 'max_features' ORA esplorato anche su 'log2' (prima fissato solo a
+            # 'sqrt'), insieme a un valore più basso di 'max_samples' (0.3,
+            # prima il minimo era 0.5). MOTIVAZIONE, diversa da una semplice
+            # ricerca di accuratezza: la diagnostica sulla correlazione media tra
+            # alberi (rho_bar, Breiman 2001 Sec. 2, Teorema 2.3 — vedi
+            # analyze_tree_correlation.py) ha mostrato che, nonostante il
+            # campionamento ribilanciato per giorno abbia reso il problema
+            # oggettivamente più difficile (F1 OOB sceso da ~96% a ~88.8%), il
+            # punto di stabilizzazione della curva OOB rispetto a n_estimators
+            # NON si è spostato (resta a n~20-30) — segno che rho_bar non è
+            # calata quanto ci si aspetterebbe da un dataset più eterogeneo.
+            # 'max_features' e 'max_samples' sono le due leve dirette per
+            # ridurre rho_bar: meno feature candidate per split ('log2' invece
+            # di 'sqrt') e bootstrap sample più piccoli forzano gli alberi a
+            # specializzarsi su porzioni diverse di dati/feature, quindi a
+            # decorrelarsi tra loro. Restano comunque entrambi iperparametri
+            # della RandomForestClassifier standard — nessuno scostamento
+            # dall'algoritmo richiesto dalla traccia (Breiman 2001), a
+            # differenza per esempio di un cambio di algoritmo verso
+            # ExtraTreesClassifier, che è stato scartato come modifica al
+            # sistema di produzione per questo stesso motivo e tenuto solo come
+            # confronto diagnostico separato.
             #
             # bootstrap=False non è più esplorato: la stima OOB (Sec. 3.1, vedi
             # oob_hyperparameter_search sopra) richiede bootstrap=True per
@@ -626,24 +668,24 @@ def run_baseline():
             # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
             # coerente con l'algoritmo di riferimento del progetto.
             param_dist = {
-                'n_estimators': [10, 20, 30, 40, 60, 80,100],
+                'n_estimators': [10, 20, 30, 40, 60, 80, 100],
                 'max_depth': [10, 25, None],
                 'min_samples_split': [2, 5, 10],
-                'max_features': ['sqrt'],
+                'max_features': ['sqrt', 'log2'],
                 'criterion': ['gini', 'entropy'],
                 'class_weight': [None, 'balanced'],
                 'bootstrap': [True],
-                'max_samples': [0.5, 0.7, 0.8, 1.0],
+                'max_samples': [0.3, 0.5, 0.7, 0.8, 1.0],
             }
 
-            # n_iter=50: stesso budget computazionale TOTALE della versione
-            # precedente (n_iter=10 * cv=5 = 50 fit), ma ora ogni combinazione
-            # richiede UN SOLO fit invece di 5 (niente k-fold, vedi
-            # oob_hyperparameter_search) — quindi a parità di tempo si esplorano
-            # 50 combinazioni diverse invece di 10. Lo spazio di ricerca è stato
-            # anche ampliato (n_estimators fino a 80, coerente con la diagnostica
-            # OOB già discussa) proprio perché il budget lo consente.
-            N_ITER_TUNING = 50
+            # n_iter=60 (prima 50): lo spazio di ricerca è passato da 1.008 a
+            # 2.520 combinazioni possibili (7*3*3*2*2*2*1*5) con l'aggiunta di
+            # 'max_features' e del nuovo valore di 'max_samples'. n_iter più
+            # alto compensa parzialmente la copertura più sparsa del nuovo
+            # spazio, restando comunque entro un budget di tempo simile a
+            # prima (ogni fit resta un singolo fit OOB, non k-fold — vedi
+            # oob_hyperparameter_search).
+            N_ITER_TUNING = 60
             start_tuning = time.perf_counter()
             best_params, oob_search_results = oob_hyperparameter_search(
                 X_train, y_train,

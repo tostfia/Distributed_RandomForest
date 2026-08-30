@@ -15,7 +15,7 @@ class CICIDSFeatureSelector:
     """
     Feature selector per CIC-IDS2018.
 
-    Criterio unico: OOB permutation importance, fedele a Breiman (2001),
+    Criterio primario: OOB permutation importance, fedele a Breiman (2001),
     Section 10 ("Exploring the random forest mechanism"). Si addestra una
     foresta preliminare, e per ciascun albero si permuta una feature alla
     volta SOLO sui suoi campioni out-of-bag, misurando l'aumento percentuale
@@ -25,6 +25,29 @@ class CICIDSFeatureSelector:
     (e i suoi OOB, non un validation set esterno) come strumento di misura —
     a differenza di un filtro per correlazione lineare, che scarterebbe
     feature predittive solo per interazione o non linearmente.
+
+    LIMITE NOTO di questo criterio da solo, e SECONDO criterio che lo
+    completa (riduzione della multicollinearità, opzionale, vedi
+    reduce_multicollinearity=True): la permutation importance misura
+    l'effetto di rimuovere UNA feature alla volta. Se due feature sono
+    fortemente ridondanti tra loro (es. entrambe misure quasi equivalenti
+    della durata/tempistica di un flusso), rimuoverne una singolarmente ha
+    un impatto quasi nullo sull'errore OOB — perché l'altra "copre" per
+    lei — quindi la permutation importance le giudica ENTRAMBE importanti e
+    le tiene entrambe, anche se una delle due è ridondante. Questo è un
+    limite esplicitamente documentato dalla stessa scikit-learn:
+        "Permutation Importance with Multicollinear or Correlated Features"
+        https://scikit-learn.org/stable/auto_examples/inspection/plot_permutation_importance_multicollinear.html
+        (The scikit-learn developers, BSD-3-Clause)
+        "When features are collinear, permuting one feature has little
+        effect on the model's performance because it can get the same
+        information from a correlated feature."
+    La ridondanza tra feature altamente correlate contribuisce anche alla
+    correlazione ρ tra gli alberi della foresta finale (Breiman 2001, Sec.
+    2): alberi diversi, allenati su bootstrap sample diversi, convergono
+    comunque sugli stessi split "quasi equivalenti" pescando da un cluster
+    di feature ridondanti, producendo alberi più simili tra loro di quanto
+    servirebbe.
     """
 
     def __init__(
@@ -36,6 +59,8 @@ class CICIDSFeatureSelector:
         rf_max_depth: Optional[int] = None,
         rf_random_state: int = 123,
         n_jobs: Optional[int] = None,
+        reduce_multicollinearity: bool = False,
+        multicollinearity_distance_threshold: float = 0.3,
     ):
         self.target_column = target_column
 
@@ -53,6 +78,14 @@ class CICIDSFeatureSelector:
         self.rf_max_depth = rf_max_depth
         self.rf_random_state = rf_random_state
 
+        # Passo OPZIONALE (default disattivo, per non cambiare il
+        # comportamento di run precedenti che non lo richiedono
+        # esplicitamente) — vedi reduce_multicollinearity() più sotto per
+        # la spiegazione completa del metodo e la giustificazione della
+        # soglia di default.
+        self.reduce_multicollinearity_flag = reduce_multicollinearity
+        self.multicollinearity_distance_threshold = multicollinearity_distance_threshold
+
         # Default: tutti i core MENO UNO, non -1 (= tutti i core). Lascia
         # deliberatamente margine di CPU/RAM al sistema operativo e alle
         # altre applicazioni durante il fit e la permutation importance,
@@ -68,6 +101,8 @@ class CICIDSFeatureSelector:
         # Series (indice = nome feature) con l'aumento percentuale medio OOB
         # del tasso di errore, ordinata crescente. Utile per ispezione/plot.
         self.importance_scores_: Optional[pd.Series] = None
+        # Popolato solo se reduce_multicollinearity=True: {cluster_id: [feature, ...]}
+        self.multicollinear_clusters_: Optional[Dict[int, List[str]]] = None
 
     def fit(self, train_df: pd.DataFrame) -> "CICIDSFeatureSelector":
         if self.target_column not in train_df.columns:
@@ -105,6 +140,23 @@ class CICIDSFeatureSelector:
         )
         columns_to_drop.extend(low_importance_features)
 
+        # 3. Riduzione della multicollinearità (OPZIONALE) — vedi docstring
+        # della classe e di reduce_multicollinearity() per la motivazione
+        # completa. Va eseguita DOPO il passo 2: opera solo sulle feature
+        # che la permutation importance ha già giudicato individualmente
+        # informative, per capire quali di QUELLE sono ridondanti TRA LORO.
+        multicollinear_dropped = []
+        if self.reduce_multicollinearity_flag:
+            survived_so_far = [
+                c for c in train_df.columns
+                if c != self.target_column and c not in columns_to_drop
+            ]
+            multicollinear_dropped = self.reduce_multicollinearity(
+                train_df, feature_cols=survived_so_far,
+                distance_threshold=self.multicollinearity_distance_threshold,
+            )
+            columns_to_drop.extend(multicollinear_dropped)
+
         # Rimuove duplicati mantenendo ordine
         self.columns_to_drop_ = list(dict.fromkeys(columns_to_drop))
 
@@ -114,8 +166,12 @@ class CICIDSFeatureSelector:
         self.feature_summary_ = {
             "eliminate": self.columns_to_drop_,
             "eliminate_varianza_zero": constant_features,
+            "eliminate_multicollineari": multicollinear_dropped,
             "salvate": feature_salvate,
-            "selection_method": "permutation_importance",
+            "selection_method": (
+                "permutation_importance+multicollinearity_clustering"
+                if self.reduce_multicollinearity_flag else "permutation_importance"
+            ),
             **extra_summary,
         }
 
@@ -271,6 +327,145 @@ class CICIDSFeatureSelector:
             "eliminate_bassa_importanza": low_importance_features,
             "importance_scores": importance_series.round(4).to_dict(),
         }
+
+    # ------------------------------------------------------------------
+    # Riduzione della multicollinearità via clustering gerarchico,
+    # metodologia dell'esempio ufficiale scikit-learn "Permutation
+    # Importance with Multicollinear or Correlated Features" — vedi
+    # docstring della classe per URL e citazione completa.
+    # ------------------------------------------------------------------
+    def reduce_multicollinearity(
+        self,
+        train_df: pd.DataFrame,
+        feature_cols: List[str],
+        distance_threshold: float = 0.3,
+        plot_path: Optional[str] = "feature_correlation_dendrogram.png",
+    ) -> List[str]:
+        """
+        Raggruppa 'feature_cols' in cluster di feature fortemente correlate
+        (correlazione di Spearman, robusta a relazioni monotone non
+        lineari — non solo lineari come Pearson), tramite clustering
+        gerarchico Ward sulla matrice di distanza 1-|correlazione|. Per
+        ogni cluster con più di una feature, tiene SOLO quella con
+        importanza OOB più alta (self.importance_scores_, già calcolata dal
+        passo precedente) e restituisce la lista delle altre, da scartare.
+
+        A DIFFERENZA dell'esempio ufficiale scikit-learn (che sceglie un
+        rappresentante arbitrario per cluster, il primo incontrato). Qui la
+        scelta è motivata: si tiene la feature più informativa secondo la
+        permutation importance già calcolata, non una scelta casuale.
+
+        distance_threshold: soglia di taglio del dendrogramma, sulla scala
+        di distanza 1-|correlazione di Spearman| (quindi 0 = feature
+        identiche, 1 = correlazione nulla). Il default 0.3 corrisponde
+        approssimativamente a raggruppare nello stesso cluster le feature
+        con |correlazione di Spearman| >= 0.7 — soglia comune in letteratura
+        per "multicollinearità forte", ma è un parametro esplicito:
+        aumentarlo produce cluster più grandi (più feature scartate),
+        diminuirlo cluster più piccoli (più conservativo).
+
+        Salva un dendrogramma (plot_path) per ispezione visiva: le feature
+        che si uniscono sotto la linea di soglia orizzontale sono quelle
+        raggruppate nello stesso cluster.
+
+        Ritorna la lista delle feature da scartare (una lista vuota se
+        nessun cluster ha più di un membro, cioè nessuna feature è
+        risultata sufficientemente ridondante da questa soglia).
+        """
+        if self.importance_scores_ is None:
+            raise RuntimeError(
+                "reduce_multicollinearity() richiede che _select_by_oob_permutation_importance "
+                "sia già stato eseguito (self.importance_scores_ non popolato): chiamare fit() "
+                "prima, o non chiamare questo metodo direttamente fuori da fit()."
+            )
+        if len(feature_cols) < 2:
+            print("[MULTICOLLINEARITY] Meno di 2 feature superstiti: nessun clustering da fare.")
+            return []
+
+        from scipy.stats import spearmanr
+        from scipy.cluster import hierarchy
+        from scipy.spatial.distance import squareform
+
+        print("=" * 60)
+        print("   RIDUZIONE MULTICOLLINEARITÀ (clustering gerarchico su")
+        print("   correlazione di Spearman — metodologia esempio ufficiale scikit-learn)")
+        print("=" * 60)
+        print(f" • Feature in ingresso a questo passo: {len(feature_cols)}")
+        print(f" • Soglia di distanza per il taglio del dendrogramma: {distance_threshold}")
+
+        X = train_df[feature_cols].to_numpy()
+
+        # Matrice di correlazione di Spearman NxN (N = numero di feature).
+        # Simmetrizzata esplicitamente (dovrebbe già esserlo per costruzione,
+        # ma piccoli errori di floating point possono romperla, e
+        # squareform() richiede una matrice esattamente simmetrica).
+        corr = spearmanr(X).correlation
+        corr = (corr + corr.T) / 2.0
+        np.fill_diagonal(corr, 1.0)
+
+        distance_matrix = 1.0 - np.abs(corr)
+        # squareform richiede la sola parte superiore della matrice, in
+        # forma condensata, e diagonale esattamente zero.
+        np.fill_diagonal(distance_matrix, 0.0)
+        condensed_distance = squareform(distance_matrix, checks=False)
+
+        # Ward: minimizza la varianza intra-cluster ad ogni fusione — stessa
+        # scelta dell'esempio ufficiale scikit-learn, adatta quando si cerca
+        # una partizione compatta piuttosto che catene di collegamenti deboli
+        # (a differenza del linkage 'single', più sensibile a outlier).
+        linkage = hierarchy.ward(condensed_distance)
+
+        if plot_path:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(12, max(6, len(feature_cols) * 0.18)))
+            hierarchy.dendrogram(
+                linkage, labels=feature_cols, ax=ax, leaf_rotation=90, leaf_font_size=7,
+                color_threshold=distance_threshold,
+            )
+            ax.axhline(y=distance_threshold, color="red", linestyle="--", linewidth=1,
+                       label=f"Soglia di taglio = {distance_threshold}")
+            ax.set_ylabel("Distanza (1 - |correlazione di Spearman|)")
+            ax.set_title("Clustering gerarchico delle feature per multicollinearità\n"
+                          "(feature unite sotto la linea rossa = stesso cluster, ridondanti tra loro)")
+            ax.legend(loc="upper right")
+            fig.tight_layout()
+            fig.savefig(plot_path, dpi=150)
+            plt.close(fig)
+            print(f" • Dendrogramma salvato in: {plot_path}")
+
+        cluster_ids = hierarchy.fcluster(linkage, t=distance_threshold, criterion="distance")
+
+        clusters: Dict[int, List[str]] = {}
+        for feature_name, cluster_id in zip(feature_cols, cluster_ids):
+            clusters.setdefault(int(cluster_id), []).append(feature_name)
+        self.multicollinear_clusters_ = clusters
+
+        dropped = []
+        multi_member_clusters = {cid: feats for cid, feats in clusters.items() if len(feats) > 1}
+
+        print(f" • Cluster individuati: {len(clusters)} totali, "
+              f"{len(multi_member_clusters)} con più di una feature (ridondanti al loro interno)")
+
+        for cluster_id, feats in multi_member_clusters.items():
+            # Tiene la feature con importanza OOB più alta nel cluster (non
+            # un rappresentante arbitrario, a differenza dell'esempio
+            # ufficiale scikit-learn — vedi docstring del metodo).
+            scores_in_cluster = self.importance_scores_.reindex(feats)
+            best_feature = scores_in_cluster.idxmax()
+            to_drop = [f for f in feats if f != best_feature]
+            dropped.extend(to_drop)
+
+            print(f"   - Cluster {cluster_id}: {feats}")
+            print(f"     -> tenuta '{best_feature}' (importanza OOB {scores_in_cluster[best_feature]:+.2f}%), "
+                  f"scartate: {to_drop}")
+
+        print(f" • Totale feature scartate per ridondanza: {len(dropped)}")
+        print("=" * 60)
+
+        return dropped
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if self.columns_to_drop_ is None:

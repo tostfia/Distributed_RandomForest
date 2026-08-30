@@ -34,6 +34,17 @@ class DatasetDAO(ABC):
     def exists(self, path: str) -> bool:
         pass
 
+    @abstractmethod
+    def count_rows(self, path: str) -> int:
+        """
+        Conta il numero di righe DATI (header escluso) di un CSV, SENZA
+        caricare l'intero file in un DataFrame — usato per calcolare una
+        sample_fraction per-file mirata (es. campionamento ribilanciato per
+        giorno di cattura su CIC-IDS2018, dove i 10 CSV hanno volumi molto
+        diversi tra loro: un giorno può pesare quasi la metà del totale).
+        """
+        pass
+
 
 class LocalFileSystemDAO(DatasetDAO):
     """Implementazione DAO per il File System Locale."""
@@ -70,6 +81,21 @@ class LocalFileSystemDAO(DatasetDAO):
 
     def exists(self, path: str) -> bool:
         return os.path.exists(path)
+
+    def count_rows(self, path: str) -> int:
+        # Conteggio a livello di byte/riga, non di parsing CSV: non serve
+        # interpretare le colonne per contare le righe, quindi si evita
+        # completamente il costo di pd.read_csv. Nota: questo conta le righe
+        # "fisiche" del file (newline-delimited); per CIC-IDS2018 non ci sono
+        # campi con newline incorporati tra virgolette, quindi il conteggio
+        # corrisponde esattamente al numero di record.
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Il file locale {path} non esiste.")
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            n_lines = sum(1 for _ in f)
+        # -1 per l'header. Se il file è vuoto (0 righe fisiche), evitiamo un
+        # conteggio negativo.
+        return max(0, n_lines - 1)
 
 
 class AwsS3DAO(DatasetDAO):
@@ -154,3 +180,34 @@ class AwsS3DAO(DatasetDAO):
             return True
         except s3_client.exceptions.ClientError:
             return False
+
+    def count_rows(self, path: str) -> int:
+        # S3 Select esegue il COUNT(*) LATO SERVER: AWS legge l'oggetto
+        # internamente e restituisce solo il numero, senza trasferire il
+        # contenuto del CSV sulla rete verso il client. Molto più economico
+        # (tempo e costo) di un get_object completo solo per contare righe —
+        # importante qui perché altrimenti il ribilanciamento per giorno
+        # raddoppierebbe il traffico S3 (un download per contare, uno per
+        # campionare) ad ogni singolo run.
+        bucket, key = self._parse_s3_uri(path)
+        s3_client = self._get_isolated_client()
+
+        response = s3_client.select_object_content(
+            Bucket=bucket,
+            Key=key,
+            ExpressionType="SQL",
+            Expression="SELECT COUNT(*) FROM S3Object",
+            InputSerialization={
+                "CSV": {"FileHeaderInfo": "USE"},  # la prima riga è l'header, esclusa dal COUNT
+                "CompressionType": "NONE",
+            },
+            OutputSerialization={"CSV": {}},
+        )
+
+        for event in response["Payload"]:
+            if "Records" in event:
+                payload = event["Records"]["Payload"].decode("utf-8").strip()
+                # Il risultato arriva come singola riga CSV, es. "637602\n"
+                if payload:
+                    return int(payload.split(",")[0])
+        return 0
