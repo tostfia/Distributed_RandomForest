@@ -17,32 +17,17 @@ from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
-# ---------------------------------------------------------------------------
-# Configurazione di riferimento FISSA per il task sintetico di REGRESSIONE.
-#
-# NOTA METODOLOGICA: a differenza del task sintetico di classificazione (dove
-# ereditare gli iperparametri dal tuning sul dataset reale ha senso, perché è
-# lo stesso algoritmo/task), per la regressione non esiste alcuna garanzia che
-# gli iperparametri ottimizzati per un RandomForestClassifier su un problema
-# di classificazione binaria sbilanciata siano sensati per un
-# RandomForestRegressor su dati sintetici continui e bilanciati.
-#
-# Si usa quindi una configurazione dichiarata a priori (non derivata da
-# tuning) e tenuta IDENTICA in ogni esperimento di scalabilità — baseline
-# locale e ogni run del cluster distribuito, a qualunque numero di worker —
-# in modo da isolare l'effetto della scalabilità (numero di nodi, dimensione
-# del dataset) dalla complessità del modello.
-# ---------------------------------------------------------------------------
+
 SYNTHETIC_REGRESSOR_REFERENCE_HP = {
 
-    "n_estimators": 35,
+    "n_estimators": 120,
     "max_depth": None,
     "min_samples_split": 2,
 
-    "max_features": 1 / 3,
+    "max_features": 1/3,
     "criterion": "squared_error",
     "bootstrap": True,
-    "max_samples": 1.0,
+    "max_samples": 0.3,
 }
 
 
@@ -436,25 +421,29 @@ def run_baseline():
         # cluster producevano CSV con la colonna target chiamata diversamente.
         target_col = "Target" if user_tree_type == "regressor" else "Label"
 
-        # Default allineato a SyntheticDataLoader (n_samples=300000). Prima qui
-        # il default era 500000: in assenza di un manifesto la baseline generava
-        # un dataset 1.67x più grande di quello del cluster, e i tempi di
-        # addestramento non erano confrontabili.
+        # Default di fallback SOLO se outputs_baseline/config_synthetic.json
+        # non esiste o non contiene questa chiave — per i test di scalabilità
+        # a 500k/800k righe, scrivi ESPLICITAMENTE questi valori nel file
+        # prima di ogni run (non affidarti al fallback qui sotto, pensato
+        # per un run generico, non per lo stress test).
         n_samples = tmp_cfg.get("n_samples", 300000)
         n_features = tmp_cfg.get("n_features", 30)
-        # 50% delle feature informative, l'altra metà rumore puro per
-        # costruzione (non correlato al target): scelta dichiarata, non
-        # arbitraria. Non serve applicare feature selection sul sintetico
-        # (dizionario_feature resta vuoto più sotto) proprio perché la
-        # separazione segnale/rumore è nota e controllata a priori dal
-        # generatore — a differenza del reale, dove va stimata empiricamente
-        # (da qui la permutation importance OOB in CICIDSFeatureSelector).
+        # n_informative_reg come valore ASSOLUTO (non più proporzionale a
+        # n_features): per lo stress test di scalabilità serve un rapporto
+        # segnale/rumore basso e calibrato per dimensione del dataset (dataset
+        # più grandi convergono più in fretta a parità di ricetta — Breiman
+        # 2001 Sec. 2 — quindi il dataset più grande usa una ricetta più
+        # aggressiva: meno feature informative in proporzione, più rumore).
+        # Vedi outputs_baseline/config_synthetic.json per i valori usati in
+        # ciascun run specifico: qui è solo il fallback generico.
         n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
-        # noise=10.0 verificato empiricamente (analyze_regression_reference_config.py):
-        # con n_informative=15/30 la deviazione standard del segnale "pulito"
-        # (noise=0) è ≈212.8, quindi noise=10.0 corrisponde a circa il 4.7%
-        # della variabilità naturale del target (SNR ≈ 21). Livello moderato:
-        # rende il problema non banale senza far dominare il rumore sul segnale.
+        # ATTENZIONE: il valore precedente (noise=10.0) era stato verificato
+        # empiricamente con analyze_regression_reference_config.py, rimosso
+        # da questo progetto — quel numero e la sua giustificazione
+        # quantitativa (SNR) NON sono più validi per la ricetta attuale (che
+        # ha n_features/n_informative_reg diversi). Se servisse di nuovo una
+        # verifica quantitativa del SNR, va ricostruita la diagnostica
+        # equivalente.
         noise = tmp_cfg.get("noise", 10.0)
         # Stessi default interni di SyntheticDataLoader per la classificazione,
         # ma calcolati QUI e passati esplicitamente al costruttore. Prima
