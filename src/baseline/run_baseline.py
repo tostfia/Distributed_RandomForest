@@ -45,23 +45,7 @@ SYNTHETIC_REGRESSOR_REFERENCE_HP = {
 # In pratica: ogni albero della foresta è addestrato su un bootstrap sample,
 # lasciando fuori (out-of-bag) circa un terzo dei dati per quell'albero — uno
 # split train/validation "gratuito" e diverso per ogni albero, GIA' incluso
-# nel fit di un RandomForestClassifier con bootstrap=True. Non serve rifare
-# k fit separati come nella k-fold CV: un solo fit per combinazione di
-# iperparametri basta per ottenere una stima non distorta dell'errore di
-# generalizzazione (a differenza della CV, il cui bias è presente ma non
-# quantificabile secondo il paper).
-#
-# Conseguenza pratica per il budget di tempo: a parità di fit totali
-# eseguibili su CPU, la ricerca OOB esplora ~5x più combinazioni della
-# RandomizedSearchCV con cv=5 (1 fit invece di 5 per combinazione).
-#
-# VINCOLO: la stima OOB richiede bootstrap=True (senza campionamento
-# bootstrap non esistono campioni "out-of-bag" da definire). Per questo la
-# griglia di ricerca qui sotto include solo bootstrap=True — è una
-# restrizione coerente con l'algoritmo originale di Breiman (Definition 1.1:
-# ogni foresta di Breiman usa il bootstrap, "the random vector Θ... resulting
-# in bagging" nella sua stessa descrizione), non solo una scorciatoia
-# computazionale.
+# nel fit di un RandomForestClassifier con bootstrap=True. N
 # ---------------------------------------------------------------------------
 def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, random_state,
                                refit_metric="f1", n_jobs=None):
@@ -78,14 +62,7 @@ def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, ran
 
     n_jobs: core da usare per OGNI fit della ricerca (non per il numero di
     combinazioni in parallelo: quelle restano sequenziali, una alla volta).
-    Default None -> cpu_count - 1 (stessa politica di CICIDSFeatureSelector):
-    NON è più giustificato come "necessario per comparabilità dei tempi" —
-    tempo_tuning non è la metrica usata per il confronto baseline-vs-cluster
-    (quella è calcolata separatamente su t_seq/t_1node_parallel dopo il
-    tuning, sul modello finale), e comunque un core del laptop e una vCPU
-    EC2 non sarebbero comparabili in modo esatto a prescindere. Il default
-    resta cauto (un core libero) solo per lo stesso motivo pratico già
-    emerso con la feature selection: non saturare la macchina.
+    Default None -> cpu_count - 1 (stessa politica di CICIDSFeatureSelector).
 
     Ritorna (best_params, results) dove results è una lista di dict, uno per
     combinazione esplorata, con le metriche OOB e il tempo di fit.
@@ -167,26 +144,7 @@ def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, ran
 # alberi aggiuntivi tende a saturare rapidamente (proprietà nota delle random
 # forest, si veda anche l'esempio ufficiale scikit-learn "OOB Errors for
 # Random Forests") mentre il costo di training cresce all'incirca linearmente
-# con n_estimators. Per la baseline locale — che deve girare su CPU in tempi
-# ragionevoli, si veda il ricevimento del 22/05/2026 con il Prof. Russo Russo
-# ("riducete il numero di alberi banalmente" se l'addestramento è troppo
-# lento) — può convenire accettare un F1 leggermente più basso in cambio di
-# un training molto più rapido.
-#
-# A DIFFERENZA della vecchia versione (N_ESTIMATORS_OVERRIDE = 30, valore
-# letterale fisso e non giustificato in questo file), qui il valore candidato
-# NON è hardcoded: viene ricalcolato ad ogni run come il più piccolo
-# n_estimators fra quelli ESPLORATI dalla ricerca OOB il cui F1 resta entro
-# OOB_F1_TOLERANCE dal migliore assoluto. La motivazione "guadagno
-# trascurabile" è quindi sempre verificata sui dati di QUESTO run (dataset,
-# seed, campionamento correnti), non ereditata da un run precedente
-# potenzialmente diverso (es. con un altro sample_fraction o un'altra
-# versione della pipeline di preprocessing).
-#
-# La scelta finale resta ESPLICITA a runtime, sullo stesso modello di
-# SKIP_TUNING più sopra: chi lancia lo script vede il trade-off misurato e
-# decide, invece di ereditare in silenzio un valore scritto una volta e mai
-# più rivisto.
+# con n_estimators.
 # ---------------------------------------------------------------------------
 def scegli_n_estimators(best_params, oob_search_results, tolerance=0.005):
     """
@@ -296,11 +254,7 @@ def run_baseline():
     # contribuire alla pari con gli altri. 100.000 è stato scelto per
     # restare con margine sotto quella soglia, pur raddoppiando circa il
     # volume grezzo complessivo rispetto al precedente SAMPLE_FRACTION=0.05
-    # (~811.650 -> ~1.000.000 righe), per aumentare la varietà del train set
-    # e verificare se questo sposta in avanti il plateau di n_estimators
-    # osservato nella diagnostica OOB (vedi analyze_classification_n_estimators.py).
-    # SAMPLE_FRACTION resta definita sopra ma viene ignorata quando
-    # TARGET_ROWS_PER_DAY non è None (vedi RawCSVDataLoader).
+    # (~811.650 -> ~1.000.000 righe), per aumentare la varietà del train set.
     TARGET_ROWS_PER_DAY = 100_000
     # Feature selection: OOB permutation importance, fedele a Breiman (2001)
     # Sec. 10 — criterio primario, vedi CICIDSFeatureSelector.
@@ -384,10 +338,6 @@ def run_baseline():
         # REGRESSOR non viene mai usato — si va su SYNTHETIC_REGRESSOR_REFERENCE_HP
         # — quindi pretenderlo bloccava la baseline di regressione senza motivo.
         #
-        # La versione precedente sollevava FileNotFoundError se il file NON
-        # esisteva e, nel ramo 'else' (cioè quando ESISTEVA), stampava
-        # "non trovato" assegnando un fallback che veniva comunque sovrascritto
-        # due righe dopo: messaggio fuorviante e codice irraggiungibile.
         best_hp_reale = None
         if user_tree_type == "classifier":
             if not os.path.exists(REAL_CONFIG_PATH):
@@ -627,35 +577,7 @@ def run_baseline():
             tempo_medio_fit_tuning = 0.0
         else:
             print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB)...")
-            # 'max_features' ORA esplorato anche su 'log2' (prima fissato solo a
-            # 'sqrt'), insieme a un valore più basso di 'max_samples' (0.3,
-            # prima il minimo era 0.5). MOTIVAZIONE, diversa da una semplice
-            # ricerca di accuratezza: la diagnostica sulla correlazione media tra
-            # alberi (rho_bar, Breiman 2001 Sec. 2, Teorema 2.3 — vedi
-            # analyze_tree_correlation.py) ha mostrato che, nonostante il
-            # campionamento ribilanciato per giorno abbia reso il problema
-            # oggettivamente più difficile (F1 OOB sceso da ~96% a ~88.8%), il
-            # punto di stabilizzazione della curva OOB rispetto a n_estimators
-            # NON si è spostato (resta a n~20-30) — segno che rho_bar non è
-            # calata quanto ci si aspetterebbe da un dataset più eterogeneo.
-            # 'max_features' e 'max_samples' sono le due leve dirette per
-            # ridurre rho_bar: meno feature candidate per split ('log2' invece
-            # di 'sqrt') e bootstrap sample più piccoli forzano gli alberi a
-            # specializzarsi su porzioni diverse di dati/feature, quindi a
-            # decorrelarsi tra loro. Restano comunque entrambi iperparametri
-            # della RandomForestClassifier standard — nessuno scostamento
-            # dall'algoritmo richiesto dalla traccia (Breiman 2001), a
-            # differenza per esempio di un cambio di algoritmo verso
-            # ExtraTreesClassifier, che è stato scartato come modifica al
-            # sistema di produzione per questo stesso motivo e tenuto solo come
-            # confronto diagnostico separato.
-            #
-            # bootstrap=False non è più esplorato: la stima OOB (Sec. 3.1, vedi
-            # oob_hyperparameter_search sopra) richiede bootstrap=True per
-            # definizione, ed è proprio il campionamento bootstrap a essere il
-            # tratto costitutivo dell'algoritmo di Breiman (Definition 1.1). Non
-            # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
-            # coerente con l'algoritmo di riferimento del progetto.
+
             param_dist = {
                 'n_estimators': [10, 20, 30, 40, 60, 80, 100],
                 'max_depth': [10, 25, None],
@@ -667,13 +589,6 @@ def run_baseline():
                 'max_samples': [0.3, 0.5, 0.7, 0.8, 1.0],
             }
 
-            # n_iter=60 (prima 50): lo spazio di ricerca è passato da 1.008 a
-            # 2.520 combinazioni possibili (7*3*3*2*2*2*1*5) con l'aggiunta di
-            # 'max_features' e del nuovo valore di 'max_samples'. n_iter più
-            # alto compensa parzialmente la copertura più sparsa del nuovo
-            # spazio, restando comunque entro un budget di tempo simile a
-            # prima (ogni fit resta un singolo fit OOB, non k-fold — vedi
-            # oob_hyperparameter_search).
             N_ITER_TUNING = 60
             start_tuning = time.perf_counter()
             best_params, oob_search_results = oob_hyperparameter_search(
@@ -718,10 +633,6 @@ def run_baseline():
             "importance_threshold": IMPORTANCE_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
-            # Motivazione della scelta di n_estimators persistita nel manifesto
-            # stesso: leggendo config_real.json in un secondo momento (o dal
-            # cluster, che legge questo file) resta tracciabile PERCHÉ questo
-            # valore è stato scelto, non solo quale valore è stato scelto.
             "n_estimators_note": motivazione_n_estimators,
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),
@@ -935,8 +846,6 @@ def run_baseline():
             "cpu_count": cpu_disponibili,
             "tempo_inferenza_totale": tempo_inferenza_totale
         },
-        # Dimensioni effettive: servono a verificare a colpo d'occhio che
-        # baseline e cluster abbiano lavorato sullo stesso volume di dati.
         "dataset_shape": {
             "train": list(X_train.shape),
             "test": list(X_test.shape),
@@ -976,15 +885,7 @@ def run_baseline():
                   f"{r['oob_accuracy']*100:8.2f}% | {r['oob_precision']*100:8.2f}% | "
                   f"{r['oob_recall']*100:8.2f}% | {r['oob_f1']*100:8.2f}%")
         print(LINEA_SINGOLA)
-
-        # NOTA METODOLOGICA: qui la media/dev.std è calcolata sulle DIVERSE
-        # COMBINAZIONI di iperparametri esplorate, NON sui fold di un unico
-        # modello (non esistono più fold). Non è quindi un indicatore di
-        # varianza del modello vincitore — è un indicatore di quanto le
-        # prestazioni OOB variano nello spazio degli iperparametri esplorato.
-        # Le due cose vanno tenute distinte in relazione: la prima versione
-        # (CV) misurava la stabilità del modello scelto su split diversi; qui
-        # si misura la sensibilità della foresta alla scelta di iperparametri.
+        
         print(f"\n2. SPREAD DELLE PRESTAZIONI OOB SULLE {len(oob_search_results)} COMBINAZIONI ESPLORATE")
         print("   (dispersione nello spazio degli iperparametri, NON varianza tra fold)")
         print(LINEA_SINGOLA)
