@@ -67,23 +67,20 @@ METODOLOGIA -- allineata all'esempio ufficiale di scikit-learn:
     copertura OOB raggiunge il 100% (limite INFERIORE assoluto, non un
     target).
 
-DEDUPLICAZIONE PRIMA DELLO SPLIT -- stesso passo di run_baseline.py, PRIMA
-mancante in questo script (bug corretto in questa versione):
+UNDER-SAMPLING SULLA CLASSE MAGGIORITARIA -- stesso passo di run_baseline.py
+(sostituisce la deduplicazione, rimossa da questo lavoro):
 
-    run_baseline.py chiama remove_near_duplicate_rows() sul dataset
-    binarizzato, PRIMA dello split stratificato (~21-25% di righe
-    quasi-duplicate rimosse sul dataset grezzo, vedi deduplication.py per
-    la diagnostica completa). Una versione precedente di questo script
-    saltava questo passo: lo split avveniva direttamente sul dataset
-    binarizzato non deduplicato, producendo un train set sistematicamente
-    più grande (e con più ridondanza intra-set) di quello usato realmente
-    in produzione da run_baseline.py — confermato confrontando i volumi
-    osservati nei due script a parità di sample_fraction (649.320 righe di
-    train qui contro 510.081 in run_baseline.py, con la differenza che
-    corrisponde esattamente alla frazione di duplicati rimossa). Poiché
-    l'obiettivo dichiarato di questo script è produrre una curva
-    rappresentativa di ciò che run_baseline.py userà in produzione, il
-    dataset di partenza deve essere lo stesso — deduplicazione inclusa.
+    Una diagnostica dedicata (analyze_dedup_by_day.py) ha misurato che la
+    deduplicazione a quasi-duplicati (rimossa da questo lavoro) toglieva
+    sproporzionatamente più righe di classe Attacco (fino al 75% su
+    giorni con traffico ripetitivo per costruzione, es. bruteforce via
+    Patator) che di classe Benign, peggiorando lo sbilanciamento delle
+    classi invece di correggerlo — coerente con la recall relativamente
+    bassa (80.98%) osservata sul test set. Il bilanciamento delle classi è
+    ora affidato esclusivamente all'under-sampling della classe
+    maggioritaria (Benign), applicato SOLO al train set, subito dopo lo
+    split e PRIMA della feature selection — vedi undersampling.py per la
+    motivazione completa dell'ordine e del rapporto scelto.
 
 CAMPIONAMENTO RIBILANCIATO PER GIORNO -- stesso passo di run_baseline.py,
 PRIMA mancante anche qui (bug corretto in questa versione, stessa classe di
@@ -185,7 +182,7 @@ from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
-from src.shared.utilities.deduplication import remove_near_duplicate_rows
+from src.shared.utilities.undersampling import undersample_majority_class
 
 # Stessi valori di run_baseline.py — aggiornare qui se li cambi anche lì.
 RANDOM_SEED = 123
@@ -199,6 +196,11 @@ SAMPLE_FRACTION = 0.05
 # sopra ma viene ignorata quando TARGET_ROWS_PER_DAY non è None, esattamente
 # come in run_baseline.py.
 TARGET_ROWS_PER_DAY = 100_000
+# Under-sampling della classe maggioritaria, identico a run_baseline.py —
+# vedi undersampling.py per la motivazione completa (sostituisce la
+# deduplicazione, rimossa da questo lavoro dopo la diagnostica
+# analyze_dedup_by_day.py).
+UNDERSAMPLING_RATIO = 1.0
 TARGET_COL = "Label"
 CONFIG_REAL_PATH = os.path.join("outputs_baseline", "config_real.json")
 
@@ -259,7 +261,7 @@ def prepare_train_set():
     )
     df_raw = loader.load()
 
-    print("[2/4] Binarizzazione + deduplicazione + split stratificato + preprocessing + "
+    print("[2/4] Binarizzazione + split stratificato + preprocessing + under-sampling + "
           "feature selection (identico a run_baseline.py, incluso il criterio OOB "
           "permutation importance)...")
     preprocessor = CICIDSPreprocessor(target_column=TARGET_COL)
@@ -267,17 +269,21 @@ def prepare_train_set():
 
     df_binarized = preprocessor.binarize_target(df_raw)
 
-    # Deduplicazione PRIMA dello split, identica a run_baseline.py — vedi
-    # sezione "DEDUPLICAZIONE PRIMA DELLO SPLIT" nel docstring del modulo
-    # per la motivazione. Mancava in una versione precedente di questo
-    # script: senza questo passo il train set qui costruito risultava più
-    # grande e più ridondante di quello usato realmente in produzione.
-    print("[3/4] Deduplicazione righe quasi-duplicate (vedi deduplication.py per la "
-          "diagnostica che giustifica questo passo)...")
-    df_binarized = remove_near_duplicate_rows(df_binarized, target_column=TARGET_COL)
-
     train_df, _ = splitter.split(df_binarized)
     train_df = preprocessor.process(train_df)
+
+    # Under-sampling della classe maggioritaria, identico a run_baseline.py
+    # (vedi undersampling.py per la motivazione completa) — necessario
+    # perché questo script deve restare rappresentativo di ciò che
+    # run_baseline.py usa in produzione. Sostituisce la deduplicazione,
+    # rimossa da questo lavoro dopo la diagnostica analyze_dedup_by_day.py
+    # (che toglieva sproporzionatamente più righe Attacco che Benign).
+    print("[3/4] Under-sampling della classe maggioritaria (solo train set)...")
+    train_df = undersample_majority_class(
+        train_df, target_column=TARGET_COL,
+        majority_class=0, minority_class=1,
+        ratio=UNDERSAMPLING_RATIO, random_state=RANDOM_SEED,
+    )
 
     # reduce_multicollinearity=True: identico a run_baseline.py (vedi lì per
     # la motivazione completa) — necessario perché questo script deve

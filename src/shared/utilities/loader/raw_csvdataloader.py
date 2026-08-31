@@ -308,12 +308,7 @@ class RawCSVDataLoader(DatasetLoader):
                 df_temp = df_temp.rename(columns={"label": "Label"})
 
             # 3b. Rimozione di eventuali righe di header duplicato annidate in
-            # mezzo al file (tipico dei CSV CIC-IDS2018, assemblati concatenando
-            # più sessioni di cattura: a volte compare una seconda riga
-            # "Dst Port,Protocol,...,Label" letta da pandas come riga dati
-            # invece che come intestazione). Le riconosciamo perché la colonna
-            # target di quella riga contiene letteralmente la stringa "Label"
-            # invece di un valore di classe reale.
+            # mezzo al file (tipico dei CSV CIC-IDS2018.
             if "Label" in df_temp.columns:
                 header_dupe_mask = df_temp["Label"].astype(str).str.strip() == "Label"
                 n_dupes = int(header_dupe_mask.sum())
@@ -331,8 +326,7 @@ class RawCSVDataLoader(DatasetLoader):
             if self.tag_source_day:
                 df_temp[SOURCE_DAY_COLUMN] = _extract_capture_day(source)
 
-            # 4. Conversione numerica: ora opera solo sul campione già ridotto
-            #    (es. 1% del file), non più sull'intero dataset. La colonna
+            # 4. Conversione numerica: ora opera solo sul campione già ridotto, non più sull'intero dataset. La colonna
             #    di tagging del giorno (stringa) e "Label" restano escluse.
             cols_to_convert = df_temp.columns.difference(["Label", SOURCE_DAY_COLUMN])
             df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors="coerce")

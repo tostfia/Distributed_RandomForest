@@ -8,6 +8,12 @@ class CICIDSPreprocessor:
     Configurata per emulare specularmente al millimetro la logica e i conteggi di Colab.
     """
 
+    KNOWN_METADATA_COLUMNS = frozenset({
+        "flow id", "src ip", "source ip", "dst ip", "destination ip",
+        "src port", "source port", "dst port", "destination port",
+        "timestamp",
+    })
+
     def __init__(
         self,
         target_column: str = "Label",
@@ -66,11 +72,9 @@ class CICIDSPreprocessor:
         df = df.copy()
         initial_shape = df.shape
 
-        # 1. Rimozione Metadati non generalizzabili (Data Leakage)
         if self.drop_metadata_columns:
             df = self._drop_metadata_columns(df)
 
-        # 2. Cast numerico e Sanificazione finale per i Worker
         df = self._convert_feature_columns_to_numeric(df)
 
         if self.drop_invalid_rows:
@@ -86,9 +90,20 @@ class CICIDSPreprocessor:
             if col != self.target_column
             and any(k in str(col).lower() for k in self.metadata_keywords)
         ]
+
+        unexpected = [
+            col for col in columns_to_drop
+            if str(col).strip().lower() not in self.KNOWN_METADATA_COLUMNS
+        ]
+        if unexpected:
+            print(f"   [ATTENZIONE] {len(unexpected)} colonna/e rimossa/e come metadata ma "
+                  f"NON presente/i nell'elenco noto (KNOWN_METADATA_COLUMNS): {unexpected}. "
+                  f"Verificare manualmente che non sia un falso positivo del filtro per "
+                  f"parola chiave prima di procedere.")
+
         if columns_to_drop:
             df = df.drop(columns=columns_to_drop, errors="ignore")
-            print(f"   - Colonne metadata rimosse ({len(columns_to_drop)})")
+            print(f"   - Colonne metadata rimosse ({len(columns_to_drop)}): {columns_to_drop}")
         return df
 
     def _convert_feature_columns_to_numeric(self, df: pd.DataFrame) -> pd.DataFrame:

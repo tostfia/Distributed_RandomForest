@@ -4,7 +4,7 @@ import pandas as pd
 import boto3
 from botocore.exceptions import ClientError
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
-from src.shared.utilities.deduplication import remove_near_duplicate_rows
+
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 
 # Strategie di partizionamento supportate da split_and_shard(). "iid" è il
@@ -59,11 +59,6 @@ class FederatedDataSplitter:
 
         if df is None or df.empty:
             raise ValueError("[FederatedDataSplitter ERRORE] Il DataFrame caricato è vuoto o non valido.")
-
-        # Deduplicazione righe quasi-duplicate PRIMA dello split globale (vedi
-        # analyze_train_test_leakage.py e deduplication.py per la diagnostica che
-        # giustifica questo passo — stesso fix di run_baseline.py/centralized.py).
-        df = remove_near_duplicate_rows(df, target_column=self.target_column)
 
         # 1. Macro-Split Stratificato (Train globale / Test globale)
         train_df, test_df = self.central_splitter.split(df)

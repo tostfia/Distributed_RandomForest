@@ -47,13 +47,15 @@ from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
-from src.shared.utilities.deduplication import remove_near_duplicate_rows
+from src.shared.utilities.undersampling import undersample_majority_class
 
 # Stessi valori di run_baseline.py / analyze_classification_n_estimators.py
 RANDOM_SEED = 123
 TEST_SIZE = 0.2
 TARGET_COL = "Label"
 TARGET_ROWS_PER_DAY = 100_000
+# Under-sampling della classe maggioritaria, identico a run_baseline.py.
+UNDERSAMPLING_RATIO = 1.0
 CONFIG_REAL_PATH = os.path.join("outputs_baseline", "config_real.json")
 
 # Numero di alberi usato per la stima di rho_bar: non e' necessario che
@@ -103,16 +105,26 @@ def prepare_train_test():
     )
     df_raw = loader.load()
 
-    print("[2/5] Binarizzazione + deduplicazione (identico a run_baseline.py)...")
+    print("[2/5] Binarizzazione (identico a run_baseline.py)...")
     preprocessor = CICIDSPreprocessor(target_column=TARGET_COL)
     df_binarized = preprocessor.binarize_target(df_raw)
-    df_binarized = remove_near_duplicate_rows(df_binarized, target_column=TARGET_COL)
 
     print("[3/5] Split stratificato...")
     splitter = StratifiedDataSplitter(target_column=TARGET_COL, test_size=TEST_SIZE, random_state=RANDOM_SEED)
     train_df, test_df = splitter.split(df_binarized)
     train_df = preprocessor.process(train_df)
     test_df = preprocessor.process(test_df)
+
+    # Under-sampling della classe maggioritaria, identico a run_baseline.py
+    # (vedi undersampling.py per la motivazione completa) — sostituisce la
+    # deduplicazione, rimossa da questo lavoro. Solo sul train set, prima
+    # della feature selection.
+    print("[3b/5] Under-sampling della classe maggioritaria (solo train set)...")
+    train_df = undersample_majority_class(
+        train_df, target_column=TARGET_COL,
+        majority_class=0, minority_class=1,
+        ratio=UNDERSAMPLING_RATIO, random_state=RANDOM_SEED,
+    )
 
     print("[4/5] Feature selection (fit SOLO su train, transform su test)...")
     fs = CICIDSFeatureSelector(
