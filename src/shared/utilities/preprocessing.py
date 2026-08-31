@@ -79,12 +79,6 @@ class CICIDSPreprocessor:
         print(f" • Pulizia completata. Shape: {initial_shape} -> {df.shape}")
         return df
 
-    @staticmethod
-    def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        df.columns = [str(col).strip() for col in df.columns]
-        return df
-
     def _drop_metadata_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         columns_to_drop = [

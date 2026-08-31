@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.datasets import make_classification, make_regression
 
 from src.shared.utilities.loader.datasetLoader import DatasetLoader
+from src.shared.config import SystemConfig
 
 RANDOM_SEED = 123
 
@@ -125,10 +126,15 @@ class SyntheticDataLoader(DatasetLoader):
         print(f" • Numero di righe:   {df.shape[0]}")
         print(f" • Numero di colonne: {df.shape[1]}")
         
-        os.makedirs(self.output_dir, exist_ok=True)
-        final_path = os.path.join(self.output_dir, self.filename)
-        df.to_csv(final_path, index=False)
-        print(f" • Dataset salvato in: {final_path}")
+        env = SystemConfig().env.strip().lower()
+        if env == "local":
+            os.makedirs(self.output_dir, exist_ok=True)
+            final_path = os.path.join(self.output_dir, self.filename)
+            df.to_csv(final_path, index=False)
+            print(f" • Dataset salvato in: {final_path}")
+        else:
+            print(f" • Salvataggio su disco saltato (ambiente '{env}': il dataset "
+                  f"resta solo in memoria, nessun consumatore rilegge questo file).")
 
 
         return df

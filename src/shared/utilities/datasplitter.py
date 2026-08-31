@@ -34,14 +34,7 @@ class StratifiedDataSplitter:
             )
 
         print(f"\n[Splitter] Esecuzione split stratificato (Test: {self.test_size*100}%, Seed: {self.random_state})...")
-
-        # StratifiedShuffleSplit richiede almeno 2 esempi per classe (uno per
-        # train, uno per test). Con dataset fortemente sbilanciati e/o dopo un
-        # campionamento aggressivo (es. sample_fraction basso), può capitare che
-        # una classe rara collassi a 0/1 esempio: la isoliamo esplicitamente
-        # invece di far crashare sklearn con un errore poco leggibile, e la
-        # mandiamo per intero nel train set (non ha senso valutarla su un test
-        # set quando esiste una sola osservazione storica).
+        
         class_counts = df[self.target_column].value_counts()
         rare_classes = class_counts[class_counts < 2].index.tolist()
 
