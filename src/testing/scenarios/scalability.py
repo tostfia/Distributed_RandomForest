@@ -129,6 +129,17 @@ class ScalabilityScenario(BaseTestScenario):
                 except Exception as e_clean:
                     print(f"[SCALABILITY {execution_mode.upper()}] [WARN] Pulizia checkpoint per "
                           f"'{payload['job_id']}' fallita (non bloccante): {e_clean}")
+                # gc.collect() esplicito: CPython spesso NON restituisce al SO la
+                # memoria di grosse strutture appena liberate (es. i blob da 1+ GB
+                # di alberi non regolarizzati ricostruiti in _reconstruct_and_save_
+                # global_model) — resta trattenuta in RSS pronta per riuso interno
+                # al processo. Con più configurazioni di worker in sequenza nello
+                # STESSO processo, questo residuo si somma al picco di concorrenza
+                # della configurazione successiva (N download/deserializzazioni
+                # RPC in parallelo, uno per worker) e può precipitare in OOM prima
+                # che il carico "nuovo" da solo lo giustificherebbe.
+                import gc
+                gc.collect()
         # ─── FASE 2: CALCOLO SPEEDUP E STAMPA IN MODO ELEGANTE ───
         baseline_w = min(workers_to_test)
         base_train_time = raw_metrics[baseline_w]["train_duration"]
