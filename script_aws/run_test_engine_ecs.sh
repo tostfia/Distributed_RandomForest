@@ -2,19 +2,36 @@
 set -e
 
 # =====================================================================
-# RUN TEST ENGINE (ECS Exec): lancia il TestEngine DENTRO la VPC come
-# task ECS one-off (non un service persistente) e ci entra con una shell
-# interattiva via 'aws ecs execute-command' — stessa identica esperienza
-# del prompt "Scelta (1-7, o 'all')" che hai in locale, ma con i worker
-# raggiungibili sul loro IP privato (nessuna esposizione RPC su internet).
+# RUN TEST ENGINE (task diretto, non interattivo): lancia il TestEngine
+# DENTRO la VPC come task ECS one-off, con lo scenario da eseguire passato
+# come variabile d'ambiente SCENARIO — NON più via sessione interattiva
+# 'aws ecs execute-command'.
+#
+# Perché questo cambio: ECS Exec ha un timeout di inattività FISSO a 20
+# minuti (non configurabile, vedi AWS docs), misurato sull'input da
+# tastiera del client — non sull'output che scorre. Test lunghi (training
+# federato, scenario di scalabilità con più configurazioni di worker)
+# eccedono facilmente quella finestra, troncando la sessione a metà.
+# Facendo girare l'engine come comando PRINCIPALE del task (esattamente
+# come già fanno worker-service/orchestrator-service), il lavoro non
+# dipende più da nessuna sessione client: il task Fargate può girare per
+# ore, e i suoi log finiscono su CloudWatch come qualunque altro
+# container — cosa che PRIMA non succedeva (l'output dell'engine, iniettato
+# via execute-command, esisteva solo nel canale SSM finché restavi
+# collegata, senza persistenza server-side).
 #
 # Prerequisiti:
 #   - deploy.sh già eseguito con successo (worker-service/orchestrator-service
 #     RUNNING sul cluster 'forest-cluster')
 #   - .env con ENV_MODE=aws e credenziali AWS Academy correnti
+#   - engine.py deve leggere la scelta da os.environ.get("SCENARIO") prima
+#     del prompt interattivo (già presente in src/testing/engine.py)
 #
 # Uso:
-#   ./run_test_engine_ecs.sh
+#   ./run_test_engine_ecs.sh <scenario>      # es. ./run_test_engine_ecs.sh 2
+#   ./run_test_engine_ecs.sh                 # chiede lo scenario a terminale
+#                                             # PRIMA di lanciare il task
+#                                             # (nessuna sessione ECS coinvolta)
 # =====================================================================
 
 if [ ! -f .env ]; then
@@ -58,43 +75,82 @@ if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; t
 fi
 
 # ---------------------------------------------------------------------
-# [SAFETY NET] Cleanup automatico del task one-off in QUALSIASI scenario
-# di uscita dello script: successo, errore (set -e), Ctrl+C, terminale
-# chiuso (SIGHUP). Senza questo trap, il prompt interattivo di stop a
-# fine script (vedi in fondo) viene raggiunto solo in caso di uscita
-# "pulita" dalla sessione ecs execute-command: un Ctrl+C durante quella
-# sessione, o un qualunque errore nei passi precedenti, lascerebbe il
-# task (sleep infinity, 2 vCPU/8GB) acceso indefinitamente senza che tu
-# te ne accorga.
-#
-# LEAVE_RUNNING viene alzato a 1 SOLO se rispondi esplicitamente "n" al
-# prompt finale: la tua scelta di lasciarlo acceso viene sempre rispettata,
-# il trap non la sovrascrive.
+# Scelta dello scenario: primo argomento posizionale, oppure prompt
+# locale (nessuna sessione ECS coinvolta — puoi rispondere con calma,
+# non consuma nessun timeout).
+# ---------------------------------------------------------------------
+VALID_SCENARIOS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "all")
+SCENARIO_CHOICE="$1"
+
+is_valid_scenario() {
+  local candidate="$1"
+  for v in "${VALID_SCENARIOS[@]}"; do
+    [ "$v" == "$candidate" ] && return 0
+  done
+  return 1
+}
+
+if [ -z "$SCENARIO_CHOICE" ]; then
+  echo "Seleziona lo scenario da eseguire:"
+  echo "1. Performance e Metriche"
+  echo "2. Scalabilità"
+  echo "3. Simulazione di Rete"
+  echo "4. Guasto improvviso del Worker (addestramento)"
+  echo "5. Guasto improvviso del Worker (inferenza)"
+  echo "6. Failover dell'Orchestratore (addestramento)"
+  echo "7. Failover dell'Orchestratore (inferenza)"
+  echo "8. Elezione del Leader sotto Concorrenza (Safety)"
+  echo "9. Genera Grafici"
+  while true; do
+    read -p "Scelta (1-9, o 'all' per eseguire tutti): " SCENARIO_CHOICE
+    SCENARIO_CHOICE="$(echo "$SCENARIO_CHOICE" | tr '[:upper:]' '[:lower:]' | xargs)"
+    is_valid_scenario "$SCENARIO_CHOICE" && break
+    echo "[ERRORE] Opzione non valida. Riprova."
+  done
+else
+  SCENARIO_CHOICE="$(echo "$SCENARIO_CHOICE" | tr '[:upper:]' '[:lower:]' | xargs)"
+  if ! is_valid_scenario "$SCENARIO_CHOICE"; then
+    echo "[ERRORE] Scenario '$SCENARIO_CHOICE' non valido. Valori ammessi: ${VALID_SCENARIOS[*]}"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------
+# [SAFETY NET] Questo trap protegge SOLO la fase di setup (step 1-4, prima
+# che il task venga lanciato): se qualcosa fallisce lì (credenziali,
+# servizi non stabili, VPC/SG mancanti), 'set -e' esce e non c'è nessun
+# task da fermare (TASK_ARN è ancora vuoto, il trap non fa nulla).
+# Una volta che il task è REALMENTE partito con lo scenario scelto, il
+# trap viene disattivato esplicitamente (vedi fondo script): a differenza
+# della vecchia versione (dove il task faceva solo 'sleep infinity' in
+# attesa di te, e lasciarlo acceso per errore sprecava Fargate), ora il
+# task sta facendo il lavoro che hai chiesto — non va fermato solo perché
+# lo script termina o perdi la connessione locale.
 # ---------------------------------------------------------------------
 TASK_ARN=""
-LEAVE_RUNNING=0
 
-cleanup() {
+cleanup_on_setup_failure() {
   local exit_code=$?
-  if [ -n "$TASK_ARN" ] && [ "$LEAVE_RUNNING" -eq 0 ]; then
+  if [ -n "$TASK_ARN" ]; then
     echo ""
-    echo "[CLEANUP] Fermo il task del test-engine ($TASK_ARN) per evitare costi Fargate inutili..."
+    echo "[CLEANUP] Fermo il task del test-engine ($TASK_ARN), lanciato ma non ancora confermato RUNNING..."
     aws ecs stop-task --cluster "$CLUSTER_NAME" --task "$TASK_ARN" --region "$REGION" > /dev/null 2>&1 \
       && echo "[CLEANUP] Task fermato." \
       || echo "[CLEANUP] (task già fermo, non trovato, o stop già eseguito: ok)"
   fi
   exit $exit_code
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup_on_setup_failure EXIT INT TERM HUP
 
 echo "===================================================================="
-echo " RUN TEST ENGINE (ECS Exec)  -  forest-cluster ($REGION)"
+echo " RUN TEST ENGINE (task diretto)  -  forest-cluster ($REGION)"
 echo "===================================================================="
 echo " TRAINING_MODE : $TRAINING_MODE"
 echo " NUM_WORKERS   : $NUM_WORKERS"
+echo " SCENARIO      : $SCENARIO_CHOICE"
 echo "--------------------------------------------------------------------"
 
-echo "==> [1/6] Verifica credenziali AWS (Learner Lab, scadono ogni ~4h)..."
+echo "==> [1/5] Verifica credenziali AWS (Learner Lab, scadono ogni ~4h)..."
 if ! aws sts get-caller-identity --region "$REGION" > /dev/null 2>&1; then
   echo "[ERRORE] Credenziali AWS non valide o scadute. Aggiornale nel .env e riprova."
   exit 1
@@ -104,7 +160,7 @@ LABROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 echo "    OK, credenziali valide."
 
-echo "==> [2/6] Verifica che worker-service/orchestrator-service siano stabili..."
+echo "==> [2/5] Verifica che worker-service/orchestrator-service siano stabili..."
 ALL_SERVICE_ARNS=$(aws ecs list-services --cluster "$CLUSTER_NAME" --region "$REGION" \
   --query "serviceArns[]" --output text 2>/dev/null || echo "")
 TARGET_SERVICES=()
@@ -134,7 +190,7 @@ for ((i=0; i<TOTAL_SERVICES; i+=CHUNK_SIZE)); do
 done
 echo "    OK, infrastruttura pronta."
 
-echo "==> [3/6] Recupero VPC/subnet/Security Group (stessi usati da deploy.sh)..."
+echo "==> [3/5] Recupero VPC/subnet/Security Group (stessi usati da deploy.sh)..."
 VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" \
   --query "Vpcs[0].VpcId" --output text --region "$REGION")
 SUBNET_IDS=$(aws ec2 describe-subnets \
@@ -155,11 +211,14 @@ echo "    (Stesso SG dei worker: la regola self-referencing sulla porta 18861"
 echo "     già presente basta, il test-engine sarà raggiungibile dai worker e"
 echo "     viceversa senza aprire nulla verso l'esterno.)"
 
-echo "==> [4/6] Registrazione Task Definition '$FAMILY'..."
-# Il container resta in attesa ('sleep infinity'): l'engine NON parte da solo
-# all'avvio del task, altrimenti il prompt interattivo 'input()' bloccherebbe
-# il processo principale senza nessuno collegato a leggerlo. Ci entriamo noi
-# dopo, con 'ecs execute-command', ed è lì che lanciamo davvero l'engine.
+echo "==> [4/5] Registrazione Task Definition '$FAMILY'..."
+# L'engine è ora il comando PRINCIPALE del container (non più 'sleep
+# infinity' in attesa di una sessione execute-command): legge lo scenario
+# da SCENARIO invece del prompt interattivo (vedi TestEngine.run_scenarios
+# in engine.py), quindi non ha bisogno di nessun terminale collegato.
+# 'timeout 7200' resta come rete di sicurezza contro un eventuale hang
+# imprevisto (stesso valore/spirito della vecchia versione), non più per
+# tenere vivo un container in attesa.
 cat <<EOF > /tmp/test-engine-task-def.json
 {
   "family": "${FAMILY}",
@@ -185,9 +244,10 @@ cat <<EOF > /tmp/test-engine-task-def.json
         {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
         {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"},
         {"name": "RPC_SYNC_TIMEOUT_SECONDS", "value": "${RPC_SYNC_TIMEOUT_SECONDS}"},
-        {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"}
+        {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"},
+        {"name": "SCENARIO", "value": "${SCENARIO_CHOICE}"}
       ],
-      "command": ["sh", "-c", "timeout 7200 sleep infinity"],
+      "command": ["sh", "-c", "timeout 7200 python -m src.testing.engine"],
       "linuxParameters": {"initProcessEnabled": true},
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -205,12 +265,13 @@ EOF
 aws ecs register-task-definition --cli-input-json file:///tmp/test-engine-task-def.json --region "$REGION" > /dev/null
 echo "    Task Definition registrata."
 
-echo "==> [5/6] Avvio del task (run-task, one-off, --enable-execute-command)..."
+echo "==> [5/5] Avvio del task (run-task, one-off)..."
+# Niente più '--enable-execute-command': non entriamo più nel container
+# con una sessione interattiva, quindi non serve l'agente ECS Exec.
 TASK_ARN=$(aws ecs run-task \
   --cluster "$CLUSTER_NAME" \
   --task-definition "$FAMILY" \
   --launch-type FARGATE \
-  --enable-execute-command \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_1,$SUBNET_2],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
   --region "$REGION" \
   --query "tasks[0].taskArn" --output text)
@@ -221,54 +282,46 @@ if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" == "None" ]; then
 fi
 echo "    Task avviato: $TASK_ARN"
 
-echo "    Attendo che il task sia RUNNING e l'agente ECS Exec sia pronto..."
+echo "    Attendo che il task sia RUNNING..."
 for attempt in $(seq 1 30); do
   TASK_STATUS=$(aws ecs describe-tasks --cluster "$CLUSTER_NAME" --tasks "$TASK_ARN" \
     --query "tasks[0].lastStatus" --output text --region "$REGION")
-  AGENT_STATUS=$(aws ecs describe-tasks --cluster "$CLUSTER_NAME" --tasks "$TASK_ARN" \
-    --query "tasks[0].containers[0].managedAgents[?name=='ExecuteCommandAgent'].lastStatus | [0]" \
-    --output text --region "$REGION" 2>/dev/null || echo "")
 
-  if [ "$TASK_STATUS" == "RUNNING" ] && [ "$AGENT_STATUS" == "RUNNING" ]; then
-    echo "    OK: task RUNNING, agente ECS Exec RUNNING."
+  if [ "$TASK_STATUS" == "RUNNING" ]; then
+    echo "    OK: task RUNNING."
     break
   fi
   sleep 5
   if [ "$attempt" -eq 30 ]; then
-    echo "[ERRORE] Timeout (150s) in attesa che il task/agente siano pronti."
-    echo "         Stato task: $TASK_STATUS | Stato agente: $AGENT_STATUS"
+    echo "[ERRORE] Timeout (150s) in attesa che il task sia RUNNING."
+    echo "         Stato task: $TASK_STATUS"
     echo "         Puoi controllare manualmente con:"
     echo "           aws ecs describe-tasks --cluster $CLUSTER_NAME --tasks $TASK_ARN --region $REGION"
     exit 1
   fi
 done
 
-echo "==> [6/6] Apro la sessione interattiva (identica al prompt che vedi in locale)..."
-echo "    Digita 1-7 o 'all' come faresti normalmente. Per uscire dalla sessione: exit / Ctrl+D."
-echo ""
-
-aws ecs execute-command \
-  --cluster "$CLUSTER_NAME" \
-  --task "$TASK_ARN" \
-  --container "$CONTAINER_NAME" \
-  --interactive \
-  --command "python -m src.testing.engine" \
-  --region "$REGION"
+# Il task è confermato RUNNING con lo scenario scelto: da qui in avanti
+# lavora da solo, indipendentemente da questo script/terminale. Disattivo
+# il trap di sicurezza — non deve più fermarlo all'uscita.
+trap - EXIT INT TERM HUP
 
 echo ""
 echo "===================================================================="
-echo " Sessione terminata."
-echo " Se hai aggiunto l'upload su S3 in engine.py, il report finale è in:"
-echo "   s3://$BUCKET_NAME/test_reports/..."
+echo " Task avviato con successo. Il lavoro prosegue in background sul"
+echo " cluster, indipendentemente da questo terminale — puoi anche"
+echo " chiuderlo, il task NON verrà fermato."
 echo "===================================================================="
-read -p "Fermare ora il task del test-engine? (Consigliato, evita costi Fargate inutili) [Y/n] " STOP_ANSWER
-STOP_ANSWER="${STOP_ANSWER:-Y}"
-if [[ "$STOP_ANSWER" =~ ^[Yy]$ ]]; then
-  aws ecs stop-task --cluster "$CLUSTER_NAME" --task "$TASK_ARN" --region "$REGION" > /dev/null
-  echo "Task fermato."
-  TASK_ARN=""   # già fermato qui: evita che il trap lo rifermi/ristampi a fine script
-else
-  LEAVE_RUNNING=1   # scelta esplicita: il trap di sicurezza NON lo ferma
-  echo "Task lasciato in esecuzione (scelta esplicita). Per fermarlo dopo:"
-  echo "  aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --region $REGION"
-fi
+echo " Per seguire i log in tempo reale:"
+echo "   aws logs tail /ecs/rf-test-engine --follow --region $REGION"
+echo ""
+echo " Per controllare se il task ha terminato:"
+echo "   aws ecs describe-tasks --cluster $CLUSTER_NAME --tasks $TASK_ARN \\"
+echo "     --query \"tasks[0].lastStatus\" --region $REGION"
+echo ""
+echo " Il report finale (quando lo scenario termina) viene caricato in:"
+echo "   s3://$BUCKET_NAME/test_reports/aws/"
+echo ""
+echo " Per fermarlo manualmente prima che finisca:"
+echo "   aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --region $REGION"
+echo "===================================================================="
