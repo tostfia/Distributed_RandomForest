@@ -12,12 +12,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from master.orchestrator.centralized import RPC_SYNC_TIMEOUT_SECONDS
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory
-
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from multiprocessing import shared_memory
 
@@ -25,6 +24,9 @@ _fed_child_X = None
 _fed_child_y = None
 _shm_X_ref = None  # tiene vivo il blocco nel processo figlio
 _shm_y_ref = None
+
+
+RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
 
 def _init_fed_child_process(shm_name_X, shape_X, dtype_X, shm_name_y, shape_y, dtype_y):
     """Inizializza il processo figlio agganciandosi allo shared memory invece
@@ -44,16 +46,12 @@ def _init_fed_child_process(shm_name_X, shape_X, dtype_X, shm_name_y, shape_y, d
     _fed_child_y = np.ndarray(shape_y, dtype=dtype_y, buffer=_shm_y_ref.buf)
 
 def _train_single_fed_tree(args):
-    """Esegue l'addestramento attingendo dallo shard in memoria globale del processo figlio."""
-    
     global _fed_child_X, _fed_child_y
-    
     tree_seed, max_depth, max_samples, bootstrap, tree_class, class_weight, max_features, min_samples_split, criterion = args
     np.random.seed(tree_seed)
-    
+
     n_samples = _fed_child_X.shape[0]
-    
-    # Gestione del bootstrap e del campionamento locale
+
     if bootstrap:
         if max_samples is None:
             num_samples_to_draw = n_samples
@@ -61,30 +59,30 @@ def _train_single_fed_tree(args):
             num_samples_to_draw = int(max_samples * n_samples)
         else:
             num_samples_to_draw = max_samples
-            
+
         indices = np.random.choice(n_samples, size=num_samples_to_draw, replace=True)
-        X_sampled = _fed_child_X[indices]
-        y_sampled = _fed_child_y[indices]
+        # Zero-copy: invece di X_sampled = _fed_child_X[indices] (~572MB copiati),
+        # calcoliamo quante volte ogni riga originale è stata estratta e passiamo
+        # questo peso a tree.fit(). Matematicamente equivalente al duplicare le
+        # righe (stesso identico calcolo di impurità Gini/MSE che fa sklearn
+        # internamente in _parallel_build_trees), ma senza mai allocare una
+        # copia fisica dell'array.
+        sample_weight = np.bincount(indices, minlength=n_samples).astype(np.float64)
+        X_fit, y_fit = _fed_child_X, _fed_child_y
     else:
-        X_sampled = _fed_child_X
-        y_sampled = _fed_child_y
-        
-    # 2. Prepariamo i parametri per l'inizializzazione dell'albero in modo dinamico
+        sample_weight = None
+        X_fit, y_fit = _fed_child_X, _fed_child_y
+
     kwargs = {"random_state": tree_seed, "max_features": max_features, "min_samples_split": min_samples_split}
-    
     if max_depth is not None:
         kwargs["max_depth"] = max_depth
-
     if criterion is not None:
         kwargs["criterion"] = criterion
-        
     if class_weight is not None and "Classifier" in tree_class.__name__:
         kwargs["class_weight"] = class_weight
-        
-    # Istanziazione dell'albero specifico richiesto con i parametri validati
+
     tree = tree_class(**kwargs)
-        
-    tree.fit(X_sampled, y_sampled)
+    tree.fit(X_fit, y_fit, sample_weight=sample_weight)
     return tree
 
 class FederatedWorker(BaseWorker):
@@ -310,8 +308,10 @@ class FederatedWorker(BaseWorker):
         hyperparameters = obtain(hyperparameters)
         max_depth = hyperparameters.get("max_depth")
         base_seed = int(hyperparameters.get("random_state", 123))
+        max_samples = hyperparameters.get("max_samples", self.max_samples) 
 
         self.tree_type = hyperparameters.get("tree_type", "classifier")
+    
         # Fallback ai default "corretti" di RandomForest{Classifier,Regressor}
         # se il manifesto non specifica esplicitamente max_features.
         max_features = hyperparameters.get(
@@ -342,8 +342,8 @@ class FederatedWorker(BaseWorker):
         worker_tasks = []
         for i in range(n_estimators_local):
             seed = base_seed + i
-            worker_tasks.append((seed, max_depth, self.max_samples, self.bootstrap, tree_class, class_weight, max_features,
-                                  min_samples_split, criterion))
+            worker_tasks.append((seed, max_depth, max_samples, self.bootstrap, tree_class, class_weight, max_features,
+                                min_samples_split, criterion))
 
         if n_estimators_local == 1:
             print(f"[{self.worker_name}] Ottimizzazione: 1 solo albero. Calcolo diretto senza Pool.")
@@ -353,47 +353,33 @@ class FederatedWorker(BaseWorker):
             local_trees = [_train_single_fed_tree(worker_tasks[0])]
         else:
             pool_size = min(n_estimators_local, allocated_cores)
-            print(f"[{self.worker_name}] Istanziazione Pool locale con {pool_size} processi "
-                  f"(shared memory, nessuna duplicazione del dataset)...")
+            print(f"[{self.worker_name}] Istanziazione ThreadPool locale con {pool_size} thread "
+                f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
 
-            X = np.ascontiguousarray(self._cached_X_train)
-            y = np.ascontiguousarray(self._cached_y_train)
+            # I thread condividono già la memoria del processo: niente shared_memory,
+            # niente initializer, niente re-import per processo (spawn). _fed_child_X/y
+            # restano semplici variabili globali del modulo, assegnate una sola volta qui.
+            
+            _fed_child_X = self._cached_X_train
+            _fed_child_y = self._cached_y_train
 
-            shm_X = shared_memory.SharedMemory(create=True, size=X.nbytes)
-            shm_y = shared_memory.SharedMemory(create=True, size=y.nbytes)
-            try:
-                np.ndarray(X.shape, dtype=X.dtype, buffer=shm_X.buf)[:] = X[:]
-                np.ndarray(y.shape, dtype=y.dtype, buffer=shm_y.buf)[:] = y[:]
-
-                init_args = (shm_X.name, X.shape, X.dtype, shm_y.name, y.shape, y.dtype)
-
-                # Addestramento a BATCH: limita la memoria di picco (bootstrap
-                # sampling di ogni albero crea comunque una copia parziale di
-                # X) e permette un checkpoint incrementale invece di tenere
-                # tutti gli n_estimators_local alberi in RAM fino alla fine.
-                BATCH_SIZE = max(1, min(pool_size * 4, n_estimators_local))
-                local_trees = []
-                with Pool(processes=pool_size, initializer=_init_fed_child_process, initargs=init_args) as pool:
-                    for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
-                        batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
-                        print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start+len(batch)} "
-                              f"di {n_estimators_local}...")
-                        async_result = pool.map_async(_train_single_fed_tree, batch)
-                        try:
-                            batch_trees = async_result.get(timeout=RPC_SYNC_TIMEOUT_SECONDS)
-                        except multiprocessing.TimeoutError:
-                            raise RuntimeError(
-                                f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
-                                f"training parallelo: probabile OOM kill di un processo worker del Pool "
-                                f"(controllare Memory Utilization su CloudWatch)."
-                            )
-                        local_trees.extend(batch_trees)
-                        del batch_trees
-            finally:
-                shm_X.close()
-                shm_X.unlink()
-                shm_y.close()
-                shm_y.unlink()
+            BATCH_SIZE = max(1, min(pool_size * 4, n_estimators_local))
+            local_trees = []
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
+                for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
+                    batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
+                    print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start+len(batch)} "
+                        f"di {n_estimators_local}...")
+                    futures = [executor.submit(_train_single_fed_tree, task) for task in batch]
+                    try:
+                        batch_trees = [f.result(timeout=RPC_SYNC_TIMEOUT_SECONDS) for f in futures]
+                    except TimeoutError:
+                        raise RuntimeError(
+                            f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
+                            f"training parallelo (ThreadPool)."
+                        )
+                    local_trees.extend(batch_trees)
+                    del batch_trees
 
         print(f"[+] [{self.worker_name}] Addestramento completato. Salvataggio su storage condiviso...")
         serialized_task = pickle.dumps(local_trees)
@@ -605,9 +591,9 @@ class FederatedWorker(BaseWorker):
                 )
 
             if actual_is_regressor:
-                rf = RandomForestRegressor(n_estimators=len(unpacked_model))
+                rf = RandomForestRegressor(n_estimators=len(unpacked_model), n_jobs=-1)
             else:
-                rf = RandomForestClassifier(n_estimators=len(unpacked_model))
+                rf = RandomForestClassifier(n_estimators=len(unpacked_model),n_jobs=-1)
                 global_classes = hyperparameters.get("global_classes", [0, 1])
                 rf.classes_ = np.array(global_classes, dtype=np.int64)
                 rf.n_classes_ = len(rf.classes_)

@@ -43,31 +43,6 @@ class ScalabilityScenario(BaseTestScenario):
         # T_seq è confrontabile.
         target_trees = self._resolve_target_trees()
 
-        # Override opzionale, SOLO per questo scenario: con pochi alberi (quelli
-        # tipici del manifesto della baseline) l'overhead di rete/orchestrazione
-        # domina il tempo totale e lo speedup misurato resta rumore attorno a 1x
-        # qualunque sia il numero di worker. 'n_estimators_override' in
-        # 'scalability_test' (test_config.json) alza deliberatamente il carico
-        # SOLO qui, senza toccare 'use_local_hyperparameters' (che è globale e
-        # cambierebbe gli alberi anche per Performance/Rete/Guasti/Failover,
-        # rompendo la loro comparabilità con T_seq/T_1node). Se assente, il
-        # comportamento resta quello di sempre: stesso carico della baseline.
-        n_estimators_override = scal_cfg.get("n_estimators_override")
-        if n_estimators_override:
-            try:
-                overridden = int(n_estimators_override)
-                if overridden > 0:
-                    print(f"[SCALABILITY {execution_mode.upper()}] [INFO] n_estimators_override={overridden} attivo "
-                          f"(era {target_trees} dal manifesto della baseline): i tempi di QUESTO scenario non sono "
-                          f"più confrontabili con T_seq/T_1node — gli altri scenari non sono toccati.")
-                    target_trees = overridden
-                else:
-                    print(f"[SCALABILITY {execution_mode.upper()}] [WARN] n_estimators_override={overridden} non "
-                          f"positivo: ignorato, resto sul carico della baseline ({target_trees}).")
-            except (TypeError, ValueError):
-                print(f"[SCALABILITY {execution_mode.upper()}] [WARN] n_estimators_override='{n_estimators_override}' "
-                      f"non è un intero valido: ignorato, resto sul carico della baseline ({target_trees}).")
-
         rng = random.Random(123)
         worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
