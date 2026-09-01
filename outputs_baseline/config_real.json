@@ -88,7 +88,7 @@
     "Idle Std",
     "Idle Max"
   ],
-  "n_estimators_note": "n_estimators confermato al valore del tuning: 200 (OOB F1=94.61%).",
+  "n_estimators_note": "n_estimators=200 scelto dalla ricerca OOB congiunta (optuna_oob_hyperparameter_search, stessa combinazione vincente di tutti gli altri iperparametri, OOB F1 come refit_metric). Giustificazione empirica della scelta -- curva OOB con warm_start -- prodotta separatamente da analyze_n_estimators.py (non eseguita automaticamente qui).",
   "hyperparameters": {
     "n_estimators": 200,
     "max_depth": null,
