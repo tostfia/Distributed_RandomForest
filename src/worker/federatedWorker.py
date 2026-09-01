@@ -1,3 +1,4 @@
+import multiprocessing
 from multiprocessing.pool import Pool
 import json
 import os
@@ -11,26 +12,36 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from master.orchestrator.centralized import RPC_SYNC_TIMEOUT_SECONDS
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory
 
 
+from multiprocessing import shared_memory
+
 _fed_child_X = None
 _fed_child_y = None
+_shm_X_ref = None  # tiene vivo il blocco nel processo figlio
+_shm_y_ref = None
 
-def _init_fed_child_process(X, y):
-    """Inizializza il processo figlio del pool federato isolando i thread della CPU."""
+def _init_fed_child_process(shm_name_X, shape_X, dtype_X, shm_name_y, shape_y, dtype_y):
+    """Inizializza il processo figlio agganciandosi allo shared memory invece
+    di ricevere una copia pickle-ata di X/y (che con 'spawn' verrebbe
+    duplicata integralmente per OGNI processo, moltiplicando l'uso di RAM
+    per pool_size)."""
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
-    
-    global _fed_child_X, _fed_child_y
-    _fed_child_X = X
-    _fed_child_y = y
+
+    global _fed_child_X, _fed_child_y, _shm_X_ref, _shm_y_ref
+    _shm_X_ref = shared_memory.SharedMemory(name=shm_name_X)
+    _fed_child_X = np.ndarray(shape_X, dtype=dtype_X, buffer=_shm_X_ref.buf)
+    _shm_y_ref = shared_memory.SharedMemory(name=shm_name_y)
+    _fed_child_y = np.ndarray(shape_y, dtype=dtype_y, buffer=_shm_y_ref.buf)
 
 def _train_single_fed_tree(args):
     """Esegue l'addestramento attingendo dallo shard in memoria globale del processo figlio."""
@@ -342,11 +353,47 @@ class FederatedWorker(BaseWorker):
             local_trees = [_train_single_fed_tree(worker_tasks[0])]
         else:
             pool_size = min(n_estimators_local, allocated_cores)
-            print(f"[{self.worker_name}] Istanziazione Pool locale indipendente con {pool_size} processi...")
-            
-            with Pool(processes=pool_size, initializer=_init_fed_child_process, initargs=(self._cached_X_train, self._cached_y_train)) as pool:
-                print(f"[{self.worker_name}] Mapping parallelo in corso su shard locale...")
-                local_trees = pool.map(_train_single_fed_tree, worker_tasks)
+            print(f"[{self.worker_name}] Istanziazione Pool locale con {pool_size} processi "
+                  f"(shared memory, nessuna duplicazione del dataset)...")
+
+            X = np.ascontiguousarray(self._cached_X_train)
+            y = np.ascontiguousarray(self._cached_y_train)
+
+            shm_X = shared_memory.SharedMemory(create=True, size=X.nbytes)
+            shm_y = shared_memory.SharedMemory(create=True, size=y.nbytes)
+            try:
+                np.ndarray(X.shape, dtype=X.dtype, buffer=shm_X.buf)[:] = X[:]
+                np.ndarray(y.shape, dtype=y.dtype, buffer=shm_y.buf)[:] = y[:]
+
+                init_args = (shm_X.name, X.shape, X.dtype, shm_y.name, y.shape, y.dtype)
+
+                # Addestramento a BATCH: limita la memoria di picco (bootstrap
+                # sampling di ogni albero crea comunque una copia parziale di
+                # X) e permette un checkpoint incrementale invece di tenere
+                # tutti gli n_estimators_local alberi in RAM fino alla fine.
+                BATCH_SIZE = max(1, min(pool_size * 4, n_estimators_local))
+                local_trees = []
+                with Pool(processes=pool_size, initializer=_init_fed_child_process, initargs=init_args) as pool:
+                    for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
+                        batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
+                        print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start+len(batch)} "
+                              f"di {n_estimators_local}...")
+                        async_result = pool.map_async(_train_single_fed_tree, batch)
+                        try:
+                            batch_trees = async_result.get(timeout=RPC_SYNC_TIMEOUT_SECONDS)
+                        except multiprocessing.TimeoutError:
+                            raise RuntimeError(
+                                f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
+                                f"training parallelo: probabile OOM kill di un processo worker del Pool "
+                                f"(controllare Memory Utilization su CloudWatch)."
+                            )
+                        local_trees.extend(batch_trees)
+                        del batch_trees
+            finally:
+                shm_X.close()
+                shm_X.unlink()
+                shm_y.close()
+                shm_y.unlink()
 
         print(f"[+] [{self.worker_name}] Addestramento completato. Salvataggio su storage condiviso...")
         serialized_task = pickle.dumps(local_trees)
