@@ -37,14 +37,14 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 # ---------------------------------------------------------------------------
 SYNTHETIC_REGRESSOR_REFERENCE_HP = {
 
-    "n_estimators": 35,
+    "n_estimators": 120,
     "max_depth": None,
     "min_samples_split": 2,
 
     "max_features": 1 / 3,
     "criterion": "squared_error",
     "bootstrap": True,
-    "max_samples": 1.0,
+    "max_samples": 0.3,
 }
 
 

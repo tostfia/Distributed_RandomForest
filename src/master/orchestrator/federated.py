@@ -698,12 +698,31 @@ class FederatedOrchestrator(BaseOrchestrator):
         model_path = self._resolve_model_path(job_id)
         if not self.checkpoint_dao.exists(model_path):
             raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
-        print(f"[{self.orchestrator_name}] Caricamento della foresta globale da {model_path}...")
-        global_model = self.checkpoint_dao.load(model_path)
 
-        all_trees = global_model.estimators_
-        total_trees = len(all_trees)
-        print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
+        # Leggiamo solo i metadati leggeri (conteggio alberi, classi) invece di
+        # deserializzare l'intero modello: qui serve solo per loggare/taggare
+        # le metriche e per 'global_classes' nel payload ai worker — sono loro
+        # (non l'orchestratore) a scaricare e deserializzare gli alberi veri e
+        # propri per predire (vedi 'model_path' passato più sotto). Fallback al
+        # caricamento completo per compatibilità con modelli salvati PRIMA di
+        # questo fix (nessun file '.meta' ancora presente per quel job).
+        meta_path = self._resolve_model_meta_path(job_id)
+        global_classes = None
+        if self.checkpoint_dao.exists(meta_path):
+            meta = self.checkpoint_dao.load(meta_path)
+            total_trees = meta["num_trees"]
+            global_classes = meta.get("classes")
+            print(f"[{self.orchestrator_name}] Metadati letti da {meta_path}. "
+                  f"Numero totale di alberi: {total_trees}")
+        else:
+            print(f"[{self.orchestrator_name}] [WARN] Metadati leggeri non trovati per questo job "
+                  f"(modello salvato prima di questo fix?): fallback al caricamento completo di "
+                  f"{model_path}...")
+            fallback_model = self.checkpoint_dao.load(model_path)
+            total_trees = len(fallback_model.estimators_)
+            if hasattr(fallback_model, "classes_"):
+                global_classes = fallback_model.classes_.tolist()
+            print(f"[{self.orchestrator_name}] Foresta caricata (fallback). Numero totale di alberi: {total_trees}")
 
         available_workers = ServiceRegistry.get_available_workers(self.environment)
         worker_names = list(available_workers.keys())
@@ -791,8 +810,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "feature_selezionate": feature_selezionate,
                         "tree_type": tree_type,
                     }
-                    if tree_type == "classifier" and hasattr(global_model, "classes_"):
-                        worker_hyperparameters["global_classes"] = global_model.classes_.tolist()
+                    if tree_type == "classifier" and global_classes is not None:
+                        worker_hyperparameters["global_classes"] = global_classes
                     # ----------------------------------------------------------------------------
                     print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
                           f"({total_trees} alberi, {model_path}) a {w_name}...")
@@ -990,6 +1009,23 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
 
+            # Metadati leggeri accanto al blob pesante: _execute_inference_step
+            # li legge al posto del modello intero quando deve solo sapere
+            # quanti alberi/quali classi contiene (vedi commento lì). Fallimento
+            # non bloccante: se salta, l'inferenza ricade sul caricamento
+            # completo (comportamento precedente a questo fix).
+            try:
+                meta = {
+                    "num_trees": len(all_trained_trees),
+                    "tree_type": tree_type,
+                    "classes": global_model.classes_.tolist() if hasattr(global_model, "classes_") else None,
+                }
+                meta_path = self._resolve_model_meta_path(self.current_job_id)
+                self.checkpoint_dao.save(meta_path, meta)
+            except Exception as e_meta:
+                print(f"[{self.orchestrator_name}] [WARN] Salvataggio metadati leggeri del modello "
+                      f"fallito (non bloccante, l'inferenza ricadrà sul caricamento completo): {e_meta}")
+
 
             return len(all_trained_trees)
 
@@ -1035,6 +1071,16 @@ class FederatedOrchestrator(BaseOrchestrator):
         if self.environment == "aws":
             return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
         return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+
+    def _resolve_model_meta_path(self, job_id: str) -> str:
+        """Path dei metadati leggeri (conteggio alberi, classi) associati al
+        modello globale: evita che _execute_inference_step debba deserializzare
+        l'intero blob del modello (fino a 1+ GB con alberi non regolarizzati)
+        solo per leggere questi due valori. Stessa sotto-cartella/convenzione
+        di _resolve_model_path, suffisso 'model_meta_' invece di 'model_'."""
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/model_meta_{job_id}.pkl"
+        return os.path.join("./saved_models", f"model_meta_{job_id}.pkl")
 
     def _resolve_model_path(self, job_id: str) -> str:
         """Path del modello globale aggregato, in una sotto-cartella dedicata alla
