@@ -85,7 +85,7 @@ def load_tuned_hyperparameters():
     return hp
 
 
-def prepare_train_test():
+def prepare_train_test(tuned_hp):
     """
     Ricostruisce train E test set con la STESSA pipeline deterministica di
     run_baseline.py (stesso seed, stesso TARGET_ROWS_PER_DAY, stessa
@@ -127,9 +127,18 @@ def prepare_train_test():
     )
 
     print("[4/5] Feature selection (fit SOLO su train, transform su test)...")
+    # rf_max_features passato esplicitamente (stesso bug corretto in
+    # analyze_classification_n_estimators.py): senza questo, la feature
+    # selection qui userebbe sempre 'sqrt' indipendentemente da quale
+    # max_features ha vinto il tuning, mentre la foresta usata più sotto
+    # per la misura di rho_bar (righe 197+) usa correttamente
+    # tuned_hp.get("max_features") -- le due dovevano restare coerenti.
+    rf_max_features = tuned_hp.get("max_features", "sqrt") if tuned_hp else "sqrt"
     fs = CICIDSFeatureSelector(
         target_column=TARGET_COL, rf_random_state=RANDOM_SEED,
+        rf_max_features=rf_max_features,
         reduce_multicollinearity=True, multicollinearity_distance_threshold=0.3,
+        dendrogram_plot_path=f"feature_correlation_dendrogram_{rf_max_features}_rho.png",
     )
     train_df = fs.fit_transform(train_df)
     test_df = fs.transform(test_df)
@@ -190,7 +199,7 @@ def compute_tree_correlation(forest: RandomForestClassifier, X_test, y_test):
 
 def main():
     tuned_hp = load_tuned_hyperparameters()
-    X_train, y_train, X_test, y_test = prepare_train_test()
+    X_train, y_train, X_test, y_test = prepare_train_test(tuned_hp)
 
     rf_kwargs = dict(
         n_estimators=N_TREES_FOR_ESTIMATE,

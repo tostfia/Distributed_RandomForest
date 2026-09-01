@@ -61,6 +61,7 @@ class CICIDSFeatureSelector:
         n_jobs: Optional[int] = None,
         reduce_multicollinearity: bool = False,
         multicollinearity_distance_threshold: float = 0.3,
+        dendrogram_plot_path: Optional[str] = "feature_correlation_dendrogram.png",
     ):
         self.target_column = target_column
 
@@ -82,9 +83,17 @@ class CICIDSFeatureSelector:
         # comportamento di run precedenti che non lo richiedono
         # esplicitamente) — vedi reduce_multicollinearity() più sotto per
         # la spiegazione completa del metodo e la giustificazione della
-        # soglia di default.
+        # soglia di default. dendrogram_plot_path va reso ESPLICITAMENTE
+        # distinto dal chiamante quando la feature selection viene
+        # calcolata più di una volta nello stesso run (es. una volta per
+        # max_features='sqrt', una per 'log2' -- vedi
+        # optuna_oob_hyperparameter_search in run_baseline.py): con lo
+        # stesso path fisso in entrambe le chiamate, la seconda
+        # sovrascriverebbe silenziosamente il dendrogramma della prima,
+        # bug reale osservato prima di questa correzione.
         self.reduce_multicollinearity_flag = reduce_multicollinearity
         self.multicollinearity_distance_threshold = multicollinearity_distance_threshold
+        self.dendrogram_plot_path = dendrogram_plot_path
 
         # Default: tutti i core MENO UNO, non -1 (= tutti i core). Lascia
         # deliberatamente margine di CPU/RAM al sistema operativo e alle
@@ -154,6 +163,7 @@ class CICIDSFeatureSelector:
             multicollinear_dropped = self.reduce_multicollinearity(
                 train_df, feature_cols=survived_so_far,
                 distance_threshold=self.multicollinearity_distance_threshold,
+                plot_path=self.dendrogram_plot_path,
             )
             columns_to_drop.extend(multicollinear_dropped)
 
@@ -246,6 +256,16 @@ class CICIDSFeatureSelector:
         all_indices = np.arange(n_samples)
 
         def _process_tree(tree):
+            # ATTENZIONE, accoppiamento implicito da non rompere: il terzo
+            # argomento (n_samples_bootstrap) presuppone che la foresta
+            # preliminare usi bootstrap a piena dimensione (max_samples non
+            # impostato, quindi default None -> campione bootstrap grande
+            # quanto il train set). Se in futuro si aggiungesse un
+            # rf_max_samples configurabile a questa classe (come già fatto
+            # per rf_max_features), questo valore andrebbe cambiato di
+            # conseguenza in int(n_samples * rf_max_samples), altrimenti la
+            # ricostruzione degli indici in-bag/OOB risulterebbe silenziosamente
+            # sbagliata.
             in_bag = _generate_sample_indices(tree.random_state, n_samples, n_samples)
             oob_mask = np.ones(n_samples, dtype=bool)
             oob_mask[in_bag] = False

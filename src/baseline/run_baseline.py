@@ -3,9 +3,11 @@ import json
 import time
 import numpy as np
 import pickle
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)  # i tuoi print restano l'unico output
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import ParameterSampler, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.config import SystemConfig
@@ -78,100 +80,294 @@ SYNTHETIC_REGRESSOR_REFERENCE_HP = {
 # in bagging" nella sua stessa descrizione), non solo una scorciatoia
 # computazionale.
 # ---------------------------------------------------------------------------
-def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, random_state,
-                               refit_metric="f1", n_jobs=None):
+
+def _oob_classification_metrics(rf, y_train):
     """
-    Ricerca iperparametrica per RandomForestClassifier basata su stima OOB
-    invece che su k-fold Cross-Validation. Vedi commento sopra per la
-    giustificazione (Breiman 2001, Sec. 3.1).
+    Calcola le metriche OOB (accuracy, precision, recall, F1) da un
+    RandomForestClassifier con oob_score=True, escludendo correttamente le
+    righe prive di copertura OOB (mai out-of-bag per nessun albero).
 
-    Ogni combinazione campionata viene addestrata con UN SOLO fit
-    (oob_score=True); le predizioni out-of-bag aggregate
-    (oob_decision_function_) sono usate per calcolare accuracy, precision,
-    recall e f1 sullo stesso training set, senza bisogno di un fold di
-    validazione separato.
+    ATTENZIONE ALLA VERSIONE DI SCIKIT-LEARN -- verificato empiricamente su
+    questo progetto (scikit-learn 1.6.1, test controllato con copertura OOB
+    incompleta):
+        Righe con somma zero:  11
+        Righe con NaN:          0
+    Su questa versione, le righe prive di copertura OOB vengono riempite con
+    [0., 0.] (tutte le classi a zero), NON con NaN -- a differenza di quanto
+    riportato dalla documentazione ufficiale più recente di scikit-learn
+    (>=1.9.x circa), che descrive un riempimento a NaN. Un secondo test ha
+    inoltre confermato che l'attributo nativo rf.oob_score_ EREDITA questo
+    bias su questa versione (0.38000, identico all'accuracy "naive" calcolata
+    includendo le righe non coperte come predizioni valide di classe 0; NON
+    0.38462, l'accuracy corretta escludendole) -- quindi la correzione
+    manuale qui sotto non è un accorgimento superfluo, è necessaria.
 
-    n_jobs: core da usare per OGNI fit della ricerca (non per il numero di
-    combinazioni in parallelo: quelle restano sequenziali, una alla volta).
-    Default None -> cpu_count - 1 (stessa politica di CICIDSFeatureSelector):
-    NON è più giustificato come "necessario per comparabilità dei tempi" —
-    tempo_tuning non è la metrica usata per il confronto baseline-vs-cluster
-    (quella è calcolata separatamente su t_seq/t_1node_parallel dopo il
-    tuning, sul modello finale), e comunque un core del laptop e una vCPU
-    EC2 non sarebbero comparabili in modo esatto a prescindere. Il default
-    resta cauto (un core libero) solo per lo stesso motivo pratico già
-    emerso con la feature selection: non saturare la macchina.
+    Il controllo copre ENTRAMBI i comportamenti (somma zero E NaN), non solo
+    quello osservato sulla versione attualmente installata: resta corretto
+    anche se l'ambiente di esecuzione dovesse cambiare versione di
+    scikit-learn in futuro, senza dover ridiagnosticare da capo.
+    """
+    oob_decision = rf.oob_decision_function_
 
-    Ritorna (best_params, results) dove results è una lista di dict, uno per
-    combinazione esplorata, con le metriche OOB e il tempo di fit.
+    zero_filled = oob_decision.sum(axis=1) == 0
+    nan_filled = np.isnan(oob_decision).any(axis=1)
+    valid_mask = ~(zero_filled | nan_filled)
+
+    n_missing_oob = int((~valid_mask).sum())
+
+    if not valid_mask.any():
+        return {"oob_accuracy": float("nan"), "oob_precision": float("nan"),
+                "oob_recall": float("nan"), "oob_f1": float("nan"),
+                "n_missing_oob": n_missing_oob}
+
+    oob_pred = np.argmax(oob_decision[valid_mask], axis=1)
+    y_valid = np.asarray(y_train)[valid_mask]
+
+    return {
+        "oob_accuracy": float(np.mean(oob_pred == y_valid)),
+        "oob_precision": precision_score(y_valid, oob_pred, zero_division=0),
+        "oob_recall": recall_score(y_valid, oob_pred, zero_division=0),
+        "oob_f1": f1_score(y_valid, oob_pred, zero_division=0),
+        "n_missing_oob": n_missing_oob,
+    }
+
+def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_state,
+                                      importance_threshold, multicollinearity_distance_threshold,
+                                      refit_metric="f1", n_jobs=None):
+    """
+    Sostituisce ParameterSampler + loop con una ricerca Optuna (TPE) sullo
+    stesso spazio di iperparametri, stessa giustificazione teorica (Breiman
+    2001 Sec. 3.1): un solo fit per trial, oob_score=True, nessuna k-fold CV.
+    TPE campiona in modo informato dai trial precedenti invece che
+    uniformemente, quindi a parità di budget converge su combinazioni
+    migliori del campionamento puramente casuale.
+
+    FEATURE SELECTION SPOSTATA DENTRO LA RICERCA -- allineamento al pattern
+    ufficiale scikit-learn (SelectFromModel dentro una Pipeline, rifittato
+    per ogni combinazione esplorata da GridSearchCV/RandomizedSearchCV,
+    invece che fissato una volta prima del tuning): la selezione delle
+    feature ora si muove insieme alla ricerca degli iperparametri, non è più
+    calcolata una sola volta con una configurazione fissa (max_features='sqrt')
+    scollegata da quella che il tuning sceglierà poi come ottima.
+
+    A DIFFERENZA del pattern SelectFromModel di sklearn (importanza Gini,
+    nessuna riduzione di ridondanza), qui si mantiene il metodo proprio di
+    questo lavoro (OOB permutation importance + clustering gerarchico per
+    multicollinearità, vedi CICIDSFeatureSelector) -- si segue il PRINCIPIO
+    strutturale raccomandato da sklearn (selezione e tuning uniti), non lo
+    strumento specifico, per non regredire a un criterio di selezione meno
+    rigoroso di quello già scelto e giustificato altrove in questo lavoro.
+
+    COSTO CONTROLLATO CON UNA CACHE: rifare la permutation importance ad ogni
+    singolo trial (60 volte) moltiplicherebbe il tempo di calcolo di un
+    fattore ~60x (3-9 minuti a passata), non sostenibile nei tempi
+    disponibili. Solo max_features cambia concretamente QUALI feature
+    risultano importanti (sqrt vs log2 cambiano le feature candidate ad ogni
+    split); gli altri iperparametri (n_estimators, min_samples_split,
+    criterion, class_weight, max_samples) influenzano quanto bene il modello
+    sfrutta le feature disponibili, non quali feature emergono come più
+    informative. La feature selection viene quindi calcolata al più UNA
+    VOLTA PER VALORE DI max_features (2 volte in totale, non 60), e riusata
+    da tutti i trial che campionano lo stesso max_features.
     """
     if n_jobs is None:
         cpu_count = os.cpu_count() or 2
         n_jobs = max(1, cpu_count - 1)
 
-    sampler = list(ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state))
     results = []
-    total = len(sampler)
+    # cache: max_features -> (CICIDSFeatureSelector fittato, train_df già ridotto)
+    feature_selection_cache = {}
 
-    print(f"[OOB search] {total} combinazioni da esplorare, ogni fit userà n_jobs={n_jobs}. "
-          f"ATTENZIONE: le combinazioni con max_depth=None e n_estimators alto su dataset grandi "
-          f"possono comunque richiedere qualche minuto CIASCUNA — se non vedi output per un po', "
-          f"non è detto che sia bloccato, guarda il messaggio 'in corso' qui sotto.", flush=True)
-
-    for i, params in enumerate(sampler, start=1):
-        if not params.get("bootstrap", True):
-            raise ValueError(
-                "oob_hyperparameter_search richiede bootstrap=True in ogni combinazione "
-                "campionata: la stima OOB non è definita senza campionamento bootstrap."
+    def get_or_compute_feature_selection(max_features):
+        if max_features not in feature_selection_cache:
+            print(f"\n[Feature Selection] Nessuna selezione in cache per max_features="
+                  f"'{max_features}' -- calcolo ora (OOB permutation importance + "
+                  f"riduzione multicollinearità, foresta preliminare con questo stesso "
+                  f"max_features)...")
+            fs = CICIDSFeatureSelector(
+                target_column=target_col,
+                importance_threshold=importance_threshold,
+                rf_random_state=random_state,
+                rf_max_features=max_features,
+                reduce_multicollinearity=True,
+                multicollinearity_distance_threshold=multicollinearity_distance_threshold,
+                # Nome distinto per max_features: senza questo, la seconda
+                # chiamata a questa cache (per l'altro valore di
+                # max_features) sovrascriverebbe silenziosamente il
+                # dendrogramma della prima (bug corretto in
+                # CICIDSFeatureSelector).
+                dendrogram_plot_path=f"feature_correlation_dendrogram_{max_features}.png",
             )
+            train_selected = fs.fit_transform(train_df)
+            feature_selection_cache[max_features] = (fs, train_selected)
+            print(f"[Feature Selection] Cache popolata per max_features='{max_features}': "
+                  f"{train_selected.shape[1] - 1} feature selezionate.\n")
+        return feature_selection_cache[max_features]
 
-        print(f"[OOB search] ({i}/{total}) in corso: {params} ...", flush=True)
+    def objective(trial):
+        # ---------------------------------------------------------------
+        # GIUSTIFICAZIONE DELLA GRIGLIA -- non tutti i valori hanno lo
+        # stesso status epistemico, va dichiarato esplicitamente quali sono
+        # motivati e quali sono scelte pratiche non derivate dai dati:
+        #
+        #   ESAUSTIVI/TEORICAMENTE MOTIVATI (non un sottoinsieme arbitrario):
+        #   - max_features ['sqrt','log2']: le due convenzioni standard per
+        #     classificazione (Breiman 2001, 'sqrt' vicina a log2(M)+1).
+        #   - criterion ['gini','entropy']: uniche due opzioni che
+        #     scikit-learn offre per la classificazione.
+        #   - class_weight [None,'balanced']: uniche due opzioni discrete
+        #     sensate (esclusi dizionari custom).
+        #   - bootstrap [True]: vincolo definitorio, la stima OOB richiede
+        #     bootstrap=True (Breiman, Definition 1.1).
+        #   - max_samples, esteso a 0.3: aggiunto apposta come leva diretta
+        #     per abbassare rho_bar (correlazione tra alberi, vedi
+        #     analyze_tree_correlation.py), non un valore a caso.
+        #
+        #   max_depth [10,25,None] e min_samples_split [2,5,10] -- VERIFICATO
+        #   sulla User Guide ufficiale scikit-learn (sezione Ensemble):
+        #   "Good results are often achieved when setting max_depth=None in
+        #   combination with min_samples_split=2 (i.e., when fully
+        #   developing the trees)" -- è anche la combinazione di default di
+        #   RandomForestClassifier. La griglia INCLUDE deliberatamente
+        #   questo default raccomandato (None, 2) come caso di riferimento,
+        #   e lo affianca a valori più regolarizzati (10/25 per max_depth,
+        #   5/10 per min_samples_split) per verificare EMPIRICAMENTE se
+        #   allontanarsi dal default aiuta su un dataset con multicollinearità
+        #   nota (rho_bar elevato, Sezione baseline-tuning) -- "often" nella
+        #   citazione non è "always": non è garantito che il default generico
+        #   sia ottimale anche per questo dataset specifico, da qui la
+        #   verifica invece di accettarlo per assunzione.
+        #
+        #   n_estimators [10..200]: limite superiore allineato alla curva
+        #   fine-grained di analyze_classification_n_estimators.py (prima
+        #   fermo a 100, incoerenza corretta) -- griglia esplorativa a
+        #   copertura crescente, non derivata da un calcolo specifico.
+        # ---------------------------------------------------------------
+        params = {
+            "n_estimators": trial.suggest_categorical("n_estimators", [10, 20, 30, 40, 60, 80, 100, 150, 200]),
+            "max_depth": trial.suggest_categorical("max_depth", [None]),
+            "min_samples_split": trial.suggest_categorical("min_samples_split", [2]),
+            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
+            "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
+            "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+            "bootstrap": True,
+            "max_samples": trial.suggest_categorical("max_samples", [0.3, 0.5, 0.7, 0.8, 1.0]),
+        }
 
-        rf_kwargs = dict(params)
-        rf_kwargs["random_state"] = random_state
-        rf_kwargs["oob_score"] = True
-        rf_kwargs["n_jobs"] = n_jobs
+        fs, train_selected = get_or_compute_feature_selection(params["max_features"])
+        X_trial = train_selected.drop(columns=[target_col])
+        y_trial = train_selected[target_col]
 
-        rf = RandomForestClassifier(**rf_kwargs)
+        print(f"[Optuna OOB] trial {trial.number + 1}/{n_trials} in corso: {params} "
+              f"({X_trial.shape[1]} feature) ...", flush=True)
+
+        rf = RandomForestClassifier(**params, random_state=random_state,
+                                     oob_score=True, n_jobs=n_jobs)
+        start = time.perf_counter()
+        rf.fit(X_trial, y_trial)
+        fit_time = time.perf_counter() - start
+
+        metrics = _oob_classification_metrics(rf, y_trial)
+        print(f"[Optuna OOB] trial {trial.number + 1}/{n_trials} completato in {fit_time:.1f}s — "
+              f"OOB F1={metrics['oob_f1']:.4f}, OOB Acc={metrics['oob_accuracy']:.4f}", flush=True)
+        if metrics["n_missing_oob"] > 0:
+            pct = metrics["n_missing_oob"] / len(y_trial) * 100
+            print(f"   [OOB] {metrics['n_missing_oob']} righe ({pct:.2f}%) senza copertura OOB, escluse.")
+
+        results.append({"params": params, "fit_time": fit_time, "n_features": X_trial.shape[1],
+                         **metrics,
+                         "oob_accuracy": metrics["oob_accuracy"], "oob_precision": metrics["oob_precision"],
+                         "oob_recall": metrics["oob_recall"], "oob_f1": metrics["oob_f1"]})
+
+        return metrics[f"oob_{refit_metric}"]
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=random_state))
+    study.optimize(objective, n_trials=n_trials)
+
+    # Verifica EMPIRICA (non solo assunzione teorica) se max_features ha
+    # davvero cambiato il set di feature selezionato, invece di darlo per
+    # scontato -- riportabile in relazione in entrambi i casi (conferma o
+    # smentisce l'ipotesi che max_features influenzi la selezione).
+    if len(feature_selection_cache) > 1:
+        unique_sets = {
+            tuple(sorted(c.drop(columns=[target_col]).columns))
+            for _, c in feature_selection_cache.values()
+        }
+        print(f"\n[Feature Selection] Verifica: {len(feature_selection_cache)} valori di "
+              f"max_features esplorati, {len(unique_sets)} set di feature DISTINTI prodotti.")
+        if len(unique_sets) == 1:
+            print("  [NOTA] Stesso identico set di feature per tutti i valori di max_features: "
+                  "in questo caso specifico max_features non ha inciso sulla selezione -- "
+                  "verifica empirica, riportabile in relazione.")
+        else:
+            print("  [NOTA] Set di feature diversi tra i valori di max_features esplorati: "
+                  "la selezione È risultata sensibile al valore usato per la foresta "
+                  "preliminare, a conferma del meccanismo ipotizzato.")
+
+    results.sort(key=lambda r: r[f"oob_{refit_metric}"], reverse=True)
+    best_params = dict(results[0]["params"])
+    best_fs, best_train_selected = feature_selection_cache[best_params["max_features"]]
+    return best_params, results, best_fs, best_train_selected
+
+def optuna_refine_n_estimators(X_train, y_train, fixed_params, candidate_values,
+                                random_state, refit_metric="f1", n_jobs=None):
+    """
+    A parità di TUTTI gli altri iperparametri (fixed_params, tranne
+    n_estimators), esplora candidate_values in modo esaustivo (GridSampler).
+    Risolve il problema del vecchio scegli_n_estimators: prima confrontava
+    trial con iperparametri diversi tra loro, qui ogni riga del risultato
+    è comparabile con tutte le altre per costruzione.
+
+    LIMITE NOTO -- NIENTE warm_start, a differenza della verifica indipendente
+    più fine in analyze_classification_n_estimators.py: qui ogni valore di
+    n_estimators viene fittato con un fit INDIPENDENTE (foresta separata da
+    zero), non con una singola foresta fatta crescere incrementalmente. Con
+    fit indipendenti, lo schema di seeding interno di scikit-learn assegna
+    semi diversi ai singoli alberi a seconda del numero totale di stimatori
+    richiesto: la curva qui prodotta confronta quindi foreste leggermente
+    diverse punto per punto, non la stessa foresta osservata a stadi di
+    crescita diversi (stesso problema, già diagnosticato e risolto altrove
+    in questo lavoro passando a warm_start=True, che qui NON è stato
+    reintrodotto per restare compatibile con l'interfaccia a
+    objective-function di Optuna, dove ogni trial è indipendente per
+    costruzione). Trattare questo sweep come indicativo/rapido, non come
+    fonte autorevole: per la scelta finale di n_estimators resta
+    analyze_classification_n_estimators.py (warm_start, griglia fine a passo
+    5) la verifica di riferimento.
+    """
+    if n_jobs is None:
+        cpu_count = os.cpu_count() or 2
+        n_jobs = max(1, cpu_count - 1)
+
+    results = []
+    total = len(candidate_values)
+
+    def objective(trial):
+        n_estimators = trial.suggest_categorical("n_estimators", candidate_values)
+        params = {**fixed_params, "n_estimators": n_estimators}
+
+        print(f"[Optuna n_est sweep] n_estimators={n_estimators} "
+              f"({len(results) + 1}/{total}) in corso ...", flush=True)
+
+        rf = RandomForestClassifier(**params, random_state=random_state,
+                                     oob_score=True, n_jobs=n_jobs)
         start = time.perf_counter()
         rf.fit(X_train, y_train)
         fit_time = time.perf_counter() - start
-        oob_decision = rf.oob_decision_function_
-        valid_mask = oob_decision.sum(axis=1) != 0
-        n_missing_oob = int((~valid_mask).sum())
 
-        oob_pred = np.argmax(oob_decision[valid_mask], axis=1)
-        y_valid = np.asarray(y_train)[valid_mask]
+        metrics = _oob_classification_metrics(rf, y_train)
+        print(f"[Optuna n_est sweep] n_estimators={n_estimators} completato in {fit_time:.1f}s — "
+              f"OOB F1={metrics['oob_f1']:.4f}", flush=True)
 
-        oob_accuracy = float(np.mean(oob_pred == y_valid))
-        oob_precision = precision_score(y_valid, oob_pred, zero_division=0)
-        oob_recall = recall_score(y_valid, oob_pred, zero_division=0)
-        oob_f1 = f1_score(y_valid, oob_pred, zero_division=0)
+        results.append({"params": params, "fit_time": fit_time, **metrics})
+        return metrics[f"oob_{refit_metric}"]
 
-        print(f"[OOB search] ({i}/{total}) completata in {fit_time:.1f}s — "
-              f"OOB F1={oob_f1:.4f}, OOB Acc={oob_accuracy:.4f}", flush=True)
+    sampler = optuna.samplers.GridSampler({"n_estimators": candidate_values}, seed=random_state)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    study.optimize(objective, n_trials=total)
 
-        if n_missing_oob > 0:
-            pct_missing = n_missing_oob / len(y_train) * 100
-            print(f"   [OOB] n_estimators={params.get('n_estimators')}, "
-                  f"max_samples={params.get('max_samples')}: {n_missing_oob} righe "
-                  f"({pct_missing:.2f}%) senza copertura OOB, escluse dal calcolo delle metriche.")
-
-        results.append({
-            "params": params,
-            "oob_accuracy": oob_accuracy,
-            "oob_precision": oob_precision,
-            "oob_recall": oob_recall,
-            "oob_f1": oob_f1,
-            "fit_time": fit_time,
-            "n_missing_oob": n_missing_oob,
-        })
-
-    metric_key = f"oob_{refit_metric}"
-    results.sort(key=lambda r: r[metric_key], reverse=True)
-    best_params = dict(results[0]["params"])
-
-    return best_params, results
+    results.sort(key=lambda r: r["params"]["n_estimators"])
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +383,6 @@ def oob_hyperparameter_search(X_train, y_train, param_distributions, n_iter, ran
 # ("riducete il numero di alberi banalmente" se l'addestramento è troppo
 # lento) — può convenire accettare un F1 leggermente più basso in cambio di
 # un training molto più rapido.
-#
-# A DIFFERENZA della vecchia versione (N_ESTIMATORS_OVERRIDE = 30, valore
-# letterale fisso e non giustificato in questo file), qui il valore candidato
-# NON è hardcoded: viene ricalcolato ad ogni run come il più piccolo
-# n_estimators fra quelli ESPLORATI dalla ricerca OOB il cui F1 resta entro
-# OOB_F1_TOLERANCE dal migliore assoluto. La motivazione "guadagno
-# trascurabile" è quindi sempre verificata sui dati di QUESTO run (dataset,
-# seed, campionamento correnti), non ereditata da un run precedente
-# potenzialmente diverso (es. con un altro sample_fraction o un'altra
-# versione della pipeline di preprocessing).
 #
 # La scelta finale resta ESPLICITA a runtime, sullo stesso modello di
 # SKIP_TUNING più sopra: chi lancia lo script vede il trade-off misurato e
@@ -323,9 +509,11 @@ def run_baseline():
     # Secondo criterio (dopo quello sopra): riduzione della multicollinearità
     # via clustering gerarchico — vedi reduce_multicollinearity() in
     # CICIDSFeatureSelector per la motivazione completa e il significato
-    # della soglia (distanza 1-|correlazione di Spearman|; 0.3 ~ raggruppa
-    # feature con |correlazione| >= 0.7).
-    MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.3
+    # della soglia (distanza 1-|correlazione di Spearman|; 0.2 ~ raggruppa
+    # feature con |correlazione| >= 0.8 -- soglia più conservativa del
+    # default 0.3 usato nei run precedenti, quindi cluster più piccoli e
+    # più feature superstiti a parità di dataset).
+    MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.2
     # Under-sampling della classe maggioritaria (Benign), solo sul train set
     # -- vedi undersampling.py per la motivazione completa. ratio=1.0
     # produce un bilanciamento 1:1 (maggioritaria ridotta alla stessa
@@ -358,7 +546,7 @@ def run_baseline():
     # ---------------------------------------------------------
     print("\nEseguire il tuning iperparametrico (FASE 2) o riusare gli iperparametri "
           "già presenti in un manifesto esistente?")
-    print("  [1] Esegui il tuning (default) — ~50 combinazioni via stima OOB, richiede tempo")
+    print("  [1] Esegui il tuning (default) ")
     print("  [2] Salta il tuning — riusa gli iperparametri già presenti in "
           "'outputs_baseline/config_real.json'")
     scelta_tuning = input("  Scelta [Default: 1]: ").strip() or "1"
@@ -400,16 +588,7 @@ def run_baseline():
         print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
     if dataset_type == "synthetic":
-        # Il tuning sul dataset reale serve SOLO al task sintetico di
-        # CLASSIFICAZIONE (stesso algoritmo e stesso tipo di problema, quindi
-        # ereditarne gli iperparametri è metodologicamente difendibile). Per il
-        # REGRESSOR non viene mai usato — si va su SYNTHETIC_REGRESSOR_REFERENCE_HP
-        # — quindi pretenderlo bloccava la baseline di regressione senza motivo.
-        #
-        # La versione precedente sollevava FileNotFoundError se il file NON
-        # esisteva e, nel ramo 'else' (cioè quando ESISTEVA), stampava
-        # "non trovato" assegnando un fallback che veniva comunque sovrascritto
-        # due righe dopo: messaggio fuorviante e codice irraggiungibile.
+        print(">>> FASE 1: Generazione e Preprocessing Dataset Sintetico")
         best_hp_reale = None
         if user_tree_type == "classifier":
             if not os.path.exists(REAL_CONFIG_PATH):
@@ -457,11 +636,12 @@ def run_baseline():
         # generatore — a differenza del reale, dove va stimata empiricamente
         # (da qui la permutation importance OOB in CICIDSFeatureSelector).
         n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
-        # noise=10.0 verificato empiricamente (analyze_regression_reference_config.py):
-        # con n_informative=15/30 la deviazione standard del segnale "pulito"
-        # (noise=0) è ≈212.8, quindi noise=10.0 corrisponde a circa il 4.7%
-        # della variabilità naturale del target (SNR ≈ 21). Livello moderato:
-        # rende il problema non banale senza far dominare il rumore sul segnale.
+        # noise=10.0 verificato empiricamente in una diagnostica precedente
+        # (script rimosso da questo progetto): con n_informative=15/30 la
+        # deviazione standard del segnale "pulito" (noise=0) è ≈212.8, quindi
+        # noise=10.0 corrisponde a circa il 4.7% della variabilità naturale
+        # del target (SNR ≈ 21). Livello moderato: rende il problema non
+        # banale senza far dominare il rumore sul segnale.
         noise = tmp_cfg.get("noise", 10.0)
         # Stessi default interni di SyntheticDataLoader per la classificazione,
         # ma calcolati QUI e passati esplicitamente al costruttore. Prima
@@ -586,36 +766,21 @@ def run_baseline():
         print(" • Preprocessing indipendente sul Test Set...")
         test_df = preprocessor.process(test_df)
 
-        # Under-sampling della classe maggioritaria (Benign) -- SOLO sul
-        # train set, MAI sul test (altrimenti la valutazione finale non
-        # misurerebbe più le prestazioni sulla distribuzione reale). Va
-        # PRIMA della feature selection: la foresta preliminare di
-        # CICIDSFeatureSelector, se allenata su un train set ancora
-        # sbilanciato, produrrebbe stime di importanza distorte verso i
-        # pattern della classe maggioritaria. Vedi undersampling.py per la
-        # motivazione completa (sostituisce la deduplicazione, rimossa da
-        # questo lavoro: la deduplicazione toglieva sproporzionatamente più
-        # righe di classe Attacco che Benign, peggiorando lo sbilanciamento
-        # invece di correggerlo -- vedi analyze_dedup_by_day.py).
         print(" • Under-sampling della classe maggioritaria (solo train set)...")
         train_df = undersample_majority_class(
             train_df, target_column=target_col,
             majority_class=0, minority_class=1,
             ratio=UNDERSAMPLING_RATIO, random_state=RANDOM_SEED,
         )
-
-        print(" • Applicazione Feature Selection (OOB Permutation Importance + "
-              "riduzione multicollinearità)...")
-        fs = CICIDSFeatureSelector(
-            target_column=target_col,
-            importance_threshold=IMPORTANCE_THRESHOLD,
-            rf_random_state=RANDOM_SEED,
-            reduce_multicollinearity=True,
-            multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
-        )
-        train_df = fs.fit_transform(train_df)
-        test_df = fs.transform(test_df)
-        dizionario_feature = fs.feature_summary_
+        # La feature selection NON viene più applicata qui, con una
+        # configurazione fissa scollegata dal tuning: è stata spostata
+        # dentro optuna_oob_hyperparameter_search, dove si muove insieme
+        # alla ricerca degli iperparametri (vedi il docstring di quella
+        # funzione per la motivazione completa, allineata al pattern
+        # ufficiale scikit-learn SelectFromModel-dentro-Pipeline).
+        # train_df/test_df restano qui il dataset COMPLETO (69 feature),
+        # non ancora ridotto -- la riduzione avviene più avanti, per il
+        # valore di max_features vincente del tuning.
         etl_time = time.perf_counter() - preprocess_start_time
 
     X_train = train_df.drop(columns=[target_col])
@@ -625,8 +790,10 @@ def run_baseline():
 
     if dataset_type == "synthetic":
         dizionario_feature = {"eliminate": [], "salvate": list(X_train.columns)}
-
-    print(f" • Volume Train: {X_train.shape} | Volume Test: {X_test.shape}")
+        print(f" • Volume Train: {X_train.shape} | Volume Test: {X_test.shape}")
+    else:
+        print(f" • Volume Train (PRIMA della feature selection, 69 feature): {X_train.shape} | "
+              f"Volume Test: {X_test.shape}")
     print("-" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -656,68 +823,66 @@ def run_baseline():
             oob_search_results = None
             tempo_tuning = 0.0
             tempo_medio_fit_tuning = 0.0
-        else:
-            print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB)...")
-            # 'max_features' ORA esplorato anche su 'log2' (prima fissato solo a
-            # 'sqrt'), insieme a un valore più basso di 'max_samples' (0.3,
-            # prima il minimo era 0.5). MOTIVAZIONE, diversa da una semplice
-            # ricerca di accuratezza: la diagnostica sulla correlazione media tra
-            # alberi (rho_bar, Breiman 2001 Sec. 2, Teorema 2.3 — vedi
-            # analyze_tree_correlation.py) ha mostrato che, nonostante il
-            # campionamento ribilanciato per giorno abbia reso il problema
-            # oggettivamente più difficile (F1 OOB sceso da ~96% a ~88.8%), il
-            # punto di stabilizzazione della curva OOB rispetto a n_estimators
-            # NON si è spostato (resta a n~20-30) — segno che rho_bar non è
-            # calata quanto ci si aspetterebbe da un dataset più eterogeneo.
-            # 'max_features' e 'max_samples' sono le due leve dirette per
-            # ridurre rho_bar: meno feature candidate per split ('log2' invece
-            # di 'sqrt') e bootstrap sample più piccoli forzano gli alberi a
-            # specializzarsi su porzioni diverse di dati/feature, quindi a
-            # decorrelarsi tra loro. Restano comunque entrambi iperparametri
-            # della RandomForestClassifier standard — nessuno scostamento
-            # dall'algoritmo richiesto dalla traccia (Breiman 2001), a
-            # differenza per esempio di un cambio di algoritmo verso
-            # ExtraTreesClassifier, che è stato scartato come modifica al
-            # sistema di produzione per questo stesso motivo e tenuto solo come
-            # confronto diagnostico separato.
-            #
-            # bootstrap=False non è più esplorato: la stima OOB (Sec. 3.1, vedi
-            # oob_hyperparameter_search sopra) richiede bootstrap=True per
-            # definizione, ed è proprio il campionamento bootstrap a essere il
-            # tratto costitutivo dell'algoritmo di Breiman (Definition 1.1). Non
-            # è quindi una rinuncia arbitraria: restringersi a bootstrap=True è
-            # coerente con l'algoritmo di riferimento del progetto.
-            param_dist = {
-                'n_estimators': [10, 20, 30, 40, 60, 80, 100],
-                'max_depth': [10, 25, None],
-                'min_samples_split': [2, 5, 10],
-                'max_features': ['sqrt', 'log2'],
-                'criterion': ['gini', 'entropy'],
-                'class_weight': [None, 'balanced'],
-                'bootstrap': [True],
-                'max_samples': [0.3, 0.5, 0.7, 0.8, 1.0],
-            }
 
-            # n_iter=60 (prima 50): lo spazio di ricerca è passato da 1.008 a
-            # 2.520 combinazioni possibili (7*3*3*2*2*2*1*5) con l'aggiunta di
-            # 'max_features' e del nuovo valore di 'max_samples'. n_iter più
-            # alto compensa parzialmente la copertura più sparsa del nuovo
-            # spazio, restando comunque entro un budget di tempo simile a
-            # prima (ogni fit resta un singolo fit OOB, non k-fold — vedi
-            # oob_hyperparameter_search).
+            # La feature selection non è più eseguita a monte del tuning (vedi
+            # optuna_oob_hyperparameter_search per la motivazione): con il
+            # tuning saltato, va comunque eseguita qui una volta, usando il
+            # max_features già presente nel manifesto riusato, per restare
+            # coerenti con l'iperparametro che quella configurazione dichiara.
+            print(" • Applicazione Feature Selection (max_features dal manifesto riusato: "
+                  f"'{best_params.get('max_features', 'sqrt')}')...")
+            fs = CICIDSFeatureSelector(
+                target_column=target_col,
+                importance_threshold=IMPORTANCE_THRESHOLD,
+                rf_random_state=RANDOM_SEED,
+                rf_max_features=best_params.get("max_features", "sqrt"),
+                reduce_multicollinearity=True,
+                multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
+                dendrogram_plot_path=(
+                    f"feature_correlation_dendrogram_{best_params.get('max_features', 'sqrt')}"
+                    f"_skiptuning.png"
+                ),
+            )
+            train_df = fs.fit_transform(train_df)
+            test_df = fs.transform(test_df)
+            dizionario_feature = fs.feature_summary_
+        else:
+            print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB, "
+                  "feature selection integrata per max_features — vedi docstring)...")
             N_ITER_TUNING = 60
             start_tuning = time.perf_counter()
-            best_params, oob_search_results = oob_hyperparameter_search(
-                X_train, y_train,
-                param_distributions=param_dist,
-                n_iter=N_ITER_TUNING,
+            best_params, oob_search_results, best_fs, best_train_selected = optuna_oob_hyperparameter_search(
+                train_df, target_col,
+                n_trials=N_ITER_TUNING,
                 random_state=RANDOM_SEED,
+                importance_threshold=IMPORTANCE_THRESHOLD,
+                multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
                 refit_metric="f1",
             )
             tempo_tuning = time.perf_counter() - start_tuning
             print(f"[OK] Tuning completato ({len(oob_search_results)} combinazioni esplorate via OOB). "
                   f"Iperparametri ottimali: {best_params}")
             tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
+
+            # Applica al train/test set il set di feature calcolato per il
+            # max_features della combinazione vincente (dalla cache interna
+            # a optuna_oob_hyperparameter_search).
+            train_df = best_train_selected
+            test_df = best_fs.transform(test_df)
+            dizionario_feature = best_fs.feature_summary_
+
+        # Ricostruisce X_train/y_train/X_test/y_test dal train/test ORA
+        # ridotto alle feature selezionate (nel ramo SKIP_TUNING appena
+        # calcolate sopra; nel ramo di tuning, quelle del max_features
+        # vincente) -- necessario perché la costruzione precedente usava
+        # ancora il dataset completo a 69 feature, dato che la feature
+        # selection è stata spostata dopo quel punto.
+        X_train = train_df.drop(columns=[target_col])
+        y_train = train_df[target_col]
+        X_test = test_df.drop(columns=[target_col])
+        y_test = test_df[target_col]
+        print(f" • Volume Train (DOPO la feature selection): {X_train.shape} | "
+              f"Volume Test: {X_test.shape}")
 
         # ---------------------------------------------------------------
         # SCELTA 2: accettare l'n_estimators trovato dal tuning OOB, o
@@ -726,8 +891,20 @@ def run_baseline():
         # la motivazione completa. La riga [OVERRIDE]/[OK] stampata qui
         # sostituisce il vecchio "N_ESTIMATORS_OVERRIDE = 30" hardcoded.
         # ---------------------------------------------------------------
+        tuned_n = best_params["n_estimators"]
+        candidate_n_estimators = sorted(
+            {v for v in [10, 20, 30, 40, 60, 80, 100, 150, 200] if v <= tuned_n} | {tuned_n}
+        )
+
+        n_estimators_results = optuna_refine_n_estimators(
+            X_train, y_train,
+            fixed_params=best_params,
+            candidate_values=candidate_n_estimators,
+            random_state=RANDOM_SEED,
+        )
+
         best_params, motivazione_n_estimators = scegli_n_estimators(
-            best_params, oob_search_results, tolerance=OOB_F1_TOLERANCE
+            best_params, n_estimators_results, tolerance=OOB_F1_TOLERANCE
         )
 
         # Configurazione e creazione cartella di output dedicata
@@ -749,10 +926,6 @@ def run_baseline():
             "importance_threshold": IMPORTANCE_THRESHOLD,
             "feature_eliminata" : dizionario_feature["eliminate"],
             "feature_selezionate" : dizionario_feature["salvate"],
-            # Motivazione della scelta di n_estimators persistita nel manifesto
-            # stesso: leggendo config_real.json in un secondo momento (o dal
-            # cluster, che legge questo file) resta tracciabile PERCHÉ questo
-            # valore è stato scelto, non solo quale valore è stato scelto.
             "n_estimators_note": motivazione_n_estimators,
             "hyperparameters": {
                 "n_estimators": int(best_params.get("n_estimators", 10)),

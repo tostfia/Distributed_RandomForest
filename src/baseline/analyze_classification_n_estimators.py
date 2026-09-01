@@ -1,30 +1,24 @@
 """
 Diagnostica per giustificare n_estimators nella classificazione sul dataset
-REALE, con la STESSA metodologia già applicata alla regressione
-(analyze_regression_reference_config.py) — qui si riportano solo le
-differenze specifiche alla classificazione. Vedi quel file per la
-descrizione estesa del metodo.
+REALE, con lettura VISIVA della curva OOB come criterio primario (nessun
+algoritmo di knee-detection automatico -- vedi sotto per il perché).
 
-RUOLO NELLA PIPELINE (per confronto con la regressione): a differenza della
-regressione, qui il "Passo 1" (ricerca congiunta degli iperparametri,
+RUOLO NELLA PIPELINE: il "Passo 1" (ricerca congiunta degli iperparametri,
 n_estimators incluso) è già dentro run_baseline.py
-(oob_hyperparameter_search) e non viene toccato da questo refactor. Questo
-script resta un raffinamento POST-ricerca: parte dalla combinazione
+(optuna_oob_hyperparameter_search) e non viene toccato da questo script.
+Questo resta un raffinamento POST-ricerca: parte dalla combinazione
 vincente in config_real.json e verifica se un n_estimators più basso di
 quello trovato dalla ricerca congiunta mantiene prestazioni equivalenti,
 per risparmiare tempo di training (stesso principio già applicato in
-run_baseline.py tramite scegli_n_estimators(), che ricalcola la soglia
-ad ogni run invece di usare un valore fisso — vedi quella funzione per la
-motivazione completa). A differenza della regressione, qui n_estimators FA
-parte dello spazio di ricerca del Passo 1, quindi la combinazione vincente
-non è mai stata scelta ignorando l'effetto dell'ensemble size — la
-differenza tra i due task è quindi solo su COME n_estimators viene
-raffinato ulteriormente dopo, non su come viene scelto la prima volta.
+run_baseline.py tramite scegli_n_estimators()/optuna_refine_n_estimators,
+vedi quelle funzioni per la motivazione completa). Poiché n_estimators FA
+già parte dello spazio di ricerca del Passo 1, la combinazione vincente non
+è mai stata scelta ignorando l'effetto dell'ensemble size -- questo script
+serve a raffinare ulteriormente il valore, non a sceglierlo la prima volta.
 
-Questo script NON sceglie un valore al posto tuo: produce la curva OOB e
-un punto di verifica Kneedle, ma il criterio primario resta la lettura
-VISIVA del grafico (come dichiarato esplicitamente nell'esempio ufficiale
-scikit-learn, vedi sotto).
+Questo script NON sceglie un valore al posto tuo: produce la curva OOB, ma
+il criterio primario resta la lettura VISIVA del grafico (come dichiarato
+esplicitamente nell'esempio ufficiale scikit-learn, vedi sotto).
 
 METODOLOGIA -- allineata all'esempio ufficiale di scikit-learn:
     "OOB Errors for Random Forests"
@@ -104,9 +98,9 @@ problema della deduplicazione sopra):
     lì va replicato anche qui.
 
 CORREZIONE DEL BIAS OOB A n_estimators BASSO -- stessa correzione già
-applicata in analyze_regression_reference_config.py e nel bug fix di
-oob_hyperparameter_search (vedi commento "BUG FIX" in run_baseline.py),
-ma con una differenza tecnica importante rispetto alla regressione:
+applicata in _oob_classification_metrics (run_baseline.py, verificata
+empiricamente su scikit-learn 1.6.1 -- vedi quella funzione per i dettagli
+del test), qui con una differenza tecnica importante:
 
     Quando una riga di training non è MAI out-of-bag per nessun albero,
     sklearn riempie oob_decision_function_[riga] con [0, 0, ...] (tutte le
@@ -196,24 +190,20 @@ SAMPLE_FRACTION = 0.05
 # sopra ma viene ignorata quando TARGET_ROWS_PER_DAY non è None, esattamente
 # come in run_baseline.py.
 TARGET_ROWS_PER_DAY = 100_000
-# Under-sampling della classe maggioritaria, identico a run_baseline.py —
-# vedi undersampling.py per la motivazione completa (sostituisce la
-# deduplicazione, rimossa da questo lavoro dopo la diagnostica
-# analyze_dedup_by_day.py).
 UNDERSAMPLING_RATIO = 1.0
 TARGET_COL = "Label"
 CONFIG_REAL_PATH = os.path.join("outputs_baseline", "config_real.json")
 
 # Sottocampione SOLO per questa diagnostica (non per run_baseline.py, che
-# resta sul train set completo) — stessa soglia e stessa motivazione di
-# DIAGNOSTIC_SUBSAMPLE_SIZE in analyze_permutation_importance_config.py.
-# Vedi il commento "SOTTOCAMPIONAMENTO DIAGNOSTICO" in cima al file.
+# resta sul train set completo) -- riduce il costo di warm_start su una
+# griglia fine (40 checkpoint), dato che ogni checkpoint ricalcola
+# oob_decision_function_ su TUTTI gli alberi correnti (vedi commento
+# "SOTTOCAMPIONAMENTO DIAGNOSTICO" più sotto per i dettagli del costo).
 DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
 
-# Griglia uniforme (stile esempio ufficiale sklearn: min/max/step) — stessi
-# estremi usati in analyze_regression_reference_config.py, partendo da 5
-# apposta per rendere visibile il bias OOB a basso n_estimators invece di
-# aggirarlo implicitamente (come farebbe partire la griglia da 15, soglia
+# Griglia uniforme (stile esempio ufficiale sklearn: min/max/step), partendo
+# da 5 apposta per rendere visibile il bias OOB a basso n_estimators invece
+# di aggirarlo implicitamente (come farebbe partire la griglia da 15, soglia
 # a cui la copertura è già ~99.9% per la classificazione).
 MIN_ESTIMATORS = 5
 MAX_ESTIMATORS = 200
@@ -243,7 +233,7 @@ def load_tuned_hyperparameters():
     return hp
 
 
-def prepare_train_set():
+def prepare_train_set(tuned_hp):
     data_folder = os.environ.get("DATASET_LOCAL_PATH", "./dataset_cache")
     if not os.path.exists(data_folder):
         raise FileNotFoundError(
@@ -286,11 +276,24 @@ def prepare_train_set():
     )
 
     # reduce_multicollinearity=True: identico a run_baseline.py (vedi lì per
-    # la motivazione completa) — necessario perché questo script deve
-    # restare rappresentativo di ciò che run_baseline.py usa in produzione.
+    # la motivazione completa). rf_max_features ORA passato esplicitamente
+    # (bug corretto in questa versione): la feature selection di
+    # run_baseline.py, dopo l'integrazione con Optuna, usa il max_features
+    # della combinazione VINCENTE del tuning (non più fisso a 'sqrt') --
+    # senza passarlo qui, questo script avrebbe selezionato le feature con
+    # un valore diverso da quello realmente usato in produzione ogni volta
+    # che il tuning vince con max_features='log2', vanificando l'obiettivo
+    # dichiarato di restare rappresentativo di run_baseline.py.
+    rf_max_features = tuned_hp.get("max_features", "sqrt") if tuned_hp else "sqrt"
     fs = CICIDSFeatureSelector(
         target_column=TARGET_COL, rf_random_state=RANDOM_SEED,
+        rf_max_features=rf_max_features,
         reduce_multicollinearity=True, multicollinearity_distance_threshold=0.3,
+        # Nome distinto: evita di sovrascrivere silenziosamente il
+        # dendrogramma prodotto da run_baseline.py per la stessa
+        # combinazione, o quello di un run precedente di questo stesso
+        # script con un max_features diverso.
+        dendrogram_plot_path=f"feature_correlation_dendrogram_{rf_max_features}_diagnostica.png",
     )
     train_df = fs.fit_transform(train_df)
 
@@ -371,10 +374,13 @@ def analyze_n_estimators(X, y, tuned_hp):
         print(f"  [{i}/{len(grid)}] completato in {elapsed:.2f}s (cumulato: {cumulative_time:.2f}s)", flush=True)
 
         oob_decision = rf.oob_decision_function_
-        # Righe mai OOB per nessun albero: somma delle "probabilità" OOB
-        # esattamente zero su tutte le classi (a differenza della
-        # regressione, qui il segnale è inequivocabile — vedi docstring).
-        valid_mask = oob_decision.sum(axis=1) != 0
+        # Righe mai OOB per nessun albero: verificato empiricamente che su
+        # scikit-learn 1.6.1 vengono riempite con somma zero, non NaN (vedi
+        # _oob_classification_metrics in run_baseline.py per il test
+        # completo). Controllo combinato (zero E NaN) per restare corretto
+        # anche se l'ambiente dovesse cambiare versione di scikit-learn in
+        # futuro, senza dover ridiagnosticare da capo.
+        valid_mask = (oob_decision.sum(axis=1) != 0) & ~np.isnan(oob_decision).any(axis=1)
         n_missing = int((~valid_mask).sum())
         coverage_pct = valid_mask.mean() * 100
 
@@ -544,7 +550,7 @@ def analyze_n_estimators(X, y, tuned_hp):
 
 def main():
     tuned_hp = load_tuned_hyperparameters()
-    X, y = prepare_train_set()
+    X, y = prepare_train_set(tuned_hp)
     rows = analyze_n_estimators(X, y, tuned_hp)
 
     print("\n" + "=" * 100)
@@ -561,8 +567,9 @@ def main():
     print("     OOB di QUEL run, il più piccolo n_estimators entro OOB_F1_TOLERANCE dal")
     print("     migliore — puoi confermarlo, accettarlo, o inserire un valore custom letto")
     print("     da questa tabella. Usa questo grafico come verifica indipendente (dataset")
-    print("     dedotto identico a run_baseline.py, incluse dedup e feature selection) di")
-    print("     ciò che quella funzione propone, citando:")
+    print("     dedotto identico a run_baseline.py, incluso under-sampling e feature")
+    print("     selection con lo stesso max_features vincente) di ciò che quella funzione")
+    print("     propone, citando:")
     print("     (a) l'esempio ufficiale scikit-learn per il metodo warm_start,")
     print("     (b) la correzione del bias di copertura OOB spiegata in questo script,")
     print("     (c) Breiman 2001 Sec. 3.1 per la stima OOB come base del criterio stesso.")
