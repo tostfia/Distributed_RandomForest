@@ -225,7 +225,7 @@ cat <<EOF > /tmp/test-engine-task-def.json
   "requiresCompatibilities": ["FARGATE"],
   "networkMode": "awsvpc",
   "cpu": "2048",
-  "memory": "8192",
+  "memory": "16384",
   "taskRoleArn": "${LABROLE_ARN}",
   "executionRoleArn": "${LABROLE_ARN}",
   "containerDefinitions": [
