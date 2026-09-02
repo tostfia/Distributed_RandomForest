@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from multiprocessing.pool import Pool
 import os
 import signal
 import socket
@@ -11,52 +10,59 @@ import pickle
 import boto3
 import json
 from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from src.shared.config import SystemConfig
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.task_storage import load_bytes_from_shared_storage
 
-_child_X  = None
-_child_y  = None
+# Timeout (in secondi) per il completamento di un singolo batch di alberi nel
+# ThreadPool. Stesso pattern/nome di FederatedWorker.RPC_SYNC_TIMEOUT_SECONDS,
+# ma default 600 per restare coerente col 'sync_request_timeout' già usato in
+# start_server (protocol_config) per il path centralizzato.
+RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 600))
 
-def _init_child_process(X, y):
-    """Inizializza il processo figlio salvando i dati in memoria e isolando i core."""
+_child_X = None
+_child_y = None
 
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-    global _child_X, _child_y
-    _child_X = X
-    _child_y = y
-
-# Addestramento di un singolo albero
-def _train_single_tree_processor(args):
-    """Esegue l'addestramento prelevando X e y dalla memoria globale del processo."""
+# Addestramento di un singolo albero, eseguito da un thread del ThreadPool.
+# A differenza della precedente versione a processi (multiprocessing.Pool),
+# qui _child_X/_child_y sono semplici variabili globali del modulo: i thread
+# condividono già la memoria del processo, quindi non serve alcun initializer
+# né alcuna copia pickle-ata di X/y per ciascun worker (che con un Pool a
+# processi veniva invece duplicata integralmente per OGNI processo,
+# moltiplicando l'uso di RAM per pool_size). Vedi lo stesso identico
+# ragionamento in FederatedWorker._train_single_fed_tree.
+def _train_single_tree_thread(args):
     global _child_X, _child_y
     tree_seed, max_depth, max_samples, bootstrap, tree_class, max_features, min_samples_split, class_weight, criterion = args
     np.random.seed(tree_seed)
 
-    # Preleviamo la shape direttamente dalla memoria condivisa del processo figlio
     n_samples = _child_X.shape[0]
 
     if bootstrap:
         size = int(max_samples * n_samples) if max_samples else n_samples
         indices = np.random.choice(n_samples, size=size, replace=True)
-        X_train, y_train = _child_X[indices], _child_y[indices]
-        # Campioni MAI estratti per questo albero (~36.8% atteso con size=n_samples):
-        # li conserviamo per poter stimare l'errore Out-Of-Bag "gratis" più avanti,
-        # senza dover consumare il test set separato (Breiman, 2001).
-        in_bag_mask = np.zeros(n_samples, dtype=bool)
-        in_bag_mask[indices] = True
-        oob_indices = np.flatnonzero(~in_bag_mask)
+        # Zero-copy: invece di X_train = _child_X[indices] (una copia fisica
+        # per albero), calcoliamo quante volte ogni riga originale è stata
+        # estratta e passiamo questo peso a tree.fit(). Matematicamente
+        # equivalente al duplicare le righe (stesso identico calcolo di
+        # impurità Gini/MSE che sklearn fa internamente in
+        # _parallel_build_trees), ma senza mai allocare una copia fisica
+        # dell'array.
+        sample_weight = np.bincount(indices, minlength=n_samples).astype(np.float64)
+        # Campioni MAI estratti per questo albero (peso 0, ~36.8% atteso con
+        # size=n_samples): li conserviamo per poter stimare l'errore
+        # Out-Of-Bag "gratis" più avanti, senza dover consumare il test set
+        # separato (Breiman, 2001).
+        oob_indices = np.flatnonzero(sample_weight == 0)
     else:
-        X_train, y_train = _child_X, _child_y
-        # Senza bootstrap ogni albero vede l'intero training set: non esiste un
-        # sottoinsieme "mai visto" su cui stimare l'OOB.
+        sample_weight = None
+        # Senza bootstrap ogni albero vede l'intero training set: non esiste
+        # un sottoinsieme "mai visto" su cui stimare l'OOB.
         oob_indices = np.array([], dtype=np.int64)
+
+    X_fit, y_fit = _child_X, _child_y
 
     # max_features attiva il sottocampionamento casuale delle feature ad ogni
     # split: è ciò che decorrela gli alberi tra loro (Breiman, 2001) e
@@ -77,7 +83,7 @@ def _train_single_tree_processor(args):
         tree_kwargs["class_weight"] = class_weight
 
     tree = tree_class(**tree_kwargs)
-    tree.fit(X_train, y_train)
+    tree.fit(X_fit, y_fit, sample_weight=sample_weight)
     # Attributo "extra" sull'istanza sklearn: sopravvive al pickle esattamente
     # come classes_/n_features_in_, quindi arriva intatto fino all'Orchestratore
     # senza dover cambiare la struttura dati (tree object) che viaggia in RPC.
@@ -107,8 +113,6 @@ class BaseWorker(Service, ABC):
         self.bootstrap = bootstrap
         self._stop_heartbeat = None
 
-        self._cached_pool  = None
-        self._cached_pool_source = None
         self._cached_X_test_bytes = None
         self._cached_X_eval = None
 
@@ -193,10 +197,6 @@ class BaseWorker(Service, ABC):
 
             self.release_index_claim()
 
-            if self._cached_pool is not None:
-                self._cached_pool.close()
-                self._cached_pool.join()
-                print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
             try:
                 ServiceRegistry.deregister_worker(self.worker_name)
                 print(f"[+] [{self.worker_name}] Server arrestato e worker rimosso dal Service Registry.")
@@ -330,38 +330,46 @@ class BaseWorker(Service, ABC):
                     print(f"[!] Errore lettura ServiceRegistry, fallback su N-1: {e}")
                     allocated_cores = max(1, totale_core_macchina - 1) if totale_core_macchina > 2 else totale_core_macchina
 
-        # 3. Ottimizzazione anti-crash per il multiprocessing in Docker
+        # 3. Addestramento in thread nativi invece che in un Pool di processi:
+        # tree.fit() di scikit-learn rilascia il GIL per la maggior parte del
+        # calcolo numerico (Cython/NumPy), quindi i thread parallelizzano
+        # davvero, senza pagare né la copia pickle-ata di X/y per ogni
+        # processo né il costo di avvio/IPC di multiprocessing.Pool. Stesso
+        # approccio già validato in FederatedWorker.exposed_train_local_federated_forest.
+        global _child_X, _child_y
+        _child_X, _child_y = X, y
+
+        worker_tasks = []
+        for i in range(num_trees):
+            seed = base_seed + i
+            worker_tasks.append((seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
+                                  min_samples_split, class_weight, criterion))
+
         if num_trees == 1:
-            print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Esecuzione diretta senza Pool.")
-            direct_task  = (base_seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
-                            min_samples_split, class_weight, criterion)
-
-            global _child_X, _child_y
-            _old_child_X, _old_child_y = _child_X, _child_y
-            _child_X, _child_y = X, y
-            try:
-                local_trees = [_train_single_tree_processor(direct_task)]
-            finally:
-                _child_X, _child_y = _old_child_X, _old_child_y
+            print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Calcolo diretto senza ThreadPool.")
+            local_trees = [_train_single_tree_thread(worker_tasks[0])]
         else:
-            if self._cached_pool_source != source_info or self._cached_pool is None:
-                if self._cached_pool is not None:
-                    self._cached_pool.close()
-                    self._cached_pool.join()
-                    print(f"[+] [{self.worker_name}] Pool di processi chiuso correttamente.")
+            pool_size = min(num_trees, allocated_cores)
+            print(f"[WORKER] Istanziazione ThreadPool locale con {pool_size} thread "
+                  f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
 
-                pool_size = min(num_trees, allocated_cores)
-                print(f"[WORKER] Creazione nuovo Pool di processi calibrato a {pool_size} processi...")
-                self._cached_pool = Pool(processes=pool_size, initializer=_init_child_process, initargs=(X, y))
-                self._cached_pool_source = source_info
-
-            print(f"[WORKER] Pool di processi pronto. Avvio addestramento di {num_trees} alberi...")
-            worker_tasks = []
-            for i in range(num_trees):
-                seed = base_seed + i
-                worker_tasks.append((seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
-                                      min_samples_split, class_weight, criterion))
-            local_trees = self._cached_pool.map(_train_single_tree_processor, worker_tasks)
+            BATCH_SIZE = max(1, min(pool_size * 4, num_trees))
+            local_trees = []
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
+                for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
+                    batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
+                    print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start + len(batch)} "
+                          f"di {num_trees}...")
+                    futures = [executor.submit(_train_single_tree_thread, task) for task in batch]
+                    try:
+                        batch_trees = [f.result(timeout=RPC_SYNC_TIMEOUT_SECONDS) for f in futures]
+                    except TimeoutError:
+                        raise RuntimeError(
+                            f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
+                            f"training parallelo (ThreadPool)."
+                        )
+                    local_trees.extend(batch_trees)
+                    del batch_trees
 
         print(f"[+] Calcolo di {num_trees} alberi completato. Salvataggio su storage condiviso...")
         serialized_task = pickle.dumps(local_trees)

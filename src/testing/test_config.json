@@ -38,7 +38,7 @@
   
 
   "scalability_test": {
-    "worker_counts_to_test": [1,3,7,10]
+    "worker_counts_to_test": [2,10]
   },
 
   "network_simulation": {

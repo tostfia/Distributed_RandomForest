@@ -3,6 +3,8 @@ import json
 import os
 import re
 import shutil
+import boto3
+from botocore.exceptions import ClientError
 
 # Cartella dei manifesti prodotti da run_baseline(): sono la fonte di verità
 # condivisa fra baseline locale, client e cluster (vedi
@@ -323,8 +325,8 @@ class BaseTestScenario(ABC):
 
         Se uno scenario precedente in questa sessione ha già preparato un
         dataset con parametri di ETL identici (stesso dataset_path, tipo,
-        tipo di albero e seed), copia quei file già pronti nel path che
-        l'orchestratore si aspetta per il job_id corrente. L'orchestratore
+        tipo di albero e seed), rende disponibili quei file già pronti nel
+        path che l'orchestratore si aspetta per il job_id corrente. L'orchestratore
         troverà così il file già presente e salterà da solo l'intera fase di
         preprocessing (che può costare 130-260s), grazie al suo meccanismo di
         SHORT-CIRCUIT ETL già esistente — nessuna modifica al suo codice.
@@ -334,19 +336,29 @@ class BaseTestScenario(ABC):
         volta completata la sua ETL, così il PROSSIMO scenario con parametri
         identici potrà riusarlo.
 
-        Applicabile solo in ambiente 'local' (storage su filesystem locale
-        via bind mount): su AWS il DAO usa S3 e questa scorciatoia lato-test
-        non si applica (l'ETL verrebbe comunque rifatta ad ogni scenario).
+        Due implementazioni parallele in base allo storage dell'orchestratore:
+        - 'local': copia i file su filesystem locale (bind mount).
+        - 'aws': copia gli oggetti S3 lato server con CopyObject — i byte
+          (anche 150-260 MB) non transitano mai per il container del test
+          engine, il trasferimento avviene interamente dentro S3 in pochi
+          secondi. Stessa identica cache a livello di firma dei parametri.
         """
         environment = getattr(self.orchestrator, "environment", "local")
-        if environment != "local":
-            return
-
         job_id = payload.get("job_id")
         if not job_id:
             return
 
         signature = self._dataset_signature(payload, seed)
+
+        if environment == "aws":
+            self._reuse_dataset_aws(signature, job_id, seed)
+            return
+
+        if environment != "local":
+            # Ambiente non riconosciuto: nessuna scorciatoia nota, l'ETL
+            # verrà comunque eseguita normalmente da _execute_training_step.
+            return
+
         expected_train = f"./.local_storage/shared_train_{job_id}.csv"
         expected_test = f"./.local_storage/shared_test_{job_id}.csv"
 
@@ -370,6 +382,75 @@ class BaseTestScenario(ABC):
         # avverrà dentro _execute_training_step subito dopo questa chiamata),
         # ma da qui in avanti qualunque altro scenario con la stessa firma lo
         # troverà già pronto sul disco al momento in cui gli servirà.
+        BaseTestScenario._dataset_cache[signature] = (expected_train, expected_test)
+
+    @staticmethod
+    def _parse_s3_uri(uri: str) -> tuple:
+        """Scompone un URI 's3://bucket/key/...' in (bucket, key)."""
+        without_scheme = uri[len("s3://"):]
+        bucket, _, key = without_scheme.partition("/")
+        return bucket, key
+
+    def _reuse_dataset_aws(self, signature: tuple, job_id: str, seed: int):
+        """
+        Equivalente AWS di _reuse_dataset_if_available. Invece di shutil.copyfile
+        su bind mount locale (che su S3 non esiste), usa S3 CopyObject: un
+        comando che dice a S3 "duplica questo oggetto in un altro path",
+        eseguito interamente lato server — i byte del dataset non passano mai
+        per il container del test engine, a differenza di un
+        download+upload. Stesso identico path atteso dall'orchestratore
+        (vedi CentralizedOrchestrator._prepare_data / _execute_training_step:
+        's3://{bucket}/distributed_trains/shared_train_{job_id}.csv' e
+        analogo per il test set), quindi anche qui nessuna modifica al codice
+        dell'orchestratore: trova l'oggetto già lì e attiva da solo il suo
+        SHORT-CIRCUIT ETL.
+        """
+        bucket_name = os.environ.get(
+            "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+        )
+        expected_train = f"s3://{bucket_name}/distributed_trains/shared_train_{job_id}.csv"
+        expected_test = f"s3://{bucket_name}/distributed_tests/shared_test_{job_id}.csv"
+
+        cached = BaseTestScenario._dataset_cache.get(signature)
+        if cached:
+            ref_train, ref_test = cached
+            s3_client = boto3.client("s3")
+            try:
+                ref_train_bucket, ref_train_key = self._parse_s3_uri(ref_train)
+                ref_test_bucket, ref_test_key = self._parse_s3_uri(ref_test)
+                exp_train_bucket, exp_train_key = self._parse_s3_uri(expected_train)
+                exp_test_bucket, exp_test_key = self._parse_s3_uri(expected_test)
+
+                # Verifica esistenza degli oggetti sorgente PRIMA di copiare: se
+                # lo scenario precedente che li ha registrati è fallito a metà
+                # ETL (o è ancora in corso), l'oggetto potrebbe non essere mai
+                # stato scritto — meglio ricadere sull'ETL normale che
+                # propagare un CopyObject fallito e bloccare lo scenario.
+                s3_client.head_object(Bucket=ref_train_bucket, Key=ref_train_key)
+                s3_client.head_object(Bucket=ref_test_bucket, Key=ref_test_key)
+
+                s3_client.copy_object(
+                    Bucket=exp_train_bucket, Key=exp_train_key,
+                    CopySource={"Bucket": ref_train_bucket, "Key": ref_train_key},
+                )
+                s3_client.copy_object(
+                    Bucket=exp_test_bucket, Key=exp_test_key,
+                    CopySource={"Bucket": ref_test_bucket, "Key": ref_test_key},
+                )
+                print(f"[TEST CACHE AWS] Dataset riusato da uno scenario precedente con "
+                      f"parametri ETL identici (seed={seed}): copia server-side S3 "
+                      f"invece di ETL completa. ETL saltata per questo job.")
+            except ClientError as e:
+                print(f"[TEST CACHE AWS WARN] Copia S3 del dataset in cache fallita "
+                      f"({e}), procedo con ETL normale.")
+            return
+
+        # Prima apparizione di questa combinazione di parametri su AWS:
+        # registriamo SOLO il path S3 futuro. L'oggetto non esiste ancora
+        # (l'ETL vera e propria avverrà dentro _execute_training_step subito
+        # dopo questa chiamata, con l'upload su S3 che già vediamo nel log),
+        # ma da qui in avanti qualunque altro scenario con la stessa firma lo
+        # troverà già pronto su S3 al momento in cui gli servirà.
         BaseTestScenario._dataset_cache[signature] = (expected_train, expected_test)
 
     def _mark_job_finished(self, job_id: str, alberi_addestrati: int = 0):
