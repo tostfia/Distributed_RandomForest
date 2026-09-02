@@ -320,16 +320,26 @@ class RawCSVDataLoader(DatasetLoader):
                     df_temp = df_temp[~header_dupe_mask].reset_index(drop=True)
 
             # 3c. Tagging del giorno di cattura (opzionale, vedi docstring
-            # della classe). Fatto DOPO la pulizia degli header duplicati e
-            # PRIMA della conversione numerica, così la colonna aggiunta (di
-            # tipo stringa) non interferisce con pd.to_numeric al passo 4.
+            # della classe). Fatto DOPO la pulizia degli header duplicati,
+            # così un'eventuale riga di header duplicato non riceve comunque
+            # un tag di giorno prima di essere scartata al passo precedente.
             if self.tag_source_day:
                 df_temp[SOURCE_DAY_COLUMN] = _extract_capture_day(source)
 
-            # 4. Conversione numerica: ora opera solo sul campione già ridotto, non più sull'intero dataset. La colonna
-            #    di tagging del giorno (stringa) e "Label" restano escluse.
-            cols_to_convert = df_temp.columns.difference(["Label", SOURCE_DAY_COLUMN])
-            df_temp[cols_to_convert] = df_temp[cols_to_convert].apply(pd.to_numeric, errors="coerce")
+            # 4. NESSUNA conversione numerica qui. PRIMA veniva fatta anche a
+            # questo livello (pd.to_numeric su tutte le colonne tranne
+            # "Label"/SOURCE_DAY_COLUMN) -- doppione con l'identica
+            # conversione già eseguita a valle da
+            # CICIDSPreprocessor._convert_feature_columns_to_numeric, con in
+            # più una lista di esclusione diversa (rischio di disallineamento
+            # silenzioso tra le due). Rimossa: la tipizzazione numerica resta
+            # un'unica responsabilità del preprocessor (chiamato sempre
+            # dopo, sia in run_baseline.py sia in dayaware_holdout.py),
+            # invece che duplicata qui. Il DataFrame restituito da questo
+            # loader può quindi contenere colonne ancora di tipo object/
+            # stringa grezza: chi lo consuma direttamente (senza passare da
+            # CICIDSPreprocessor) deve convertire esplicitamente prima del
+            # training.
 
             # 5. Cache locale: solo se attiva (ambiente locale) e sorgente S3
             if is_s3_source and self._cache_enabled:

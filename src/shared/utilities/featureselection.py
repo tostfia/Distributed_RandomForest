@@ -105,7 +105,11 @@ class CICIDSFeatureSelector:
             n_jobs = max(1, cpu_count - 1)
         self.n_jobs = n_jobs
 
-        self.columns_to_drop_: List[str] = []
+        # None finché fit() non è stato eseguito (a differenza di una lista
+        # vuota di default, che renderebbe il controllo "is None" in
+        # transform() sempre falso, anche a fit() non ancora chiamato --
+        # bug corretto).
+        self.columns_to_drop_: Optional[List[str]] = None
         self.feature_summary_: Dict[str, List[str]] = {}
         # Series (indice = nome feature) con l'aumento percentuale medio OOB
         # del tasso di errore, ordinata crescente. Utile per ispezione/plot.

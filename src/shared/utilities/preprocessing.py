@@ -50,16 +50,24 @@ class CICIDSPreprocessor:
 
     def binarize_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Rimozione righe spurie e binarizzazione del target (Benign=0, rest=1).
+        Binarizzazione del target (Benign=0, rest=1). La rimozione delle
+        righe di intestazione spuria avviene a monte, in
+        RawCSVDataLoader (vedi nota sotto).
         Eseguire sul dataset intero prima dello split per evitare crash sulle classi rare.
         """
         print("Pre-binarizzazione Target CIC-IDS2018...")
         df = df.copy()
-        
-        # 1. Rimozione righe di intestazione spuria
-        df = df[~df[self.target_column].isin(['Label', ' Label', 'Label '])].copy()
 
-        # 2. Codifica del Target
+        # NOTA: la rimozione delle righe di intestazione spuria (righe con
+        # Label=='Label', tipiche dei CSV CIC-IDS2018 con header ripetuto a
+        # metà file) NON viene rifatta qui. È già gestita a monte da
+        # RawCSVDataLoader._read_single_csv, in modo più robusto (usa
+        # .str.strip() sul valore, quindi cattura qualunque variante di
+        # spaziatura) di un controllo fisso su un elenco di stringhe
+        # letterali. Rifarla qui con un meccanismo più debole era solo
+        # codice ridondante, non un secondo strato di sicurezza reale.
+
+        # Codifica del Target
         df[self.target_column] = np.where(df[self.target_column] == 'Benign', 0, 1).astype(np.int8)
         
         # Report statistico immediato sul dato totale
@@ -141,6 +149,14 @@ class CICIDSPreprocessor:
         return df
 
     def _convert_feature_columns_to_numeric(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Unico punto della pipeline in cui avviene la conversione a numerico
+        (pd.to_numeric, errors="coerce"). PRIMA veniva fatta anche dentro
+        RawCSVDataLoader, con un'esclusione leggermente diversa
+        (["Label", "_capture_day"] invece del solo target_column) --
+        doppione rimosso: la tipizzazione è ora una responsabilità unica di
+        questo preprocessor, chiamato sempre a valle del loader.
+        """
         df = df.copy()
         feature_columns = df.columns.difference([self.target_column])
         df[feature_columns] = df[feature_columns].apply(pd.to_numeric, errors="coerce")

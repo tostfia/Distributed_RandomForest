@@ -238,8 +238,15 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
         #     classificazione (Breiman 2001, 'sqrt' vicina a log2(M)+1).
         #   - criterion ['gini','entropy']: uniche due opzioni che
         #     scikit-learn offre per la classificazione.
-        #   - class_weight [None,'balanced']: uniche due opzioni discrete
-        #     sensate (esclusi dizionari custom).
+        #   - class_weight: NON esplorato (fissato a None). Il train set
+        #     arriva già bilanciato 1:1 dall'undersampling a monte
+        #     (undersample_majority_class): su un train set già bilanciato
+        #     class_weight='balanced' non avrebbe impatto concreto
+        #     (pesi quasi identici a None), quindi non è una dimensione di
+        #     ricerca utile qui -- a differenza del dataset sintetico di
+        #     classificazione (FASE 4, eredita gli iperparametri dal
+        #     reale), che resta sbilanciato e per cui class_weight sarebbe
+        #     rilevante se si facesse un tuning dedicato.
         #   - bootstrap [True]: vincolo definitorio, la stima OOB richiede
         #     bootstrap=True (Breiman, Definition 1.1).
         #   - max_samples, esteso a 0.3: aggiunto apposta come leva diretta
@@ -272,7 +279,16 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
             "min_samples_split": trial.suggest_categorical("min_samples_split", [2]),
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
-            "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+            # class_weight NON esplorato: il train set arriva già bilanciato
+            # 1:1 dall'undersampling (undersample_majority_class, eseguito
+            # a monte in run_baseline()). Su un train set già bilanciato
+            # class_weight='balanced' produce pesi quasi identici a None
+            # (le due classi hanno frequenza quasi uguale), quindi era una
+            # dimensione di ricerca che non poteva mai avere un impatto
+            # concreto sui risultati -- rimossa per non allargare
+            # inutilmente lo spazio degli iperparametri (60 trial esplorati
+            # su una griglia più piccola e più significativa).
+            "class_weight": None,
             "bootstrap": True,
             "max_samples": trial.suggest_categorical("max_samples", [0.3, 0.5, 0.7, 0.8, 1.0]),
         }
@@ -370,20 +386,19 @@ def run_baseline():
     # Variabili di configurazione
     RANDOM_SEED = 123
     TEST_SIZE = 0.2
-    SAMPLE_FRACTION = 0.05
-    # Campionamento RIBILANCIATO per giorno di cattura, al posto della
-    # sample_fraction uniforme (che favorisce sistematicamente i giorni più
+    # Campionamento RIBILANCIATO per giorno di cattura, al posto di una
+    # sample_fraction uniforme (che favorirebbe sistematicamente i giorni più
     # grandi — es. Thuesday-20-02-2018, da solo quasi la metà del dataset
     # totale). Vincolo: deve restare sotto il file più piccolo tra i 10
     # (Thursday-01-03-2018, 331.125 righe), altrimenti quel giorno smette di
     # contribuire alla pari con gli altri. 100.000 è stato scelto per
-    # restare con margine sotto quella soglia, pur raddoppiando circa il
-    # volume grezzo complessivo rispetto al precedente SAMPLE_FRACTION=0.05
-    # (~811.650 -> ~1.000.000 righe), per aumentare la varietà del train set
-    # e verificare se questo sposta in avanti il plateau di n_estimators
-    # osservato nella diagnostica OOB (vedi analyze_classification_n_estimators.py).
-    # SAMPLE_FRACTION resta definita sopra ma viene ignorata quando
-    # TARGET_ROWS_PER_DAY non è None (vedi RawCSVDataLoader).
+    # restare con margine sotto quella soglia, per aumentare la varietà del
+    # train set e verificare se questo sposta in avanti il plateau di
+    # n_estimators osservato nella diagnostica OOB (vedi
+    # analyze_classification_n_estimators.py). Nessuna sample_fraction
+    # uniforme definita qui: RawCSVDataLoader la richiede solo se
+    # target_rows_per_day è None (non il caso qui), e mantenerla come
+    # variabile morta avrebbe solo suggerito un ruolo che non ha.
     TARGET_ROWS_PER_DAY = 100_000
     # Feature selection: OOB permutation importance, fedele a Breiman (2001)
     # Sec. 10 — criterio primario, vedi CICIDSFeatureSelector.
@@ -527,8 +542,7 @@ def run_baseline():
             # scalabilità con la baseline single-node (unico scopo di questo
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
-            # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
-            n_features = tmp_cfg.get("n_features", 50)
+            n_features = tmp_cfg.get("n_features", 100)
         else:
             n_features = tmp_cfg.get("n_features", 30)
             # Default allineato a SyntheticDataLoader (n_samples=300000).
@@ -542,7 +556,7 @@ def run_baseline():
         # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
         # target) -- livello moderato, coerente con la pratica comune per
         # dataset sintetici "non banali ma non dominati dal rumore".
-        noise = tmp_cfg.get("noise", 2.5)
+        noise = tmp_cfg.get("noise", 5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
@@ -631,7 +645,9 @@ def run_baseline():
         io_start_time = time.perf_counter()
         loader = RawCSVDataLoader(
             data_url=data_folder,
-            sample_fraction=SAMPLE_FRACTION,  # ignorata: target_rows_per_day ha priorità
+            # sample_fraction non passata: usa il default 1.0 di
+            # RawCSVDataLoader, comunque ignorato perché target_rows_per_day
+            # non è None (ha sempre priorità -- vedi RawCSVDataLoader.load()).
             dataset_seed=RANDOM_SEED,
             target_rows_per_day=TARGET_ROWS_PER_DAY,
         )
