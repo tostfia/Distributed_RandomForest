@@ -7,7 +7,6 @@ import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)  # i tuoi print restano l'unico output
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.ensemble._forest import _generate_sample_indices, _get_n_samples_bootstrap
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix
 from src.shared.utilities.undersampling import undersample_majority_class
@@ -21,51 +20,55 @@ from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 # ---------------------------------------------------------------------------
-# SPAZIO DI RICERCA per il tuning OOB del task sintetico di REGRESSIONE.
+# IPERPARAMETRI DEL TASK SINTETICO DI REGRESSIONE.
 #
-# PRIMA: gli iperparametri per questo task erano una configurazione
-# dichiarata a priori (SYNTHETIC_REGRESSOR_REFERENCE_HP), mai derivata da
-# evidenza empirica -- motivata solo dal fatto che ereditare gli
-# iperparametri del classificatore reale non è metodologicamente valido
-# (algoritmo/distribuzione dei dati diversi: RandomForestRegressor su dati
-# sintetici continui e bilanciati, non RandomForestClassifier su
-# classificazione binaria sbilanciata).
+# PRIMA: una configurazione dichiarata a priori (SYNTHETIC_REGRESSOR_REFERENCE_HP),
+# poi (in una revisione successiva) un tuning OOB dedicato via Optuna. Il
+# tuning è stato rimosso di nuovo: il dataset sintetico qui serve SOLO da
+# stress-test di scalabilità (confronto baseline single-node vs cluster
+# distribuito), non a trovare il modello con l'R² più alto -- non ha senso
+# spendere 60 trial di ricerca per un obiettivo che non è "il modello
+# migliore possibile".
 #
-# ORA: la validità dell'eredità dal reale resta negata per lo stesso motivo,
-# ma l'alternativa non è più "dichiararla a priori" -- è tunarla, con la
-# STESSA metodologia già usata per la classificazione
-# (optuna_oob_hyperparameter_search_regressor, Breiman 2001 Sec. 3.1, un
-# solo fit per trial via oob_score_, nessuna k-fold CV).
+# ORA: i default di scikit-learn per RandomForestRegressor, con UNA sola
+# eccezione dichiarata (max_features, sotto) più n_estimators (mai un
+# default, va sempre misurato -- vedi sotto REGRESSOR_DEFAULT_HP).
 #
-# NESSUNA feature selection nel ciclo di tuning (a differenza della
-# classificazione): sul sintetico la separazione segnale/rumore è nota a
-# priori dal generatore (metà feature informative, metà rumore puro per
-# costruzione -- vedi dataset_gen_params), quindi non va stimata. La
-# ricerca gira su TUTTE le feature generate.
+# NESSUNA feature selection (come prima): su Friedman #1 la separazione
+# segnale/rumore è nota per costruzione dal generatore (5 feature
+# informative fisse, il resto rumore puro -- vedi SyntheticDataLoader).
 #
-# ISOLAMENTO DELL'EFFETTO DI SCALABILITA': il tuning viene eseguito UNA
-# VOLTA per esecuzione di questa baseline; il risultato viene persistito
-# nella copia per-task già scritta ad ogni run sintetico
-# ("config_synthetic_regressor.json", stesso artefatto esistente, nessun
-# file nuovo) e riusato IDENTICO da ogni esperimento di scalabilità del
-# cluster (1, 3, 5, 7 worker) -- preserva lo stesso obiettivo che prima
-# garantiva la configurazione fissa (isolare l'effetto della scalabilità da
-# quello della complessità del modello), solo che ora la configurazione è
-# scelta empiricamente invece che dichiarata a priori.
+# ISOLAMENTO DELL'EFFETTO DI SCALABILITA': stessa idea di sempre -- gli
+# iperparametri restano IDENTICI in ogni esperimento del cluster (1, 3, 5, 7
+# worker), letti dalla copia per-task ("config_synthetic_regressor.json").
 # ---------------------------------------------------------------------------
-REGRESSOR_SEARCH_N_ESTIMATORS = [10, 20, 30, 40, 60, 80, 100, 150, 200]
-# max_features: 1/3 è la raccomandazione classica di Breiman per la
-# regressione (contro sqrt(M) per la classificazione); sqrt/log2/1.0 restano
-# come termini di paragone empirici, non solo teorici.
-REGRESSOR_SEARCH_MAX_FEATURES = [1 / 3, "sqrt", "log2", 1.0]
-# criterion: "absolute_error" escluso -- costo computazionale non sostenibile
-# su una ricerca a 60 trial CPU-bound (complessità nettamente superiore a
-# "squared_error"/"friedman_mse" per split, verificato empiricamente su
-# questo dataset); "poisson" escluso -- richiede target non negativo, non
-# garantito dal generatore sintetico (make_regression può produrre valori
-# negativi).
-REGRESSOR_SEARCH_CRITERION = ["squared_error", "friedman_mse"]
-REGRESSOR_SEARCH_MAX_SAMPLES = [0.3, 0.5, 0.7, 0.8, 1.0]
+REGRESSOR_DEFAULT_HP = {
+    # Tutti i valori sotto sono i DEFAULT ufficiali di
+    # sklearn.ensemble.RandomForestRegressor (scikit-learn 1.6.1) --
+    # nessuno scelto da noi, tranne max_features (vedi commento dedicato).
+    "max_depth": None,
+    "min_samples_split": 2,
+    "criterion": "squared_error",
+    "bootstrap": True,
+    "max_samples": None,  # None = bootstrap sample_size = n_samples (default sklearn)
+    # ECCEZIONE DICHIARATA: il default letterale di sklearn per la
+    # regressione è max_features=1.0 (nessun sottoinsieme di feature ad
+    # ogni split -- equivalente a "bagged trees", nessuna randomizzazione
+    # sulle feature). La stessa User Guide di scikit-learn
+    # (Ensemble methods, sez. 1.11.2.3) lo definisce sì "un buon default
+    # empirico", ma nella frase successiva indica esplicitamente
+    # un'alternativa standard in letteratura: "more randomness can be
+    # achieved by setting smaller values (e.g. 0.3 is a typical default in
+    # the literature)" -- che coincide con la raccomandazione classica di
+    # Breiman per la regressione (m ≈ p/3). Non è quindi un allontanamento
+    # dai default, ma la scelta della seconda alternativa già documentata
+    # dalla stessa fonte. Necessario anche per motivi pratici: con
+    # max_features=1.0 un solo fit di produzione (n_samples~1.000.000,
+    # n_estimators~100) è stato misurato empiricamente in ordine di
+    # 35-40 minuti; con max_features=1/3 scende a ~16 minuti (ancora un
+    # carico di lavoro sostanzioso, in linea con lo scopo di stress-test).
+    "max_features": 1 / 3,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -330,131 +333,6 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
     return best_params, results, best_fs, best_train_selected
 
 # ---------------------------------------------------------------------------
-# TUNING OOB PER LA REGRESSIONE (dataset sintetico)
-#
-# Stessa giustificazione teorica del tuning di classificazione (Breiman
-# 2001, Sec. 3.1) -- l'OOB score si applica identicamente a
-# RandomForestRegressor (oob_prediction_ / oob_score_, R^2 invece di
-# accuracy/F1): un solo fit per trial, nessuna k-fold CV necessaria.
-# ---------------------------------------------------------------------------
-
-def _regressor_oob_valid_mask(rf, n_samples):
-    """
-    Ricostruisce, dagli indici di bootstrap di ciascun albero (API privata
-    sklearn.ensemble._forest, la stessa usata internamente da
-    RandomForestRegressor per calcolare oob_prediction_), quali righe sono
-    state out-of-bag per almeno un albero.
-
-    NECESSARIO PER LA REGRESSIONE, A DIFFERENZA DELLA CLASSIFICAZIONE: in
-    _oob_classification_metrics il segnale "riga mai OOB" è inequivocabile
-    (somma della decision function esattamente zero, mentre una riga
-    valutata ha sempre almeno un voto). Per la regressione questo non è
-    possibile: una predizione vera può valere esattamente 0.0, indistinguibile
-    dal riempimento di default che scikit-learn usa per le righe mai OOB
-    (verificato empiricamente, stesso comportamento della classificazione su
-    questa versione di scikit-learn). Da qui la necessità di ricostruire la
-    copertura dagli indici di campionamento invece che ispezionare l'output.
-    """
-    max_samples = rf.max_samples if rf.bootstrap else None
-    n_samples_bootstrap = (
-        _get_n_samples_bootstrap(n_samples, max_samples) if rf.bootstrap else n_samples
-    )
-    n_trees = len(rf.estimators_)
-    in_bag_count = np.zeros(n_samples, dtype=np.int64)
-    for tree in rf.estimators_:
-        sampled_indices = _generate_sample_indices(tree.random_state, n_samples, n_samples_bootstrap)
-        in_bag_count += (np.bincount(sampled_indices, minlength=n_samples) > 0)
-    return in_bag_count < n_trees
-
-
-def _oob_regression_metrics(rf, y_train):
-    """
-    Calcola le metriche OOB (R^2, MSE, MAE) da un RandomForestRegressor con
-    oob_score=True, escludendo correttamente le righe prive di copertura OOB
-    (vedi _regressor_oob_valid_mask per il motivo per cui questo non può
-    essere fatto ispezionando oob_prediction_ direttamente, a differenza
-    della classificazione).
-    """
-    y_train = np.asarray(y_train)
-    valid_mask = _regressor_oob_valid_mask(rf, len(y_train))
-    n_missing_oob = int((~valid_mask).sum())
-
-    if not valid_mask.any():
-        return {"oob_r2": float("nan"), "oob_mse": float("nan"),
-                "oob_mae": float("nan"), "n_missing_oob": n_missing_oob}
-
-    oob_pred = rf.oob_prediction_[valid_mask]
-    y_valid = y_train[valid_mask]
-
-    return {
-        "oob_r2": r2_score(y_valid, oob_pred),
-        "oob_mse": mean_squared_error(y_valid, oob_pred),
-        "oob_mae": mean_absolute_error(y_valid, oob_pred),
-        "n_missing_oob": n_missing_oob,
-    }
-
-
-def optuna_oob_hyperparameter_search_regressor(X_train, y_train, n_trials, random_state, n_jobs=None):
-    """
-    Ricerca Optuna (TPE) sullo spazio REGRESSOR_SEARCH_* per
-    RandomForestRegressor, refit su R^2 OOB (corretto per il bias di
-    copertura, vedi _oob_regression_metrics). Nessuna feature selection nel
-    ciclo (vedi commento sopra REGRESSOR_SEARCH_N_ESTIMATORS): X_train/y_train
-    sono già il train set sintetico completo, su tutte le feature generate.
-
-    Stessa struttura di optuna_oob_hyperparameter_search (classificazione):
-    un solo fit per trial, bootstrap=True fisso (vincolo per la stima OOB,
-    Breiman 2001 Definition 1.1). max_depth e min_samples_split restano
-    fissi ai default raccomandati da scikit-learn (None, 2 -- stessa scelta
-    già fatta per la classificazione, vedi objective() sopra), qui variano
-    solo n_estimators, max_features, criterion, max_samples.
-    """
-    if n_jobs is None:
-        cpu_count = os.cpu_count() or 2
-        n_jobs = max(1, cpu_count - 1)
-
-    results = []
-
-    def objective(trial):
-        params = {
-            "n_estimators": trial.suggest_categorical("n_estimators", REGRESSOR_SEARCH_N_ESTIMATORS),
-            "max_depth": trial.suggest_categorical("max_depth", [None]),
-            "min_samples_split": trial.suggest_categorical("min_samples_split", [2]),
-            "max_features": trial.suggest_categorical("max_features", REGRESSOR_SEARCH_MAX_FEATURES),
-            "criterion": trial.suggest_categorical("criterion", REGRESSOR_SEARCH_CRITERION),
-            "bootstrap": True,
-            "max_samples": trial.suggest_categorical("max_samples", REGRESSOR_SEARCH_MAX_SAMPLES),
-        }
-
-        print(f"[Optuna OOB regressor] trial {trial.number + 1}/{n_trials} in corso: {params} ...",
-              flush=True)
-
-        rf = RandomForestRegressor(**params, random_state=random_state,
-                                    oob_score=True, n_jobs=n_jobs)
-        start = time.perf_counter()
-        rf.fit(X_train, y_train)
-        fit_time = time.perf_counter() - start
-
-        metrics = _oob_regression_metrics(rf, y_train)
-        print(f"[Optuna OOB regressor] trial {trial.number + 1}/{n_trials} completato in "
-              f"{fit_time:.1f}s — OOB R2={metrics['oob_r2']:.4f}, OOB MSE={metrics['oob_mse']:.4f}",
-              flush=True)
-        if metrics["n_missing_oob"] > 0:
-            pct = metrics["n_missing_oob"] / len(y_train) * 100
-            print(f"   [OOB] {metrics['n_missing_oob']} righe ({pct:.2f}%) senza copertura OOB, escluse.")
-
-        results.append({"params": params, "fit_time": fit_time, **metrics})
-        return metrics["oob_r2"]
-
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=random_state))
-    study.optimize(objective, n_trials=n_trials)
-
-    results.sort(key=lambda r: r["oob_r2"], reverse=True)
-    best_params = dict(results[0]["params"])
-    return best_params, results
-
-
-# ---------------------------------------------------------------------------
 # n_estimators NON viene più raffinato né scelto interattivamente qui.
 #
 # PRIMA: questo file conteneva una seconda ricerca Optuna
@@ -531,35 +409,17 @@ def run_baseline():
     OUTPUT_DIR = "./outputs_baseline"
     REAL_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_real.json")
     SYNTHETIC_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_synthetic.json")
-    # NESSUN manifesto dedicato al tuning del regressore: la copia per-task
-    # già scritta più sotto per OGNI run sintetico (config_synthetic_{task}.json,
-    # qui "config_synthetic_regressor.json") contiene già gli iperparametri
-    # finali nella stessa forma che load_tuned_regressor_hp si aspetta --
-    # SKIP_TUNING rilegge direttamente da lì, invece di introdurre un file
-    # aggiuntivo che potrebbe entrare in conflitto con chi già consuma
-    # quell'artefatto esistente.
+    # NESSUN tuning per il regressore (vedi REGRESSOR_DEFAULT_HP più sotto):
+    # questo path serve solo a rileggere n_estimators da un run precedente
+    # (l'unico iperparametro mai lasciato a un default, va sempre misurato
+    # con analyze_n_estimators.py) dalla copia per-task già scritta per OGNI
+    # run sintetico -- nessun file aggiuntivo introdotto.
     REGRESSOR_TUNING_CONFIG_PATH = os.path.join(OUTPUT_DIR, "config_synthetic_regressor.json")
     dataset_type = "real"
     user_tree_type = "classifier"
 
     sys_cfg = SystemConfig()
     print(f" • Ambiente infrastrutturale rilevato: {sys_cfg.env.upper()}")
-
-    # ---------------------------------------------------------
-    # SCELTA 1: eseguire il tuning OOB (FASE 2, ~50 fit, costoso) o riusare
-    # gli iperparametri già presenti in un config_real.json esistente
-    # (salta la ricerca, va dritto alla FASE 4 con quegli iperparametri).
-    # Utile per iterare rapidamente su altre parti della pipeline (es.
-    # preprocessing, feature selection, dimensione campione) senza dover
-    # rifare mezz'ora di ricerca ogni volta che non serve.
-    # ---------------------------------------------------------
-    print("\nEseguire il tuning iperparametrico (FASE 2) o riusare gli iperparametri "
-          "già presenti in un manifesto esistente?")
-    print("  [1] Esegui il tuning (default) ")
-    print("  [2] Salta il tuning — riusa gli iperparametri già presenti in "
-          "'outputs_baseline/config_real.json'")
-    scelta_tuning = input("  Scelta [Default: 1]: ").strip() or "1"
-    SKIP_TUNING = (scelta_tuning == "2")
 
     # ---------------------------------------------------------
     # FASE 1: ETL CON CAMPIONAMENTO PROBABILISTICO 
@@ -596,6 +456,32 @@ def run_baseline():
     else:
         print(f" [INFO] Nessun file di boot trovato in '{BOOT_CONFIG_PATH}'. Scalo sul dataset reale di default.")
 
+    # ---------------------------------------------------------
+    # SCELTA 1: eseguire il tuning OOB (FASE 2, ~50 fit, costoso) o riusare
+    # gli iperparametri già presenti in un config_real.json esistente
+    # (salta la ricerca, va dritto alla FASE 4 con quegli iperparametri).
+    # Utile per iterare rapidamente su altre parti della pipeline (es.
+    # preprocessing, feature selection, dimensione campione) senza dover
+    # rifare mezz'ora di ricerca ogni volta che non serve.
+    #
+    # SOLO PER IL DATASET REALE: è l'unico caso in cui esiste ancora un
+    # tuning da poter saltare. Il classificatore sintetico eredita sempre
+    # dal reale (nessuna scelta da fare qui), il regressore sintetico non
+    # tuna più nulla (vedi REGRESSOR_DEFAULT_HP) -- chiedere questo prompt
+    # anche per quei due casi sarebbe fuorviante (nessuna delle due opzioni
+    # avrebbe effetto).
+    # ---------------------------------------------------------
+    if dataset_type == "real":
+        print("\nEseguire il tuning iperparametrico (FASE 2) o riusare gli iperparametri "
+              "già presenti in un manifesto esistente?")
+        print("  [1] Esegui il tuning (default) ")
+        print("  [2] Salta il tuning — riusa gli iperparametri già presenti in "
+              "'outputs_baseline/config_real.json'")
+        scelta_tuning = input("  Scelta [Default: 1]: ").strip() or "1"
+        SKIP_TUNING = (scelta_tuning == "2")
+    else:
+        SKIP_TUNING = False  # non usata nei rami sintetici, valore neutro
+
     if dataset_type == "synthetic":
         print(">>> FASE 1: Generazione e Preprocessing Dataset Sintetico")
         best_hp_reale = None
@@ -611,8 +497,8 @@ def run_baseline():
             best_hp_reale = real_config["hyperparameters"]
             print(f" [INFO] Iperparametri di riferimento caricati dal tuning sul reale: '{REAL_CONFIG_PATH}'")
         else:
-            print(" [INFO] Task REGRESSOR: il tuning sul dataset reale non è richiesto "
-                  "(si usa la configurazione di riferimento fissa dichiarata a inizio file).")
+            print(" [INFO] Task REGRESSOR: nessun tuning (né sul reale né sul sintetico stesso) "
+                  "-- iperparametri di default sklearn, vedi REGRESSOR_DEFAULT_HP.")
 
         if os.path.exists(SYNTHETIC_CONFIG_PATH):
             with open(SYNTHETIC_CONFIG_PATH, "r") as f:
@@ -631,27 +517,38 @@ def run_baseline():
         # cluster producevano CSV con la colonna target chiamata diversamente.
         target_col = "Target" if user_tree_type == "regressor" else "Label"
 
-        # Default allineato a SyntheticDataLoader (n_samples=300000). Prima qui
-        # il default era 500000: in assenza di un manifesto la baseline generava
-        # un dataset 1.67x più grande di quello del cluster, e i tempi di
-        # addestramento non erano confrontabili.
-        n_samples = tmp_cfg.get("n_samples", 300000)
-        n_features = tmp_cfg.get("n_features", 30)
-        # 50% delle feature informative, l'altra metà rumore puro per
-        # costruzione (non correlato al target): scelta dichiarata, non
-        # arbitraria. Non serve applicare feature selection sul sintetico
-        # (dizionario_feature resta vuoto più sotto) proprio perché la
-        # separazione segnale/rumore è nota e controllata a priori dal
-        # generatore — a differenza del reale, dove va stimata empiricamente
-        # (da qui la permutation importance OOB in CICIDSFeatureSelector).
-        n_informative_reg = tmp_cfg.get("n_informative_reg", int(n_features * 0.5))
-        # noise=10.0 verificato empiricamente in una diagnostica precedente
-        # (script rimosso da questo progetto): con n_informative=15/30 la
-        # deviazione standard del segnale "pulito" (noise=0) è ≈212.8, quindi
-        # noise=10.0 corrisponde a circa il 4.7% della variabilità naturale
-        # del target (SNR ≈ 21). Livello moderato: rende il problema non
-        # banale senza far dominare il rumore sul segnale.
-        noise = tmp_cfg.get("noise", 10.0)
+        # Default DIVERSI per task: la regressione (Friedman #1) usa una
+        # ricetta diversa dalla classificazione, non ha senso condividere gli
+        # stessi fallback. Se tmp_cfg contiene già un valore (run precedente
+        # dello STESSO task), quello ha sempre precedenza.
+        if user_tree_type == "regressor":
+            # n_samples >= 1.000.000: dimensione scelta per dare al cluster
+            # abbastanza lavoro da rendere interessante il confronto di
+            # scalabilità con la baseline single-node (unico scopo di questo
+            # dataset -- non serve massimizzare l'accuratezza del modello).
+            n_samples = tmp_cfg.get("n_samples", 1_000_000)
+            # n_features=25 con Friedman #1: le feature davvero informative
+            # sono sempre e solo 5 (fisse, per costruzione della formula --
+            # vedi SyntheticDataLoader), quindi 25 dà una frazione
+            # informativa del 20% (5/25) -- in linea con l'intervallo 10-25%
+            # osservato in letteratura per dataset sintetici di regressione
+            # "non banali ma imparabili" (default di make_regression stesso:
+            # 10%; benchmark comuni: 10-25%).
+            n_features = tmp_cfg.get("n_features", 25)
+        else:
+            n_features = tmp_cfg.get("n_features", 30)
+            # Default allineato a SyntheticDataLoader (n_samples=300000).
+            # Prima qui il default era 500000: in assenza di un manifesto la
+            # baseline generava un dataset 1.67x più grande di quello del
+            # cluster, e i tempi di addestramento non erano confrontabili.
+            n_samples = tmp_cfg.get("n_samples", 300000)
+        # noise=0.5: calibrato sulla deviazione standard EMPIRICA del target
+        # "pulito" di Friedman #1 (misurata: std≈4.87, costante al variare di
+        # n_features perché dipende solo dalle 5 feature informative fisse),
+        # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
+        # target) -- livello moderato, coerente con la pratica comune per
+        # dataset sintetici "non banali ma non dominati dal rumore".
+        noise = tmp_cfg.get("noise", 0.5)
         # Stessi default interni di SyntheticDataLoader per la classificazione,
         # ma calcolati QUI e passati esplicitamente al costruttore. Prima
         # venivano solo scritti nel manifesto (dataset_gen_params) senza mai
@@ -681,7 +578,6 @@ def run_baseline():
             "random_seed": RANDOM_SEED,
         }
         if user_tree_type == "regressor":
-            dataset_gen_params["n_informative_reg"] = n_informative_reg
             dataset_gen_params["noise"] = noise
         else:
             dataset_gen_params["n_informative"] = n_informative
@@ -701,7 +597,6 @@ def run_baseline():
             target_column=target_col,
         )
         if user_tree_type == "regressor":
-            loader_kwargs["n_informative_reg"] = n_informative_reg
             loader_kwargs["noise"] = noise
         else:
             loader_kwargs["n_informative"] = n_informative
@@ -972,68 +867,54 @@ def run_baseline():
 
     else:
         # ---------------------------------------------------------------
-        # Task REGRESSOR: tuning OOB dedicato sul dataset sintetico stesso
-        # (vedi il blocco REGRESSOR_SEARCH_* a inizio file per la
-        # motivazione completa) -- non più una configurazione fissa, e non
-        # ereditata dal classificatore reale (algoritmo e distribuzione dei
-        # dati diversi).
+        # Task REGRESSOR: NESSUN tuning. Iperparametri di default sklearn
+        # (REGRESSOR_DEFAULT_HP, a inizio file) -- il dataset sintetico serve
+        # solo da stress-test di scalabilità, non a massimizzare l'R².
+        #
+        # n_estimators è l'unica eccezione: non è mai un "default" da usare
+        # alla cieca, va sempre determinato via curva OOB warm_start (Breiman
+        # 2001, Sec. 3.1) -- MA questo script non la calcola: la curva va
+        # prodotta a parte con 'analyze_n_estimators.py --task regressor'
+        # (lettura visiva del grafico, nessun knee-detection automatico --
+        # vedi quel file per il motivo). Qui ci si limita a offrire la
+        # possibilità di inserire il valore così deciso, invece di dover
+        # editare a mano il manifesto.
         # ---------------------------------------------------------------
-        if SKIP_TUNING:
-            print("\n>>> FASE 2 (regressore sintetico): SALTATA su richiesta — riuso "
-                  f"iperparametri da '{REGRESSOR_TUNING_CONFIG_PATH}' (copia per-task di un run "
-                  f"precedente)...")
-            if not os.path.exists(REGRESSOR_TUNING_CONFIG_PATH):
-                raise FileNotFoundError(
-                    f"Hai scelto di saltare il tuning, ma '{REGRESSOR_TUNING_CONFIG_PATH}' non "
-                    f"esiste ancora: serve un run precedente con tuning da cui leggere gli "
-                    f"iperparametri del regressore sintetico. Esegui prima il tuning almeno una "
-                    f"volta (Scelta 1)."
-                )
+        print("\n>>> FASE 2 (regressore sintetico): NESSUN TUNING — iperparametri di "
+              "default sklearn (vedi REGRESSOR_DEFAULT_HP)...")
+        if os.path.exists(REGRESSOR_TUNING_CONFIG_PATH):
             with open(REGRESSOR_TUNING_CONFIG_PATH, "r") as f:
                 existing_reg_config = json.load(f)
-            existing_reg_hp = existing_reg_config["hyperparameters"]
-            existing_bootstrap = bool(existing_reg_hp.get("bootstrap", True))
-            hp_sintetici = {
-                "n_estimators": int(existing_reg_hp.get("n_estimators", 10)),
-                "max_depth": existing_reg_hp.get("max_depth"),
-                "min_samples_split": int(existing_reg_hp.get("min_samples_split", 2)),
-                "max_features": existing_reg_hp.get("max_features", 1 / 3),
-                "criterion": existing_reg_hp.get("criterion", "squared_error"),
-                "bootstrap": existing_bootstrap,
-                "max_samples": float(existing_reg_hp.get("max_samples", 1.0)) if existing_bootstrap else 1.0,
-            }
-            print(f"[OK] Iperparametri riusati da '{REGRESSOR_TUNING_CONFIG_PATH}': {hp_sintetici}")
-            tempo_tuning = 0.0
-            tempo_medio_fit_tuning = 0.0
-            oob_search_results = None
-            regressor_tuning_summary = existing_reg_config.get("regressor_tuning_summary")
+            n_estimators_default = int(existing_reg_config["hyperparameters"].get("n_estimators", 100))
+            fonte_default = f"copia per-task precedente ('{REGRESSOR_TUNING_CONFIG_PATH}')"
         else:
-            print("\n>>> FASE 2 (regressore sintetico): Tuning OOB "
-                  "(optuna_oob_hyperparameter_search_regressor, nessuna feature selection — "
-                  "vedi commento sopra REGRESSOR_SEARCH_N_ESTIMATORS)...")
-            N_ITER_TUNING_REGRESSOR = 60
-            start_tuning_reg = time.perf_counter()
-            hp_sintetici, oob_search_results_reg = optuna_oob_hyperparameter_search_regressor(
-                X_train, y_train,
-                n_trials=N_ITER_TUNING_REGRESSOR,
-                random_state=RANDOM_SEED,
-            )
-            tempo_tuning = time.perf_counter() - start_tuning_reg
-            tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results_reg]))
-            oob_search_results = None  # riservato al report della classificazione (FASE 2/2b)
-            print(f"[OK] Tuning regressore completato ({len(oob_search_results_reg)} combinazioni "
-                  f"esplorate via OOB). Iperparametri ottimali: {hp_sintetici}")
+            n_estimators_default = 100  # default sklearn stesso, solo per il primo bootstrap
+            fonte_default = "default sklearn (nessun run precedente)"
 
-            # Nessun file scritto qui: il riepilogo entra in config_data come
-            # 'regressor_tuning_summary' e viene persistito più sotto insieme
-            # al resto (config_synthetic.json e la copia per-task), che
-            # SKIP_TUNING rilegge al run successivo -- niente file aggiuntivo
-            # da tenere sincronizzato con chi già consuma quegli artefatti.
-            regressor_tuning_summary = {
-                "n_trials": len(oob_search_results_reg),
-                "best_oob_r2": oob_search_results_reg[0]["oob_r2"],
-                "best_oob_mse": oob_search_results_reg[0]["oob_mse"],
-            }
+        print(f"\n  n_estimators disponibile: {n_estimators_default} (fonte: {fonte_default}).")
+        print("  [1] Usa questo valore (default)")
+        print("  [2] Inserisci un valore custom (es. deciso guardando la curva OOB prodotta a "
+              "parte con 'python -m src.baseline.analyze_n_estimators --task regressor')")
+        scelta_n_est = input("  Scelta [Default: 1]: ").strip() or "1"
+
+        if scelta_n_est == "2":
+            scelta_valore = input("  n_estimators: ").strip()
+            if scelta_valore:
+                n_estimators_reg = int(scelta_valore)
+                fonte_n_estimators = "valore custom inserito manualmente"
+            else:
+                n_estimators_reg = n_estimators_default
+                fonte_n_estimators = fonte_default
+        else:
+            n_estimators_reg = n_estimators_default
+            fonte_n_estimators = fonte_default
+
+        print(f"[OK] n_estimators={n_estimators_reg} (fonte: {fonte_n_estimators}).")
+
+        hp_sintetici = {**REGRESSOR_DEFAULT_HP, "n_estimators": n_estimators_reg}
+        tempo_tuning = 0.0
+        tempo_medio_fit_tuning = 0.0
+        oob_search_results = None
 
         config_data = {
             "mode": "distributed",
@@ -1049,12 +930,6 @@ def run_baseline():
                 "random_state": int(RANDOM_SEED)
             }
         }
-        if user_tree_type == "regressor":
-            # Riepilogo del tuning OOB (o "ereditato" da un run precedente
-            # via SKIP_TUNING) -- persistito qui, non in un file a parte, così
-            # SKIP_TUNING lo può rileggere dalla stessa copia per-task che
-            # viene scritta comunque più sotto.
-            config_data["regressor_tuning_summary"] = regressor_tuning_summary
 
         # 'config_synthetic.json' è il manifesto ATTIVO: è quello letto sia da
         # SyntheticDataLoader (ricetta del dataset) sia dal client
@@ -1276,11 +1151,8 @@ def run_baseline():
             print(f"\n1-2. TUNING SALTATO — iperparametri ereditati dal tuning sul dataset reale "
                   f"(stesso task, stessa distribuzione binaria sbilanciata)")
         else:
-            fonte = ("riusati da manifesto esistente" if SKIP_TUNING
-                      else "appena stimati in questo run")
-            print(f"\n1-2. TUNING OOB DEL REGRESSORE SINTETICO — iperparametri {fonte} "
-                  f"(optuna_oob_hyperparameter_search_regressor, vedi "
-                  f"'{REGRESSOR_TUNING_CONFIG_PATH}')")
+            print(f"\n1-2. REGRESSORE SINTETICO — NESSUN TUNING, iperparametri di default sklearn "
+                  f"tranne n_estimators (fonte: {fonte_n_estimators})")
         print(LINEA_SINGOLA)
         print(f"  ▸ Iperparametri applicati: {hp}")
 

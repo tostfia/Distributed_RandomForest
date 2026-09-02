@@ -12,21 +12,18 @@ RUOLO NELLA PIPELINE -- SOLA DIAGNOSTICA, MAI NEL HOT PATH:
       - classificazione: legge gli iperparametri (incluso max_features, che
         determina la feature selection) da 'outputs_baseline/config_real.json',
         prodotto da run_baseline.py -- optuna_oob_hyperparameter_search;
-      - regressione: usa SYNTHETIC_REGRESSOR_REFERENCE_HP, la stessa
-        configurazione FISSA (non tunata) dichiarata in run_baseline.py e
-        tenuta identica in ogni esperimento di scalabilità -- copiata qui
-        alla lettera, va aggiornata in ENTRAMBI i file se cambia.
+      - regressione: legge gli iperparametri da
+        'outputs_baseline/config_synthetic_regressor.json' -- di default
+        sklearn (nessun tuning: il sintetico serve solo da stress-test di
+        scalabilità, non a massimizzare l'R² -- vedi REGRESSOR_DEFAULT_HP in
+        run_baseline.py), tranne n_estimators, che è ESATTAMENTE il valore
+        che QUESTO script calcola: run_baseline.py lo rilegge da qui al giro
+        successivo.
     Fa crescere SOLO n_estimators via warm_start, a parità di tutto il
     resto, e produce grafico + tabella. Il criterio di scelta resta la
     lettura VISIVA della curva (vedi sotto): questo script non scrive né
-    sovrascrive alcun manifesto, non decide nulla al posto di chi lo esegue.
-
-    Entrambi i task sono ora tunati via OOB (Breiman 2001, Sec. 3.1) in
-    run_baseline.py -- non solo la classificazione: anche la regressione
-    sintetica, che prima usava una configurazione dichiarata a priori, ora
-    passa da optuna_oob_hyperparameter_search_regressor. Questo script legge
-    in entrambi i casi il risultato già deciso altrove, non lo mette in
-    discussione.
+    sovrascrive alcun manifesto (l'aggiornamento di n_estimators nel
+    manifesto, dopo aver letto il grafico, è manuale).
 
 METODOLOGIA -- allineata all'esempio ufficiale scikit-learn:
     "OOB Errors for Random Forests"
@@ -139,11 +136,17 @@ CLF_DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
 # ---------------------------------------------------------------------------
 # REGRESSIONE -- dataset sintetico
 #
-# Gli iperparametri NON sono più una costante fissa dichiarata qui: run_baseline.py
-# li tuna via optuna_oob_hyperparameter_search_regressor (stessa metodologia
-# OOB della classificazione, R^2 come refit metric) e li persiste in
-# REG_CONFIG_PATH -- questo script si limita a leggerli, esattamente come fa
-# già per la classificazione con config_real.json.
+# Iperparametri: default sklearn tranne n_estimators (vedi REGRESSOR_DEFAULT_HP
+# in run_baseline.py) -- nessun tuning, il sintetico serve solo da stress-test
+# di scalabilità. Persistiti in REG_CONFIG_PATH, questo script si limita a
+# leggerli.
+#
+# RICETTA DEL DATASET: letta anch'essa da REG_CONFIG_PATH (n_samples,
+# n_features, noise), NON ridichiarata qui con valori più piccoli. La curva
+# OOB va misurata sul dataset di PRODUZIONE esatto: un sottocampione
+# diagnostico più piccolo darebbe una stima di n_estimators non trasferibile
+# al modello che verrà davvero usato nei test di scalabilità -- stesso motivo
+# per cui il tuning stesso è stato tolto dal percorso "dataset più piccolo".
 # ---------------------------------------------------------------------------
 REG_TARGET_COL = "Target"
 # Stesso file già scritto da run_baseline.py per OGNI run sintetico di
@@ -151,15 +154,6 @@ REG_TARGET_COL = "Target"
 # artefatto aggiuntivo da tenere sincronizzato con chi consuma già
 # outputs_baseline/.
 REG_CONFIG_PATH = os.path.join("outputs_baseline", "config_synthetic_regressor.json")
-# Dataset sintetico: generato apposta più piccolo della produzione
-# (300.000 righe in run_baseline.py) SOLO per questa diagnostica -- rigenerare
-# al volo un dataset sintetico più piccolo è immediato (non serve
-# sottocampionare un dataset già caricato, come per il reale), e la forma
-# della curva OOB non dipende dalla dimensione del campione.
-REG_N_SAMPLES = 30_000
-REG_N_FEATURES = 30
-REG_N_INFORMATIVE = int(REG_N_FEATURES * 0.5)  # identico a run_baseline.py
-REG_NOISE = 10.0  # identico a run_baseline.py
 
 
 # ---------------------------------------------------------------------------
@@ -250,44 +244,57 @@ def prepare_classifier_dataset(tuned_hp):
 
 def load_tuned_regressor_hp():
     """
-    Legge gli iperparametri TUNATI (tranne n_estimators, che qui è la
-    variabile indipendente) da REG_CONFIG_PATH, prodotto da run_baseline.py
-    -- optuna_oob_hyperparameter_search_regressor. Analoga a
+    Legge da REG_CONFIG_PATH sia gli iperparametri (tranne n_estimators, che
+    qui è la variabile indipendente) sia la ricetta del dataset (n_samples,
+    n_features, noise) -- prodotti da run_baseline.py. Analoga a
     load_tuned_classifier_hp(), stessa idea: non decide nulla, legge solo
-    cosa il tuning ha già scelto.
+    cosa è già stato deciso altrove.
     """
     if not os.path.exists(REG_CONFIG_PATH):
         raise FileNotFoundError(
             f"'{REG_CONFIG_PATH}' non trovato: esegui prima run_baseline.py "
-            f"con dataset_type='synthetic' e tree_type='regressor' (con tuning, "
-            f"non SKIP_TUNING) almeno una volta."
+            f"con dataset_type='synthetic' e tree_type='regressor' almeno una volta."
         )
     with open(REG_CONFIG_PATH, "r") as f:
         config = json.load(f)
     hp = config.get("hyperparameters")
     if not hp:
         raise ValueError(f"'{REG_CONFIG_PATH}' trovato ma senza sezione 'hyperparameters'.")
-    print(f"[INFO] Iperparametri tunati letti da '{REG_CONFIG_PATH}': {hp}")
-    return hp
+    dataset_recipe = {
+        "n_samples": config.get("n_samples"),
+        "n_features": config.get("n_features"),
+        "noise": config.get("noise"),
+    }
+    if any(v is None for v in dataset_recipe.values()):
+        raise ValueError(
+            f"'{REG_CONFIG_PATH}' non contiene la ricetta completa del dataset "
+            f"(n_samples/n_features/noise): {dataset_recipe}."
+        )
+    print(f"[INFO] Iperparametri letti da '{REG_CONFIG_PATH}': {hp}")
+    print(f"[INFO] Ricetta dataset letta da '{REG_CONFIG_PATH}': {dataset_recipe}")
+    return hp, dataset_recipe
 
 
-def prepare_regressor_dataset():
+def prepare_regressor_dataset(dataset_recipe):
     """
-    Genera un dataset sintetico di regressione con la STESSA ricetta di
-    generazione di run_baseline.py (n_informative_reg, noise), ma
-    dimensionato più piccolo (REG_N_SAMPLES) solo per questa diagnostica --
-    nessuna feature selection: sul sintetico la separazione segnale/rumore
-    è nota a priori dal generatore, non va stimata (vedi run_baseline.py).
+    Genera il dataset sintetico di regressione con la ricetta ESATTA di
+    produzione (n_samples, n_features, noise letti da REG_CONFIG_PATH, non
+    ridichiarati qui) -- Friedman #1 (Friedman 1991; Breiman 1996), stessa
+    scelta di SyntheticDataLoader. Nessuna feature selection: sul sintetico
+    la separazione segnale/rumore è nota a priori dal generatore (5 feature
+    informative fisse, il resto rumore puro).
     """
-    print(f"[1/2] Generazione dataset sintetico di regressione "
-          f"({REG_N_SAMPLES:,} righe, {REG_N_FEATURES} feature, "
-          f"{REG_N_INFORMATIVE} informative, noise={REG_NOISE})...".replace(",", "."))
+    n_samples = dataset_recipe["n_samples"]
+    n_features = dataset_recipe["n_features"]
+    noise = dataset_recipe["noise"]
+    print(f"[1/2] Generazione dataset sintetico di regressione (Friedman #1) "
+          f"({n_samples:,} righe, {n_features} feature, 5 informative fisse, "
+          f"noise={noise})...".replace(",", "."))
     loader = SyntheticDataLoader(
         task="regression",
-        n_samples=REG_N_SAMPLES,
-        n_features=REG_N_FEATURES,
-        n_informative_reg=REG_N_INFORMATIVE,
-        noise=REG_NOISE,
+        n_samples=n_samples,
+        n_features=n_features,
+        noise=noise,
         random_seed=RANDOM_SEED,
         target_column=REG_TARGET_COL,
     )
@@ -555,8 +562,8 @@ def run_regressor_analysis():
     print("\n" + "#" * 100)
     print("  TASK: REGRESSIONE (dataset sintetico)")
     print("#" * 100)
-    hp = load_tuned_regressor_hp()
-    X, y = prepare_regressor_dataset()
+    hp, dataset_recipe = load_tuned_regressor_hp()
+    X, y = prepare_regressor_dataset(dataset_recipe)
 
     bootstrap = bool(hp.get("bootstrap", True))
     if not bootstrap:
@@ -564,13 +571,17 @@ def run_regressor_analysis():
             "La stima OOB richiede bootstrap=True (Breiman 2001, Definition 1.1): "
             f"'{REG_CONFIG_PATH}' indica bootstrap={bootstrap}, incompatibile con questa diagnostica."
         )
+    # max_samples=None è il default sklearn (bootstrap sample_size=n_samples,
+    # cioè bootstrap "pieno" classico) -- NON va convertito a float (crash su
+    # float(None)); None è un valore legittimo, non un buco da riempire.
+    raw_max_samples = hp.get("max_samples")
     base_kwargs = dict(
         max_depth=hp.get("max_depth"),
         min_samples_split=int(hp.get("min_samples_split", 2)),
         max_features=hp.get("max_features", 1 / 3),
         criterion=hp.get("criterion", "squared_error"),
         bootstrap=True,
-        max_samples=float(hp.get("max_samples", 1.0)),
+        max_samples=float(raw_max_samples) if raw_max_samples is not None else None,
     )
     reference_n = int(hp["n_estimators"]) if hp.get("n_estimators") is not None else None
     grid = sorted(set(DEFAULT_GRID) | ({reference_n} if reference_n else set()))

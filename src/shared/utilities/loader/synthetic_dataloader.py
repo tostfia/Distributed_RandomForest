@@ -2,7 +2,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification, make_regression
+from sklearn.datasets import make_classification, make_friedman1
 
 from src.shared.utilities.loader.datasetLoader import DatasetLoader
 from src.shared.config import SystemConfig
@@ -15,7 +15,25 @@ class SyntheticDataLoader(DatasetLoader):
 
     Supporta due task distinti, selezionabili tramite il parametro `task`:
     - "classification" (default): usa make_classification.
-    - "regression": usa make_regression.
+    - "regression": usa make_friedman1.
+
+    REGRESSIONE -- perché make_friedman1 e non make_regression: la traccia
+    del progetto chiede genericamente "i generatori di scikit-learn" (nota a
+    piè di pagina alla pagina generale dei sample generator, non a una
+    funzione specifica) per il task sintetico. make_friedman1 (Friedman 1991,
+    "Multivariate adaptive regression splines"; Breiman 1996, "Bagging
+    predictors" -- lo stesso lavoro di Breiman già citato nella
+    bibliografia del progetto) genera un problema NON lineare
+    (y = 10·sin(π·X0·X1) + 20·(X2−0.5)² + 10·X3 + 5·X4 + noise·N(0,1)):
+    a differenza di make_regression (default: relazione lineare, dove una
+    Random Forest è in un certo senso "overkill"), qui l'interazione
+    (sin(X0·X1)) e il termine quadratico non sono catturabili da un modello
+    lineare -- motiva meglio la scelta di un ensemble di alberi. Le feature
+    informative sono sempre esattamente 5 (X0..X4); tutte le altre
+    (n_features - 5) sono rumore puro per costruzione, indipendenti dal
+    target -- stessa proprietà "segnale/rumore noto a priori" già sfruttata
+    altrove nel progetto (nessuna feature selection necessaria sul
+    sintetico).
 
     Restituisce un DataFrame già coerente con la pipeline:
     - feature numeriche;
@@ -34,7 +52,6 @@ class SyntheticDataLoader(DatasetLoader):
         n_clusters_per_class: int = None,
         flip_y: float = None,
         weight: list = None,
-        n_informative_reg: int = None,
         noise: float = None,
         output_dir: str = "synthetic/",
     ):
@@ -65,9 +82,10 @@ class SyntheticDataLoader(DatasetLoader):
             self.flip_y = flip_y if flip_y is not None else config.get("flip_y", 0.01)
             self.weight = weight if weight is not None else config.get("weight", [0.9, 0.1])
             self.target_column = target_column if target_column is not None else config.get("target_column", "Label")
-        else:  # regression
-            self.n_informative_reg = n_informative_reg if n_informative_reg is not None else config.get("n_informative_reg", int(self.n_features * 0.5))
-            self.noise = noise if noise is not None else config.get("noise", 10.0)
+        else:  # regression -- make_friedman1: 5 feature informative FISSE (non
+            # parametrizzabili), il resto rumore puro. Niente n_informative_reg:
+            # non avrebbe senso con questo generatore (vedi docstring classe).
+            self.noise = noise if noise is not None else config.get("noise", 0.5)
             self.target_column = target_column if target_column is not None else config.get("target_column", "Target")
 
         self._validate_parameters()
@@ -104,11 +122,10 @@ class SyntheticDataLoader(DatasetLoader):
                     f"({count / self.n_samples * 100:.2f}%)"
                 )
 
-        else:  # regression
-            X, y = make_regression(
+        else:  # regression -- Friedman #1 (Friedman 1991; Breiman 1996)
+            X, y = make_friedman1(
                 n_samples=self.n_samples,
                 n_features=self.n_features,
-                n_informative=self.n_informative_reg,
                 noise=self.noise,
                 random_state=self.random_seed,
             )
@@ -116,7 +133,7 @@ class SyntheticDataLoader(DatasetLoader):
             df = pd.DataFrame(X, columns=feature_columns)
             df[self.target_column] = y.astype(np.float64)
 
-            print("\nStatistiche del target sintetico (regressione):")
+            print("\nStatistiche del target sintetico (regressione, Friedman #1):")
             print(
                 f" • Media: {y.mean():.4f}  •  Std: {y.std():.4f}  "
                 f"•  Min: {y.min():.4f}  •  Max: {y.max():.4f}"
@@ -157,7 +174,10 @@ class SyntheticDataLoader(DatasetLoader):
                     "n_informative + n_redundant non può superare n_features."
                 )
         else:
-            if self.n_informative_reg <= 0 or self.n_informative_reg > self.n_features:
+            # make_friedman1 richiede almeno 5 feature (le uniche informative,
+            # per costruzione -- vedi docstring classe).
+            if self.n_features < 5:
                 raise ValueError(
-                    "n_informative_reg deve essere maggiore di 0 e non superare n_features."
+                    "n_features deve essere >= 5 per make_friedman1 (5 feature "
+                    "informative fisse, richieste dalla formula di Friedman #1)."
                 )
