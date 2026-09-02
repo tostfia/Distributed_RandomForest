@@ -527,14 +527,8 @@ def run_baseline():
             # scalabilità con la baseline single-node (unico scopo di questo
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
-            # n_features=25 con Friedman #1: le feature davvero informative
-            # sono sempre e solo 5 (fisse, per costruzione della formula --
-            # vedi SyntheticDataLoader), quindi 25 dà una frazione
-            # informativa del 20% (5/25) -- in linea con l'intervallo 10-25%
-            # osservato in letteratura per dataset sintetici di regressione
-            # "non banali ma imparabili" (default di make_regression stesso:
-            # 10%; benchmark comuni: 10-25%).
-            n_features = tmp_cfg.get("n_features", 25)
+            # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
+            n_features = tmp_cfg.get("n_features", 50)
         else:
             n_features = tmp_cfg.get("n_features", 30)
             # Default allineato a SyntheticDataLoader (n_samples=300000).
@@ -548,16 +542,7 @@ def run_baseline():
         # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
         # target) -- livello moderato, coerente con la pratica comune per
         # dataset sintetici "non banali ma non dominati dal rumore".
-        noise = tmp_cfg.get("noise", 0.5)
-        # Stessi default interni di SyntheticDataLoader per la classificazione,
-        # ma calcolati QUI e passati esplicitamente al costruttore. Prima
-        # venivano solo scritti nel manifesto (dataset_gen_params) senza mai
-        # essere passati al loader: quest'ultimo ricadeva sui suoi default
-        # interni rileggendo 'outputs_baseline/config_synthetic.json', un file
-        # che al momento di questa chiamata è o assente (primo run) o ancora
-        # quello della run PRECEDENTE (questa run lo sovrascrive solo più
-        # avanti) — quindi il manifesto "nuovo" non controllava mai davvero
-        # cosa veniva effettivamente generato.
+        noise = tmp_cfg.get("noise", 2.5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
