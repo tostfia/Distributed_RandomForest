@@ -110,13 +110,9 @@ from src.shared.utilities.undersampling import undersample_majority_class
 RANDOM_SEED = 123
 TEST_SIZE = 0.2
 
-# Griglia uniforme (stile esempio ufficiale sklearn: min/max/step), partendo
-# da 5 apposta per rendere visibile il bias OOB a basso n_estimators invece
-# di aggirarlo implicitamente. Stessa griglia per entrambi i task, per
-# restare confrontabili a colpo d'occhio.
 MIN_ESTIMATORS = 5
 MAX_ESTIMATORS = 200
-STEP_ESTIMATORS = 15
+STEP_ESTIMATORS = 5
 DEFAULT_GRID = list(range(MIN_ESTIMATORS, MAX_ESTIMATORS + 1, STEP_ESTIMATORS))
 
 # ---------------------------------------------------------------------------
@@ -126,10 +122,6 @@ CLF_TARGET_COL = "Label"
 CLF_TARGET_ROWS_PER_DAY = 100_000  # stesso valore di run_baseline.py
 CLF_UNDERSAMPLING_RATIO = 1.0
 CLF_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
-# Sottocampione SOLO per questa diagnostica (non per run_baseline.py, che
-# resta sul train set completo) -- stessa tecnica/motivazione di
-# analyze_permutation_importance_config.py: la forma della curva OOB è
-# governata dal numero di alberi, non dalla dimensione del dataset.
 CLF_DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
 
 # ---------------------------------------------------------------------------
@@ -434,9 +426,6 @@ def run_regressor_analysis():
             "La stima OOB richiede bootstrap=True (Breiman 2001, Definition 1.1): "
             f"'{REG_CONFIG_PATH}' indica bootstrap={bootstrap}, incompatibile con questa diagnostica."
         )
-    # max_samples=None è il default sklearn (bootstrap sample_size=n_samples,
-    # cioè bootstrap "pieno" classico) -- NON va convertito a float (crash su
-    # float(None)); None è un valore legittimo, non un buco da riempire.
     raw_max_samples = hp.get("max_samples")
     base_kwargs = dict(
         max_depth=hp.get("max_depth"),
