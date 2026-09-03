@@ -64,6 +64,31 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
         hp_data["noise"] = baseline_data.get("noise")
         hp_data["n_informative_reg"] = baseline_data.get("n_informative_reg")
 
+        # SOLO per il federato: 'n_samples' letto sopra è il TOTALE usato
+        # dalla baseline (es. SYNTHETIC_N_SAMPLES nel .env). Ogni worker
+        # federato genera però il proprio dataset sintetico in autonomia
+        # (vedi FederatedWorker._load_synthetic_data, con seed diverso per
+        # worker) -- se ricevesse lo stesso 'n_samples' TOTALE, il volume
+        # complessivo nel cluster sarebbe 'n_samples' × NUM_WORKERS, non
+        # 'n_samples' come nella baseline. Diviso qui per NUM_WORKERS (letto
+        # dallo stesso .env, mai ridichiarato) così il totale federato resta
+        # confrontabile con quello della baseline che ha generato la
+        # configurazione. Il centralizzato non è toccato da questa modifica:
+        # lì un solo processo genera l'intero dataset una volta sola, senza
+        # replicarlo per worker.
+        if mode == "federated" and hp_data["n_samples"]:
+            try:
+                num_workers = int(os.environ.get("NUM_WORKERS", 1))
+            except ValueError:
+                num_workers = 1
+            if num_workers > 1:
+                total_n_samples = hp_data["n_samples"]
+                per_worker_n_samples = max(1, total_n_samples // num_workers)
+                hp_data["n_samples"] = per_worker_n_samples
+                print(f"  [INFO] n_samples sintetico: {total_n_samples} (totale baseline) -> "
+                      f"{per_worker_n_samples} per worker (÷{num_workers}, NUM_WORKERS dal .env) "
+                      f"-- volume complessivo nel cluster resta confrontabile con la baseline.")
+
     return Hyperparameters(**hp_data)
 
 
@@ -290,6 +315,12 @@ def handle_inference():
     inference_tree_allocation_strategy = (
         training_entry_for_job.get("tree_allocation_strategy", "proportional") if training_entry_for_job else "proportional"
     )
+    inference_dataset_type = (
+        job_details.get("dataset_type")
+        if job_details and job_details.get("dataset_type")
+        else (training_entry_for_job.get("dataset_type", "real") if training_entry_for_job else "real")
+    )
+    print(f"[INFO] Tipo di dataset per questo job: {inference_dataset_type.upper()}.")
 
     # 4. Validazione tramite il modello Pydantic InferenceRequest
     try:
@@ -297,6 +328,7 @@ def handle_inference():
             job_id=job_id,
             data_url=data_url, 
             environment=cfg.env,
+            dataset_type=inference_dataset_type,
             hyperparameters=hp_obj,
             partition_strategy=inference_partition_strategy,
             partition_alpha=inference_partition_alpha,
@@ -314,15 +346,13 @@ def handle_inference():
         print(f"\n[OK] Richiesta di inferenza {inference_request.inference_id[:8]} inviata con successo alla coda '{target_queue}'!")
         print(f"[INFO] L'orchestratore riceverà il messaggio e coordinerà i worker via RPC.")
 
-        dataset_type = training_entry_for_job.get("dataset_type") if training_entry_for_job else None
-
         append_history_entry({
             "type": "inference",
             "id": inference_request.inference_id,
             "job_id": job_id,
             "timestamp": time.time(),
             "environment": inference_request.environment,
-            "dataset_type": dataset_type,
+            "dataset_type": inference_dataset_type,
             "tree_type": hp_obj.tree_type,
             "partition_strategy": inference_request.partition_strategy,
             "partition_alpha": inference_request.partition_alpha,
@@ -575,15 +605,6 @@ def handle_training():
         print(f"\n[ERRORE] Impossibile configurare gli iperparametri: {e}")
         return
 
-    # Rilevante SOLO per il training federato su dataset reale: il centralizzato
-    # non partiziona mai i dati, e il sintetico non ha un manifesto di
-    # partizionamento (ogni worker genera il proprio shard al boot).
-    #
-    # Chiesta QUI, non più durante la baseline locale (che non partiziona mai
-    # nulla, il centralizzato compreso): la baseline non ha bisogno di sapere
-    # come verranno partizionati i dati per un eventuale training federato
-    # futuro, e chiederlo lì costringeva a rispondere a questa domanda anche
-    # quando si stava solo calcolando una baseline centralizzata.
     if mode == "federated" and dataset_type == "real":
         print("\n  Strategia di partizionamento tra i worker per il training FEDERATO:")
         print("    [1] IID (comportamento storico, shard casuali equilibrati)")

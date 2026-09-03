@@ -1,4 +1,3 @@
-import json
 import pickle
 import os
 import random
@@ -184,7 +183,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             return str(dataset_type).strip().lower()
         return "real"
 
-    def _fetch_worker_shard_sizes(self, worker_names: list, available_workers: dict) -> dict:
+    def _fetch_worker_shard_sizes(self, worker_names: list, available_workers: dict, job_id: str = None) -> dict:
         """
         Interroga in parallelo ogni worker per la dimensione del proprio shard di
         training locale (exposed_get_local_shard_size), PRIMA di allocare il
@@ -196,6 +195,11 @@ class FederatedOrchestrator(BaseOrchestrator):
         Un worker che non risponde in tempo viene semplicemente OMESSO dal
         dizionario risultato (non con size=0): la gestione del fallback per i
         worker "senza dimensione nota" è delegata a _allocate_tree_quotas.
+
+        job_id: inoltrato a exposed_get_local_shard_size così un worker che ha
+        già preprocessato lo shard per QUESTO job (round >= 2 dello stesso
+        job) può riportare il conteggio reale post-undersampling invece
+        della sola stima sul CSV grezzo — vedi quel metodo per i dettagli.
         """
         sizes = {}
         lock = threading.Lock()
@@ -210,7 +214,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     w_info["host"], w_info["port"],
                     config={"allow_pickle": True, "sync_request_timeout": 30}
                 )
-                size = int(obtain(conn.root.exposed_get_local_shard_size()))
+                size = int(obtain(conn.root.exposed_get_local_shard_size(job_id)))
                 with lock:
                     sizes[w_name] = size
             except Exception as e:
@@ -425,7 +429,9 @@ class FederatedOrchestrator(BaseOrchestrator):
             if tree_allocation_strategy == "equal":
                 worker_shard_sizes = {}
             else:
-                worker_shard_sizes = self._fetch_worker_shard_sizes(worker_names, available_workers)
+                worker_shard_sizes = self._fetch_worker_shard_sizes(
+                    worker_names, available_workers, job_id=self.current_job_id
+                )
             tree_quotas = self._allocate_tree_quotas(
                 total_step_trees, worker_names, worker_shard_sizes, strategy=tree_allocation_strategy
             )

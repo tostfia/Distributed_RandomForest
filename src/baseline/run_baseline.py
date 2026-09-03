@@ -586,15 +586,21 @@ def run_baseline():
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
             # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
-            n_features = tmp_cfg.get("n_features", 100)
+            n_features = tmp_cfg.get("n_features", 50)
         else:
-            n_features = tmp_cfg.get("n_features", 100)
+            n_features = tmp_cfg.get("n_features", 30)
             # Default allineato a SyntheticDataLoader (n_samples=300000).
             # Prima qui il default era 500000: in assenza di un manifesto la
             # baseline generava un dataset 1.67x più grande di quello del
             # cluster, e i tempi di addestramento non erano confrontabili.
             n_samples = tmp_cfg.get("n_samples", 300000)
-        noise = tmp_cfg.get("noise", 5)
+        # noise=0.5: calibrato sulla deviazione standard EMPIRICA del target
+        # "pulito" di Friedman #1 (misurata: std≈4.87, costante al variare di
+        # n_features perché dipende solo dalle 5 feature informative fisse),
+        # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
+        # target) -- livello moderato, coerente con la pratica comune per
+        # dataset sintetici "non banali ma non dominati dal rumore".
+        noise = tmp_cfg.get("noise", 2.5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
@@ -936,6 +942,47 @@ def run_baseline():
             "bootstrap": best_bootstrap,
             "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
         }
+
+        # BUG corretto: questo ramo calcolava hp_sintetici ma non costruiva
+        # mai config_data né scriveva alcun manifesto -- a differenza sia del
+        # ramo 'real' sia di quello sintetico-regressore (poco più sotto),
+        # che invece lo fanno entrambi. La FASE 4 subito dopo (comune a tutti
+        # e tre i rami) legge SEMPRE `config_data["hyperparameters"]`: senza
+        # questo blocco, qualunque run 'sintetico + classificatore' falliva
+        # con UnboundLocalError not appena arrivato lì. Struttura identica
+        # (stessi campi/nomi di chiave) al blocco del regressore sotto, per
+        # coerenza tra i due manifesti.
+        config_data = {
+            "mode": "distributed",
+            "dataset_type": "synthetic",
+            "dataset_path": "synthetic",
+            **dataset_gen_params,
+            "feature_eliminata": dizionario_feature["eliminate"],
+            "feature_selezionate": dizionario_feature["salvate"],
+            "hyperparameters": {
+                **hp_sintetici,
+                "tree_type": user_tree_type,
+                "target_column": target_col,
+                "random_state": int(RANDOM_SEED)
+            }
+        }
+
+        # Stesso schema a doppio file del ramo regressore sotto: un
+        # manifesto ATTIVO (sempre sovrascritto, letto dal cluster) + una
+        # copia per-task (mai sovrascritta dall'altro task), così entrambi
+        # gli esperimenti (classificazione/regressione sintetica) restano
+        # documentati e ricostruibili anche dopo aver rilanciato l'altro.
+        config_path_synthetic = os.path.join(OUTPUT_DIR, "config_synthetic.json")
+        with open(config_path_synthetic, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+        print(f"[OK] Manifesto sintetico ATTIVO ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+
+        config_path_synthetic_task = os.path.join(OUTPUT_DIR, f"config_synthetic_{user_tree_type}.json")
+        with open(config_path_synthetic_task, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+        print(f"[OK] Copia per-task archiviata in: '{config_path_synthetic_task}'")
+        print(f"[NOTA] Il cluster legge SEMPRE '{config_path_synthetic}': per passare all'altro "
+              f"task sintetico va rilanciata la baseline, non basta avere la copia per-task.")
 
     else:
         # ---------------------------------------------------------------

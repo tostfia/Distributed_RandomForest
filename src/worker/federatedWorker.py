@@ -336,7 +336,7 @@ class FederatedWorker(BaseWorker):
 
         if self._cached_job_id != job_id or self._cached_X_train is None:
             if dataset_type == "synthetic":
-                self._load_synthetic_data(hyperparameters)
+                self._load_synthetic_data(hyperparameters, worker_index=worker_index)
             else:
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
             self._cached_job_id = job_id
@@ -489,35 +489,56 @@ class FederatedWorker(BaseWorker):
 
         if not self.is_regression():
             random_state = int(hyperparameters.get("random_state", 123))
+            n_minority = int((df_train_clean[self.target_column] == 1).sum())
 
-            # Split del validation set (15% del train shard, PRIMA
-            # dell'undersampling) -- stesso ordine/percentuale di
-            # run_baseline.py e di centralized.py: allinea il VOLUME dello
-            # shard che arriva all'undersampling a quello che la baseline
-            # userebbe, non ancora usato per calibrare una soglia in questo
-            # percorso federato (vedi VALIDATION_SIZE_FOR_THRESHOLD).
-            # Scartato subito dopo lo split.
-            validation_splitter = StratifiedDataSplitter(
-                target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
-                random_state=random_state,
-            )
-            df_train_clean, _ = validation_splitter.split(df_train_clean)
+            if n_minority == 0:
+                # Rete di sicurezza: con tree_allocation_strategy='equal' la
+                # probe di dimensione (exposed_get_local_shard_size) viene
+                # saltata a monte (vedi federated.py), quindi la protezione
+                # "quota 0 -> worker mai dispatchato" lì implementata non
+                # scatta sempre. Qui, invece di andare in crash dentro
+                # StratifiedDataSplitter/undersample_majority_class (nessuna
+                # delle due può bilanciare una classe con zero righe), si
+                # salta ESPLICITAMENTE validation-split e undersampling e si
+                # addestra sul train shard così com'è (sbilanciato, o
+                # interamente Benign). Gli alberi risultanti da questo
+                # worker saranno probabilmente poco informativi (o
+                # costanti), ma il job nel complesso completa invece di
+                # fallire per intero per colpa di un singolo worker.
+                print(f"[{self.worker_name}] [ATTENZIONE] Nessuna riga di classe minoritaria "
+                      f"(Attacco) nel train shard locale: split di validation e undersampling "
+                      f"SALTATI (impossibile bilanciare una classe con zero campioni). "
+                      f"Addestramento su questo shard così com'è (probabile scarsa/nulla "
+                      f"informatività degli alberi risultanti da questo worker).")
+            else:
+                # Split del validation set (15% del train shard, PRIMA
+                # dell'undersampling) -- stesso ordine/percentuale di
+                # run_baseline.py e di centralized.py: allinea il VOLUME dello
+                # shard che arriva all'undersampling a quello che la baseline
+                # userebbe, non ancora usato per calibrare una soglia in questo
+                # percorso federato (vedi VALIDATION_SIZE_FOR_THRESHOLD).
+                # Scartato subito dopo lo split.
+                validation_splitter = StratifiedDataSplitter(
+                    target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
+                    random_state=random_state,
+                )
+                df_train_clean, _ = validation_splitter.split(df_train_clean)
 
-            # Under-sampling della classe maggioritaria, SOLO sul train shard
-            # di QUESTO worker (mai sul test, stesso principio della baseline
-            # centrale): applicato per-shard, non globalmente, perché in un
-            # sistema federato i dati restano decentralizzati per design --
-            # ogni worker bilancia i propri dati locali. Rilevante soprattutto
-            # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
-            # Benign/Attacco di un singolo shard può discostarsi parecchio da
-            # quello del dataset globale.
-            print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
-                  f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
-            df_train_clean = undersample_majority_class(
-                df_train_clean, target_column=self.target_column,
-                majority_class=0, minority_class=1,
-                ratio=UNDERSAMPLING_RATIO, random_state=random_state,
-            )
+                # Under-sampling della classe maggioritaria, SOLO sul train shard
+                # di QUESTO worker (mai sul test, stesso principio della baseline
+                # centrale): applicato per-shard, non globalmente, perché in un
+                # sistema federato i dati restano decentralizzati per design --
+                # ogni worker bilancia i propri dati locali. Rilevante soprattutto
+                # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
+                # Benign/Attacco di un singolo shard può discostarsi parecchio da
+                # quello del dataset globale.
+                print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
+                      f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
+                df_train_clean = undersample_majority_class(
+                    df_train_clean, target_column=self.target_column,
+                    majority_class=0, minority_class=1,
+                    ratio=UNDERSAMPLING_RATIO, random_state=random_state,
+                )
 
         selected_features = self._resolve_selected_features(dataset_type, hyperparameters)
         
@@ -547,9 +568,33 @@ class FederatedWorker(BaseWorker):
         self.local_sample_count = len(self._cached_X_train)
         print(f"[{self.worker_name}] Shard caricato in cache. X_train Shape: {self._cached_X_train.shape}")
 
-    def _load_synthetic_data(self, hyperparameters: dict):
+    def _load_synthetic_data(self, hyperparameters: dict, worker_index: int = None):
+        """
+        worker_index: usato per derivare un seed DIVERSO per ciascun worker
+        (worker_seed = seed_base + worker_index), così ogni worker genera un
+        dataset sintetico con la STESSA struttura statistica (stessa
+        funzione, stessi n_samples/n_features/noise) ma dati EFFETTIVAMENTE
+        diversi -- analogo allo sharding IID del dataset reale, dove ogni
+        worker vede una porzione diversa dello stesso spazio campionario.
+
+        PRIMA: ogni worker usava lo stesso identico seed_base letto da
+        hyperparameters (condiviso via broadcast RPC a tutti i worker),
+        quindi generava esattamente lo STESSO dataset di tutti gli altri --
+        nessun partizionamento reale dei dati, solo calcolo distribuito su
+        dati duplicati. worker_index=None (fallback, es. se il chiamante non
+        lo passa) preserva quel comportamento precedente, con un avviso
+        esplicito invece di un cambiamento silenzioso.
+        """
         hyperparameters = obtain(hyperparameters)
-        seed = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
+        seed_base = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
+        if worker_index is not None:
+            seed = int(seed_base) + int(worker_index)
+        else:
+            seed = seed_base
+            print(f"[{self.worker_name}] [ATTENZIONE] worker_index non disponibile: uso il seed "
+                  f"condiviso senza offset -- questo worker genererà lo STESSO dataset sintetico "
+                  f"di tutti gli altri worker (nessun partizionamento reale).")
+
         task = "regression" if self.is_regression() else "classification"
         target_column = "Target" if task == "regression" else "Label"
         n_samples = hyperparameters.get("n_samples", 166666)
@@ -601,7 +646,7 @@ class FederatedWorker(BaseWorker):
         if self._cached_job_id != job_id or self._cached_X_test is None or self._cached_y_test is None:
             print(f"[{self.worker_name}] Rigenerazione cache di test tramite pipeline ufficiale...")
             if dataset_type == "synthetic":
-                self._load_synthetic_data(hyperparameters)
+                self._load_synthetic_data(hyperparameters, worker_index=worker_index)
             else:
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
         self._cached_job_id = job_id
@@ -717,38 +762,123 @@ class FederatedWorker(BaseWorker):
     def exposed_get_local_sample_count(self) -> int:
         return self.local_sample_count
 
-    def exposed_get_local_shard_size(self) -> int:
+    def exposed_get_local_shard_size(self, job_id: str = None) -> int:
         """
-        Numero di righe nel training-shard locale, letto direttamente dal CSV
-        su disco SENZA preprocessing/feature-selection. Serve all'Orchestratore
-        PRIMA di avviare un round di training, per allocare il budget di alberi
-        in proporzione alla quantità di dati posseduti da ciascun worker invece
-        che in parti uguali — indispensabile con partizionamento non-IID
-        (dirichlet/by_day), dove gli shard possono avere dimensioni molto
-        diverse tra loro; con partizionamento IID il risultato è comunque
-        praticamente identico alla vecchia ripartizione equa.
+        Stima della dimensione UTILE dello shard di training locale, usata
+        dall'Orchestratore PRIMA di avviare un round di training per allocare
+        il budget di alberi in proporzione alla quantità di dati posseduti da
+        ciascun worker invece che in parti uguali — indispensabile con
+        partizionamento non-IID (dirichlet/by_day), dove gli shard possono
+        avere dimensioni molto diverse tra loro; con partizionamento IID il
+        risultato è comunque praticamente identico alla vecchia ripartizione
+        equa.
 
-        Approssimazione voluta: il conteggio grezzo (righe prima della pulizia
-        NaN/inf) è una stima sufficiente ai fini di un'allocazione di risorse
-        (la pulizia tipicamente rimuove una frazione minima delle righe) ed
-        evita di dover rieseguire l'intero preprocessing solo per contare i
-        campioni, prima ancora di sapere se il worker verrà davvero usato in
-        questo round.
+        Due percorsi, in ordine di preferenza:
 
-        Per dataset_type='synthetic' il file non esiste ancora a questo punto
-        (i dati sintetici vengono generati pigramente al primo training, non
-        al boot): ritorniamo 0, e l'Orchestratore ricade sulla ripartizione
-        equa storica quando NESSUN worker restituisce una dimensione nota.
+        1. CACHE (round >= 2 dello stesso job): se lo shard è già stato
+           preprocessato per QUESTO job_id (binarizzazione, pulizia,
+           split di validation, undersampling -- vedi
+           _load_and_preprocess_real_shard), self.local_sample_count
+           contiene già il conteggio REALE del train set che verrà usato
+           per il fit, a costo zero (nessuna nuova lettura da disco).
+
+        2. STIMA ECONOMICA (round 1, nessuna cache ancora): PRIMA qui si
+           leggeva solo il conteggio grezzo di righe del CSV (via/prima della
+           pulizia NaN/Inf) -- un'approssimazione che con partizionamento
+           IID non fa differenza, ma con by_day/dirichlet può divergere
+           parecchio dalla dimensione REALE del train set dopo il taglio di
+           validation e l'undersampling: uno shard con molte righe ma quasi
+           tutte Benign riceverebbe comunque una quota alberi alta,
+           sproporzionata al poco segnale utile che contiene. Qui si legge
+           SOLO la colonna target (non l'intero file), si toglie la stessa
+           quota di validation set (VALIDATION_SIZE_FOR_THRESHOLD) che
+           _load_and_preprocess_real_shard toglie PRIMA dell'undersampling,
+           e si applica la stessa formula di undersample_majority_class
+           (ratio=UNDERSAMPLING_RATIO) -- senza fare il preprocessing
+           completo (metadata drop, feature engineering, multicollinearità)
+           né lo split di validation vero e proprio, quello avviene comunque,
+           una volta sola, al primo training vero.
+
+           Se la classe minoritaria (Attacco) è del tutto assente in questo
+           shard (possibile con Dirichlet ad alpha molto basso, o con
+           by_day e più worker che giorni disponibili), ritorna
+           ESPLICITAMENTE 0: la quota alberi risultante per questo worker
+           sarà 0, l'Orchestratore lo salta per questo round -- evitando
+           così il crash che si avrebbe più avanti in
+           undersample_majority_class / nello split di validation su uno
+           shard senza classe minoritaria, invece di scoprirlo a metà
+           training.
+
+        Per dataset_type='synthetic' il file non esiste ancora a questo
+        punto (i dati sintetici vengono generati pigramente al primo
+        training, non al boot): ritorna 0, e l'Orchestratore ricade sulla
+        ripartizione equa storica quando NESSUN worker restituisce una
+        dimensione nota.
         """
+        if job_id is not None and job_id == self._cached_job_id and self.local_sample_count > 0:
+            return self.local_sample_count
+
         train_path = os.path.join(self.local_cache_dir, "train_shard.csv")
         if not os.path.exists(train_path):
             print(f"[{self.worker_name}] [INFO] Shard locale non ancora presente in {train_path} "
                   f"(probabile dataset sintetico): ritorno dimensione 0.")
             return 0
         try:
-            with open(train_path, "r", encoding="utf-8", errors="ignore") as f:
-                n_lines = sum(1 for _ in f)
-            return max(0, n_lines - 1)  # -1 per l'header, mai negativo
+            # Solo la colonna target, non l'intero file: sul CSV grezzo il
+            # nome colonna è sempre "Label" (mai ancora rinominato/binarizzato
+            # a questo punto della pipeline), indipendentemente da
+            # self.target_column (che potrebbe non essere stato impostato
+            # correttamente per QUESTO job se questa probe avviene prima di
+            # qualunque chiamata di training).
+            label_series = pd.read_csv(train_path, usecols=["Label"])["Label"]
+            is_benign = label_series.astype(str).str.strip() == "Benign"
+            n_majority_raw = int(is_benign.sum())
+            n_minority_raw = int((~is_benign).sum())
+
+            if n_minority_raw == 0:
+                print(f"[{self.worker_name}] [ATTENZIONE] Shard locale senza alcuna riga di classe "
+                      f"minoritaria (Attacco): dimensione utile riportata come 0 (quota alberi "
+                      f"risultante per questo worker: 0, verrà saltato in questo round).")
+                return 0
+
+            # Nella pipeline reale, il 15% del train viene tolto per il
+            # validation set PRIMA dell'undersampling (vedi
+            # VALIDATION_SIZE_FOR_THRESHOLD in _load_and_preprocess_real_shard) --
+            # va tenuto in conto qui, altrimenti questa stima sovrastimerebbe
+            # sistematicamente il volume finale di circa il 15%, proprio nel
+            # caso (round 1, nessuna cache ancora) in cui è l'UNICA stima
+            # disponibile. Approssimazione: split stratificato, quindi si
+            # assume che la quota tolta sia proporzionale su entrambe le
+            # classi (non esattamente vero per classi molto piccole, che
+            # StratifiedDataSplitter esclude dalla stratificazione e tiene
+            # per intero in train -- ma qui n_minority_raw è già garantito
+            # > 0, e per conteggi piccoli l'errore residuo è comunque
+            # trascurabile ai fini di un'allocazione di risorse).
+            n_majority = int(n_majority_raw * (1 - VALIDATION_SIZE_FOR_THRESHOLD))
+            n_minority = int(n_minority_raw * (1 - VALIDATION_SIZE_FOR_THRESHOLD))
+            if n_minority == 0:
+                # Il taglio del 15% ha eroso l'unica manciata di righe
+                # minoritarie rimaste: stesso esito pratico di
+                # n_minority_raw == 0, stessa gestione.
+                print(f"[{self.worker_name}] [ATTENZIONE] Dopo il taglio del validation set "
+                      f"({VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}%), nessuna riga di classe "
+                      f"minoritaria residua stimata: dimensione utile riportata come 0.")
+                return 0
+
+            # Stessa formula di undersample_majority_class: se il rapporto
+            # richiesto richiederebbe più righe di maggioritaria di quelle
+            # disponibili, non si sotto-campiona affatto (dataset invariato).
+            target_majority = int(round(n_minority * UNDERSAMPLING_RATIO))
+            effective_majority = min(n_majority, target_majority)
+            return effective_majority + n_minority
         except Exception as e:
-            print(f"[{self.worker_name}] [WARN] Errore nel conteggio righe di {train_path}: {e}. Ritorno 0.")
-            return 0
+            print(f"[{self.worker_name}] [WARN] Errore nella stima della dimensione utile di "
+                  f"{train_path} ({e}): ricado sul conteggio grezzo delle righe.")
+            try:
+                with open(train_path, "r", encoding="utf-8", errors="ignore") as f:
+                    n_lines = sum(1 for _ in f)
+                return max(0, n_lines - 1)  # -1 per l'header, mai negativo
+            except Exception as e2:
+                print(f"[{self.worker_name}] [WARN] Errore anche nel conteggio grezzo di "
+                      f"{train_path}: {e2}. Ritorno 0.")
+                return 0

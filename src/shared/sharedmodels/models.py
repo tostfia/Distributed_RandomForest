@@ -18,10 +18,6 @@ class Hyperparameters(BaseModel):
     target_column: Optional[str] = None
     max_features: Optional[Union[str, float]] = None
     criterion: Optional[str] = None
-    # Parametri di GENERAZIONE del dataset sintetico (ignorati per dataset
-    # 'real'): servono a SyntheticDataLoader lato worker per costruire
-    # esattamente lo stesso dataset dichiarato nel manifesto di baseline,
-    # invece di ricadere sui default hardcoded del loader.
     n_samples: Optional[int] = None
     n_features: Optional[int] = None
     noise: Optional[float] = None
@@ -84,13 +80,13 @@ class TrainingRequestWorker(BaseModel):
     hyperparameters: Hyperparameters
     seed: int = 123
 
-
 class InferenceRequest(BaseModel):
     inference_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     request_type: Literal["INFERENCE"] = "INFERENCE"
     job_id: str
     data_url: Optional[str] = None
     environment: Environment
+    dataset_type: DatasetType = "real"
     hyperparameters: Hyperparameters
     partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
     partition_alpha: Optional[float] = None
