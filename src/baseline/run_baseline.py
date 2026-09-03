@@ -586,21 +586,15 @@ def run_baseline():
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
             # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
-            n_features = tmp_cfg.get("n_features", 50)
+            n_features = tmp_cfg.get("n_features", 100)
         else:
-            n_features = tmp_cfg.get("n_features", 30)
+            n_features = tmp_cfg.get("n_features", 100)
             # Default allineato a SyntheticDataLoader (n_samples=300000).
             # Prima qui il default era 500000: in assenza di un manifesto la
             # baseline generava un dataset 1.67x più grande di quello del
             # cluster, e i tempi di addestramento non erano confrontabili.
             n_samples = tmp_cfg.get("n_samples", 300000)
-        # noise=0.5: calibrato sulla deviazione standard EMPIRICA del target
-        # "pulito" di Friedman #1 (misurata: std≈4.87, costante al variare di
-        # n_features perché dipende solo dalle 5 feature informative fisse),
-        # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
-        # target) -- livello moderato, coerente con la pratica comune per
-        # dataset sintetici "non banali ma non dominati dal rumore".
-        noise = tmp_cfg.get("noise", 2.5)
+        noise = tmp_cfg.get("noise", 5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
