@@ -37,6 +37,11 @@ DEFAULT_BUCKET = os.environ.get(
     "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
 )
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
+# Stesso valore di run_baseline.py/centralized.py/provision_local_shards.py:
+# campionamento ribilanciato per giorno invece di sample_fraction=0.05
+# uniforme -- vedi provision_local_shards.py per la motivazione completa
+# (gemello locale di questo script, deve restare allineato).
+TARGET_ROWS_PER_DAY = 100_000
 
 # Default storico: partizionamento IID, invariato rispetto a prima. "dirichlet" e
 # "by_day" sono opt-in via CLI/env, gemelle di quelle esposte da
@@ -105,7 +110,11 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
         )
     else:
         print("[PROVISIONING] Generazione e upload degli shard in corso...")
-        data_loader = RawCSVDataLoader(data_url=data_folder, sample_fraction=0.05, dataset_seed=123)
+        data_loader = RawCSVDataLoader(
+            data_url=data_folder,
+            dataset_seed=123,
+            target_rows_per_day=TARGET_ROWS_PER_DAY,
+        )
         splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
         splitter.split_and_shard(
             data_loader, num_workers=num_workers, environment="aws", bucket_name=bucket,

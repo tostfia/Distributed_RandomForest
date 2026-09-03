@@ -130,6 +130,41 @@ if [ ! -f "$(pwd)/worker_supervisor.py" ]; then
     exit 1
 fi
 
+# Definiamo la root directory in modo sicuro gestendo gli spazi nel path
+ROOT_DIR="$(pwd)"
+export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/src"
+
+# ---------------------------------------------------------------------
+# Provisioning automatico degli shard federati
+# ---------------------------------------------------------------------
+# Il training FEDERATO richiede che ogni worker trovi già pronto il proprio
+# shard su disco PRIMA di partire (vedi FederatedOrchestrator.
+# _ensure_local_bootstrap, che ora si limita a VERIFICARE la presenza, non
+# genera più nulla a runtime — vedi provision_local_shards.py). Chiamato qui
+# automaticamente invece di doverselo ricordare come passo manuale separato:
+# lo script di provisioning controlla da sé se gli shard richiesti esistono
+# già (_shards_already_present) e, in quel caso, non rigenera nulla — quindi
+# richiamarlo ad ogni avvio costa pochissimo quando non serve.
+# NUM_WORKERS/DATASET_LOCAL_PATH/DATASET_TYPE sono già nell'ambiente (appena
+# esportati dal .env sopra): provision_local_shards.py li legge da sé come
+# default via argparse, nessun argomento esplicito necessario qui.
+#
+# Il dataset SINTETICO non richiede provisioning (ogni worker lo genera da
+# sé al boot): in quel caso lo script stampa un messaggio e ritorna subito,
+# quindi non serve ripetere qui il controllo su DATASET_TYPE.
+if [ "${TRAINING_MODE:-centralized}" = "federated" ]; then
+    echo "[PROVISIONING] TRAINING_MODE=federated rilevato: verifico/preparo gli shard federati..."
+    python -m script_local.provision_local_shards
+    PROVISION_EXIT=$?
+    if [ $PROVISION_EXIT -ne 0 ]; then
+        echo "[ERRORE] Provisioning degli shard federati fallito (exit $PROVISION_EXIT)."
+        echo "         Correggi l'errore sopra e rilancia -- il cluster NON viene avviato"
+        echo "         senza shard pronti, per evitare worker che crashano in loop al boot."
+        exit 1
+    fi
+    echo "[PROVISIONING OK] Shard federati pronti."
+fi
+
 # Configurazione della rete
 if [ "$MODE" = "delay" ]; then
     echo "[RETENET] Configurazione ritardo di rete: aggiungo 50ms di latenza su localhost..."
@@ -138,9 +173,6 @@ if [ "$MODE" = "delay" ]; then
 fi
 
 echo "[SYSTEM] Avvio del cluster distribuito su terminali differenti..."
-
-# Definiamo la root directory in modo sicuro gestendo gli spazi nel path
-ROOT_DIR="$(pwd)"
 
 # 1. Avvio dell'Orchestratore in un nuovo terminale
 echo "[START] Avvio di $NUM_ORCHESTRATORS Orchestratore/i Master..."
@@ -168,7 +200,6 @@ sleep 2
 # 3. Avvio del Client direttamente nel terminale corrente
 echo "[START] Avvio Client Interattivo..."
 # Modificato: include anche la cartella /src nel PYTHONPATH
-export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/src"
 python -m src.client.main
 
 # Esegue la pulizia finale della rete

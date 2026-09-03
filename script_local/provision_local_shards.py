@@ -50,7 +50,15 @@ from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 # FederatedOrchestrator._ensure_local_bootstrap. Non vanno cambiati qui senza
 # aggiornare di pari passo il check nel runtime, o i worker riceverebbero shard
 # incoerenti con ciò che si aspettano.
-SAMPLE_FRACTION = 0.05
+#
+# TARGET_ROWS_PER_DAY sostituisce SAMPLE_FRACTION=0.05 (uniforme su tutto il
+# dataset): stesso identico principio adottato in run_baseline.py e
+# centralized.py -- un campionamento uniforme farebbe dominare gli shard dal
+# giorno di cattura più grande, e diluirebbe ulteriormente i due giorni con
+# l'attacco Infiltration (già raro anche al loro interno) PRIMA che qualunque
+# bilanciamento a valle possa intervenire. Attiva automaticamente anche il
+# ribilanciamento locale di quei due giorni (vedi RawCSVDataLoader).
+TARGET_ROWS_PER_DAY = 100_000
 DATASET_SEED = 123
 TARGET_COLUMN = "Label"
 TEST_SIZE = 0.20
@@ -155,8 +163,8 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
     print("[PROVISIONING] Generazione degli shard in corso...")
     data_loader = RawCSVDataLoader(
         data_url=resolved_folder,
-        sample_fraction=SAMPLE_FRACTION,
         dataset_seed=DATASET_SEED,
+        target_rows_per_day=TARGET_ROWS_PER_DAY,
     )
     splitter = FederatedDataSplitter(
         target_column=TARGET_COLUMN,
