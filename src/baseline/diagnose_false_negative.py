@@ -4,10 +4,16 @@ retraining). Tre analisi, tutte sullo stesso test set ricostruito:
 
   1. FALSI NEGATIVI per SOTTO-TIPO di attacco (etichetta multi-classe
      originale, prima della binarizzazione Benign/Attacco) -- su quali
-     sotto-tipi il modello manca di più.
-  2. FALSI POSITIVI per GIORNO DI CATTURA -- se il traffico Benign
-     scambiato per Attacco si concentra sui due giorni "protetti"
-     (Infiltration) o è distribuito su tutti i giorni.
+     sotto-tipi il modello manca di più. Calcolata a TRE soglie: default
+     (0.50), F1-max (quella "ufficiale" scelta da run_baseline.py sul
+     validation set) e, se disponibile, quella vincolata FPR<=1% (lette
+     direttamente dal .pkl, non ricalcolate qui) -- così il confronto
+     riflette sempre i veri operating point del modello di produzione,
+     non un default arbitrario.
+  2. FALSI POSITIVI per GIORNO DI CATTURA -- stessa cosa, alle stesse tre
+     soglie: se il traffico Benign scambiato per Attacco si concentra sui
+     due giorni "protetti" (Infiltration) o è distribuito su tutti i
+     giorni, e come cambia restringendo la soglia.
   3. SCAN DI SOGLIA -- precision/recall/F1 a soglie diverse da 0.5
      sulle probabilità già predette dal modello: nessun retraining,
      serve solo a capire se un'altra soglia dà un compromesso
@@ -35,10 +41,10 @@ Precondizioni:
     esistere (prodotto dalla FASE finale di run_baseline.py).
 
 Output:
-  - Stampa a schermo le tre tabelle.
-  - Salva su disco in 'outputs_baseline/':
-      diagnostica_falsi_negativi_per_sottotipo.csv
-      diagnostica_falsi_positivi_per_giorno.csv
+  - Stampa a schermo le tabelle, una per ciascuna soglia analizzata.
+  - Salva su disco in 'outputs_baseline/', un file per soglia:
+      diagnostica_falsi_negativi_per_sottotipo_<soglia>.csv
+      diagnostica_falsi_positivi_per_giorno_<soglia>.csv
       diagnostica_scan_soglia.csv
 """
 import os
@@ -162,80 +168,102 @@ def main() -> None:
 
     X_test = test_features[feature_columns]
     y_test = test_features[TARGET_COL].astype(int)
-    y_pred = model.predict(X_test)
-    # Probabilità della classe "Attacco" (colonna 1), usate sia per il ROC-AUC
-    # implicito sia per lo scan di soglia al passo 6.
+    # Probabilità della classe "Attacco" (colonna 1): da qui si derivano le
+    # predizioni a OGNI soglia analizzata più sotto (nessuna chiamata a
+    # model.predict(), che userebbe sempre la soglia di default 0.50 --
+    # oramai solo una delle tre soglie confrontate, non più "la" soglia).
     y_proba = model.predict_proba(X_test)[:, 1]
 
     diag = pd.DataFrame({
         "original_label": original_label_test,
         "capture_day": capture_day_test,
         "y_true": y_test.to_numpy(),
-        "y_pred": y_pred,
         "y_proba": y_proba,
     })
 
-    # 6a. FALSI NEGATIVI per sotto-tipo di attacco originale.
-    print("[5/6] Calcolo Falsi Negativi per sotto-tipo di attacco originale...\n")
-    attacks = diag[diag["y_true"] == 1].copy()
-    attacks["is_fn"] = attacks["y_pred"] == 0
+    # Soglie vere lette dal .pkl (metriche_test, scritte da run_baseline.py):
+    # F1-max ("decision_threshold") e, se disponibile, quella vincolata
+    # FPR<=1% ("soglia_vincolata_fpr"). Il default 0.50 è incluso come
+    # riferimento, ma NON è più la soglia "ufficiale" del modello -- lo
+    # sono le altre due.
+    metriche_test = metadata_pipeline.get("metriche_test", {})
+    decision_threshold = metriche_test.get("decision_threshold")
+    soglia_vincolata = metriche_test.get("soglia_vincolata_fpr")
 
-    per_subtype = (
-        attacks.groupby("original_label")
-        .agg(n_totale=("is_fn", "size"), n_falsi_negativi=("is_fn", "sum"))
-    )
-    per_subtype["recall_sottoclasse"] = 1 - per_subtype["n_falsi_negativi"] / per_subtype["n_totale"]
-    per_subtype = per_subtype.sort_values("recall_sottoclasse")
+    thresholds_to_analyze = [("soglia_default_0_50", 0.50, "Default (0.50)")]
+    if decision_threshold is not None:
+        thresholds_to_analyze.append(
+            ("soglia_f1max", decision_threshold, f"F1-max produzione ({decision_threshold:.4f})")
+        )
+    if soglia_vincolata is not None and soglia_vincolata.get("soglia") is not None:
+        t = soglia_vincolata["soglia"]
+        thresholds_to_analyze.append(
+            ("soglia_fpr_vincolata", t, f"Vincolo FPR<=1% ({t:.4f})")
+        )
 
     pd.set_option("display.width", 120)
-    print("=" * 90)
-    print("  1) FALSI NEGATIVI PER SOTTO-TIPO DI ATTACCO (etichetta multi-classe originale)")
-    print("=" * 90)
-    print(per_subtype.to_string(float_format=lambda x: f"{x:.4f}"))
-    print("=" * 90)
-
-    total_fn = int(attacks["is_fn"].sum())
-    total_attacks = len(attacks)
-    print(f"\nTotale Falsi Negativi: {total_fn} su {total_attacks} attacchi nel test set "
-          f"({total_fn / total_attacks * 100:.2f}%).")
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    fn_path = os.path.join(OUTPUT_DIR, "diagnostica_falsi_negativi_per_sottotipo.csv")
-    per_subtype.to_csv(fn_path)
-    print(f"[OK] Tabella salvata in: '{fn_path}'")
 
-    # 6b. FALSI POSITIVI per giorno di cattura (i Benign non hanno un
-    #     sotto-tipo utile come gli attacchi, ma sapere SE i FP si
-    #     concentrano sui due giorni "protetti" -- vedi
-    #     DEFAULT_PROTECTED_MINORITY_DAYS in raw_csvdataloader.py -- o sono
-    #     distribuiti ovunque è comunque diagnostico per capire se
-    #     l'aumento di FP dopo la fix sul loading è un effetto collaterale
-    #     concentrato o diffuso).
-    print("\n[6/6] Calcolo Falsi Positivi per giorno di cattura...\n")
-    benign = diag[diag["y_true"] == 0].copy()
-    benign["is_fp"] = benign["y_pred"] == 1
+    for step_idx, (file_suffix, threshold, label) in enumerate(thresholds_to_analyze, start=1):
+        y_pred_t = (diag["y_proba"].to_numpy() >= threshold).astype(int)
+        diag_t = diag.copy()
+        diag_t["y_pred"] = y_pred_t
 
-    per_day = (
-        benign.groupby("capture_day")
-        .agg(n_benign_totale=("is_fp", "size"), n_falsi_positivi=("is_fp", "sum"))
-    )
-    per_day["fp_rate"] = per_day["n_falsi_positivi"] / per_day["n_benign_totale"]
-    per_day = per_day.sort_values("fp_rate", ascending=False)
+        # --- FALSI NEGATIVI per sotto-tipo, a questa soglia ---
+        print(f"\n[5/6] ({step_idx}/{len(thresholds_to_analyze)}) Falsi Negativi per sotto-tipo -- "
+              f"soglia {label}...\n")
+        attacks = diag_t[diag_t["y_true"] == 1].copy()
+        attacks["is_fn"] = attacks["y_pred"] == 0
 
-    print("=" * 90)
-    print("  2) FALSI POSITIVI PER GIORNO DI CATTURA (traffico Benign scambiato per Attacco)")
-    print("=" * 90)
-    print(per_day.to_string(float_format=lambda x: f"{x:.4f}"))
-    print("=" * 90)
+        per_subtype = (
+            attacks.groupby("original_label")
+            .agg(n_totale=("is_fn", "size"), n_falsi_negativi=("is_fn", "sum"))
+        )
+        per_subtype["recall_sottoclasse"] = 1 - per_subtype["n_falsi_negativi"] / per_subtype["n_totale"]
+        per_subtype = per_subtype.sort_values("recall_sottoclasse")
 
-    total_fp = int(benign["is_fp"].sum())
-    total_benign = len(benign)
-    print(f"\nTotale Falsi Positivi: {total_fp} su {total_benign} record Benign nel test set "
-          f"({total_fp / total_benign * 100:.2f}%).")
+        print("=" * 90)
+        print(f"  1) FALSI NEGATIVI PER SOTTO-TIPO DI ATTACCO -- soglia {label}")
+        print("=" * 90)
+        print(per_subtype.to_string(float_format=lambda x: f"{x:.4f}"))
+        print("=" * 90)
 
-    fp_path = os.path.join(OUTPUT_DIR, "diagnostica_falsi_positivi_per_giorno.csv")
-    per_day.to_csv(fp_path)
-    print(f"[OK] Tabella salvata in: '{fp_path}'")
+        total_fn = int(attacks["is_fn"].sum())
+        total_attacks = len(attacks)
+        print(f"\nTotale Falsi Negativi: {total_fn} su {total_attacks} attacchi nel test set "
+              f"({total_fn / total_attacks * 100:.2f}%).")
+
+        fn_path = os.path.join(OUTPUT_DIR, f"diagnostica_falsi_negativi_per_sottotipo_{file_suffix}.csv")
+        per_subtype.to_csv(fn_path)
+        print(f"[OK] Tabella salvata in: '{fn_path}'")
+
+        # --- FALSI POSITIVI per giorno di cattura, a questa soglia ---
+        print(f"\n[6/6] ({step_idx}/{len(thresholds_to_analyze)}) Falsi Positivi per giorno di cattura -- "
+              f"soglia {label}...\n")
+        benign = diag_t[diag_t["y_true"] == 0].copy()
+        benign["is_fp"] = benign["y_pred"] == 1
+
+        per_day = (
+            benign.groupby("capture_day")
+            .agg(n_benign_totale=("is_fp", "size"), n_falsi_positivi=("is_fp", "sum"))
+        )
+        per_day["fp_rate"] = per_day["n_falsi_positivi"] / per_day["n_benign_totale"]
+        per_day = per_day.sort_values("fp_rate", ascending=False)
+
+        print("=" * 90)
+        print(f"  2) FALSI POSITIVI PER GIORNO DI CATTURA -- soglia {label}")
+        print("=" * 90)
+        print(per_day.to_string(float_format=lambda x: f"{x:.4f}"))
+        print("=" * 90)
+
+        total_fp = int(benign["is_fp"].sum())
+        total_benign = len(benign)
+        print(f"\nTotale Falsi Positivi: {total_fp} su {total_benign} record Benign nel test set "
+              f"({total_fp / total_benign * 100:.2f}%).")
+
+        fp_path = os.path.join(OUTPUT_DIR, f"diagnostica_falsi_positivi_per_giorno_{file_suffix}.csv")
+        per_day.to_csv(fp_path)
+        print(f"[OK] Tabella salvata in: '{fp_path}'")
 
     # 6c. SCAN DI SOGLIA: nessun retraining, solo ricalcolo di
     #     precision/recall/F1 sulle probabilità già predette a soglie

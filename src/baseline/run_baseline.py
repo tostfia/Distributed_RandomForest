@@ -414,6 +414,21 @@ def run_baseline():
     # default 0.3 usato nei run precedenti, quindi cluster più piccoli e
     # più feature superstiti a parità di dataset).
     MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.2
+    # Feature note in letteratura sul CICIDS2018 come possibili "socket
+    # surrogate"/artefatti della configurazione fissa degli script di
+    # attacco (es. gli attack tool usati per generare il dataset spesso
+    # forzano un protocollo/pattern fisso, indipendente dalla vera natura
+    # dell'attacco) -- non rimosse a priori (nessuna prova diretta che SIA
+    # leakage per questo dataset specifico), ma segnalate esplicitamente
+    # in relazione se sopravvivono alla feature selection, così la loro
+    # presenza/assenza tra le feature vincenti è sempre visibile senza
+    # dover aprire manualmente 'config_real.json' -> 'feature_selezionate'.
+    SUSPECT_LEAKAGE_FEATURES = ["Protocol"]
+    # Quante feature (in ordine di importanza OOB decrescente) stampare nel
+    # report -- puramente diagnostico/descrittivo, non usato per decidere
+    # nulla nella pipeline (la feature selection ha già fatto la sua scelta
+    # separatamente, vedi CICIDSFeatureSelector).
+    TOP_N_FEATURE_IMPORTANCE = 10
     # Under-sampling della classe maggioritaria (Benign), solo sul train set
     # -- vedi undersampling.py per la motivazione completa. ratio=1.0
     # produce un bilanciamento 1:1 (maggioritaria ridotta alla stessa
@@ -737,6 +752,11 @@ def run_baseline():
     # (dataset sintetico, o regressore -- non applicabile). Sovrascritto più
     # avanti SOLO nel ramo dataset reale, dopo la feature selection.
     X_val, y_val = None, None
+    # Default: nessun punteggio di importanza (permutation OOB) -- la
+    # feature selection sul sintetico non lo calcola (segnale/rumore già
+    # noto a priori dal generatore, vedi SyntheticDataLoader). Sovrascritto
+    # più avanti SOLO nel ramo dataset reale.
+    feature_importance_scores = None
 
     if dataset_type == "synthetic":
         dizionario_feature = {"eliminate": [], "salvate": list(X_train.columns)}
@@ -798,6 +818,7 @@ def run_baseline():
             if validation_df is not None:
                 validation_df = fs.transform(validation_df)
             dizionario_feature = fs.feature_summary_
+            feature_importance_scores = fs.importance_scores_
         else:
             print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB, "
                   "feature selection integrata per max_features — vedi docstring)...")
@@ -824,6 +845,7 @@ def run_baseline():
             if validation_df is not None:
                 validation_df = best_fs.transform(validation_df)
             dizionario_feature = best_fs.feature_summary_
+            feature_importance_scores = best_fs.importance_scores_
 
         # Ricostruisce X_train/y_train/X_test/y_test (e X_val/y_val, se
         # presente) dal train/test/validation ORA ridotti alle feature
@@ -1237,6 +1259,13 @@ def run_baseline():
     metadata_pipeline = {
         "modello_addestrato": tree_clf,
         "features_mappate": list(X_train.columns),
+        # Permutation importance OOB (feature -> percent increase error rate),
+        # calcolata dalla feature selection -- None per il sintetico (segnale/
+        # rumore noto a priori, nessuna importance calcolata). Persistita qui
+        # per poterla riusare in diagnostica senza dover rifare il fit.
+        "feature_importance_scores": (
+            feature_importance_scores.to_dict() if feature_importance_scores is not None else None
+        ),
         # Scomposizione completa dei tempi: senza io_time/etl_time non è
         # possibile confrontare correttamente con il cluster, il cui tempo
         # totale include sempre la preparazione dati (vedi
@@ -1397,6 +1426,33 @@ def run_baseline():
         print(f"  ▸ RMSE SUL TEST SET  : {metriche_test['rmse']:.4f}")
         print(f"  ▸ MAE SUL TEST SET   : {metriche_test['mae']:.4f}")
         print(f"  ▸ R² SUL TEST SET    : {metriche_test['r2']:.4f}")
+
+    if feature_importance_scores is not None:
+        print(f"\n3d. IMPORTANZA DELLE FEATURE (permutation importance OOB, "
+              f"top {TOP_N_FEATURE_IMPORTANCE} tra quelle selezionate)")
+        print(LINEA_SINGOLA)
+        feature_selezionate = set(dizionario_feature.get("salvate", []))
+        top_importance = (
+            feature_importance_scores[feature_importance_scores.index.isin(feature_selezionate)]
+            .sort_values(ascending=False)
+            .head(TOP_N_FEATURE_IMPORTANCE)
+        )
+        for rank, (feat, score) in enumerate(top_importance.items(), start=1):
+            print(f"  {rank:>2}. {feat:<30} {score:8.4f}")
+        print("  ▸ Punteggio = percent increase OOB error rate quando la feature è permutata "
+              "(più alto = più importante -- vedi CICIDSFeatureSelector).")
+
+        presenti = [f for f in SUSPECT_LEAKAGE_FEATURES if f in feature_selezionate]
+        if presenti:
+            print(f"\n  [ATTENZIONE] Feature nella watchlist 'socket surrogate/artefatto tool "
+                  f"d'attacco' (letteratura CICIDS2018) ANCORA presenti nel set finale: {presenti}. "
+                  f"Non è di per sé una prova di leakage, ma vale la pena verificare esplicitamente "
+                  f"in relazione se e quanto la loro rimozione cambia le metriche (segnale genuino "
+                  f"vs artefatto della configurazione fissa degli strumenti usati per generare gli "
+                  f"attacchi nel dataset).")
+        else:
+            print(f"\n  Nessuna feature della watchlist {SUSPECT_LEAKAGE_FEATURES} presente nel set "
+                  f"finale selezionato.")
 
     print(f"\n4. DIAGNOSTICA TEMPORALE E PROFILAZIONE HARDWARE")
     print(LINEA_SINGOLA)

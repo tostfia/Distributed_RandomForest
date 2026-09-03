@@ -1,0 +1,13 @@
+original_label,n_totale,n_falsi_negativi,recall_sottoclasse
+Brute Force -Web,9,6,0.33333333333333337
+Brute Force -XSS,3,2,0.33333333333333337
+Infilteration,16233,6880,0.576171995318179
+DoS attacks-Slowloris,197,4,0.9796954314720813
+Bot,5514,8,0.9985491476242292
+DDoS attacks-LOIC-HTTP,1479,2,0.9986477349560514
+DDOS attack-HOIC,13038,3,0.999769903359411
+DDOS attack-LOIC-UDP,29,0,1.0
+DoS attacks-Hulk,8736,0,1.0
+DoS attacks-GoldenEye,765,0,1.0
+SQL Injection,2,0,1.0
+SSH-Bruteforce,1857,0,1.0
