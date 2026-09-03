@@ -19,6 +19,7 @@ from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
+from src.shared.utilities.undersampling import undersample_majority_class
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import (
     load_task_from_shared_storage,
@@ -29,6 +30,31 @@ from src.shared.utilities.task_storage import (
 
 TEST_SIZE = 0.2
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+# Stesso valore di run_baseline.py (TARGET_ROWS_PER_DAY): campionamento
+# RIBILANCIATO per giorno di cattura invece di una sample_fraction uniforme
+# sull'intero dataset (che farebbe dominare il campione dal giorno più
+# grande -- vedi RawCSVDataLoader per la motivazione completa). Da questo
+# valore dipende anche il ribilanciamento locale automatico dei due giorni
+# "protetti" (Infiltration), attivo dentro RawCSVDataLoader ogni volta che
+# target_rows_per_day non è None -- nessuna configurazione aggiuntiva
+# richiesta qui per beneficiarne.
+TARGET_ROWS_PER_DAY = 100_000
+# Stessi valori di run_baseline.py: senza allinearli qui, il train
+# distribuito e quello della baseline locale sarebbero addestrati su
+# distribuzioni/feature-set diversi, invalidando il confronto delle
+# METRICHE (quello sui tempi resterebbe comunque valido, essendo
+# indipendente da questi due parametri).
+UNDERSAMPLING_RATIO = 1.0
+MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.2
+# Stesso valore di run_baseline.py: 15% del train ritagliato PRIMA
+# dell'undersampling. Nella baseline serve a calibrare la soglia di
+# decisione su un validation set con la vera distribuzione sbilanciata; qui
+# NON viene usato per una soglia (il percorso distribuito non fa ancora
+# quella calibrazione, vedi discussione) ma va comunque tolto dal train PER
+# VOLUME: senza questo passo, l'undersampling lavorerebbe su un pool il 15%
+# più grande di quello della baseline, e il train finale non sarebbe più
+# lo stesso set di dati, solo un set con lo stesso RAPPORTO 1:1.
+VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 
 # Timeout (in secondi) delle chiamate RPC sincrone verso i worker.
 #
@@ -153,7 +179,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
             print(f"[DEBUG] dataset_path ricevuto = {repr(dataset_path)}")
-            loader = RawCSVDataLoader(data_url=dataset_path, sample_fraction=0.05, dataset_seed=base_seed)
+            # sample_fraction=0.05 (uniforme) SOSTITUITO da
+            # target_rows_per_day: stesso principio di run_baseline.py --
+            # senza questo, il campione sarebbe dominato dal giorno di
+            # cattura più grande (quasi metà del dataset da solo), e i due
+            # giorni con l'attacco Infiltration (già raro anche al loro
+            # interno) verrebbero diluiti ulteriormente da un campionamento
+            # cieco al Label PRIMA che qualunque bilanciamento a valle possa
+            # intervenire.
+            loader = RawCSVDataLoader(
+                data_url=dataset_path,
+                dataset_seed=base_seed,
+                target_rows_per_day=TARGET_ROWS_PER_DAY,
+            )
             df_raw = loader.load()
             
             # Istanziamo il nuovo preprocessor modificato
@@ -173,15 +211,67 @@ class CentralizedOrchestrator(BaseOrchestrator):
             print(f"\n[{self.orchestrator_name}] === PREPROCESSING SUL TEST SET ===")
             test_df = preprocessor.process(test_df)
 
+            # ─── FASE 4b: SPLIT DEL VALIDATION SET (PRIMA dell'undersampling) ───
+            # Stesso passo di run_baseline.py, stesso identico ordine (dopo
+            # process(), prima di undersample_majority_class): 15% del train
+            # tolto qui, per allineare il VOLUME del train che arriva
+            # all'undersampling a quello della baseline -- vedi
+            # VALIDATION_SIZE_FOR_THRESHOLD. Il validation stesso non è
+            # ancora usato per calibrare una soglia in questo percorso
+            # distribuito (nessuna logica di soglia F1-max/FPR-vincolata
+            # qui), quindi viene scartato subito dopo lo split.
+            if tree_type == "classifier":
+                print(f"\n[{self.orchestrator_name}] === SPLIT VALIDATION SET "
+                      f"({VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}% del train, per allineamento volume) ===")
+                validation_splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(
+                    target_column=target_col, test_size=VALIDATION_SIZE_FOR_THRESHOLD, random_state=base_seed
+                )
+                train_df, _ = validation_splitter.split(train_df)
+
+            # ─── FASE 5: UNDER-SAMPLING DELLA CLASSE MAGGIORITARIA (solo train) ───
+            # Prima assente qui: il train distribuito restava alla distribuzione
+            # naturale, mentre run_baseline.py addestra sempre su un train
+            # bilanciato 1:1 -- due modelli addestrati su dati diversi, non
+            # confrontabili sulle metriche. Il test set resta INTATTO (mai
+            # sotto-campionato), stesso principio della baseline: altrimenti la
+            # valutazione finale non misurerebbe più le prestazioni sulla
+            # distribuzione reale.
+            if tree_type == "classifier":
+                print(f"\n[{self.orchestrator_name}] === UNDER-SAMPLING CLASSE MAGGIORITARIA (solo train) ===")
+                train_df = undersample_majority_class(
+                    train_df, target_column=target_col,
+                    majority_class=0, minority_class=1,
+                    ratio=UNDERSAMPLING_RATIO, random_state=base_seed,
+                )
+
         # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
             # Letto dal manifesto (scritto da run_baseline.py) invece di un
             # letterale fisso: permette di rilanciare lo stesso job con soglie
-            # diverse (es. 0.0 per disattivare il filtro di importanza e
-            # tenere solo la rimozione delle feature a varianza zero) senza
-            # dover editare questo file — utile per un ablation study.
-            importance_threshold = payload.get("importance_threshold", 0.05)
-            fs = CICIDSFeatureSelector(target_column=target_col, importance_threshold=importance_threshold)
+            # diverse (es. un valore positivo per un filtro più aggressivo)
+            # senza dover editare questo file — utile per un ablation study.
+            # Default allineato a IMPORTANCE_THRESHOLD di run_baseline.py
+            # (0.0, non più 0.05): altrimenti il flusso "di default" (nessun
+            # override nel payload) selezionerebbe un set di feature diverso
+            # da quello della baseline anche a parità di tutto il resto.
+            importance_threshold = payload.get("importance_threshold", 0.0)
+            # rf_max_features/reduce_multicollinearity/multicollinearity_
+            # distance_threshold prima assenti qui (uso dei default della
+            # classe, non quelli di run_baseline.py): la feature selection
+            # produceva un set di feature diverso da quello della baseline
+            # anche a parità di importance_threshold. rf_max_features letto
+            # dagli iperparametri del payload (lo stesso max_features vincente
+            # del tuning, già usato più avanti per costruire gli alberi -- vedi
+            # _execute_training_step), non ridichiarato qui a parte.
+            fs = CICIDSFeatureSelector(
+                target_column=target_col,
+                importance_threshold=importance_threshold,
+                rf_random_state=base_seed,
+                rf_max_features=hp.get("max_features", "sqrt" if tree_type == "classifier" else 1 / 3),
+                reduce_multicollinearity=True,
+                multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
+                dendrogram_plot_path=f"feature_correlation_dendrogram_{job_id}_centralized.png",
+            )
             train_df = fs.fit_transform(train_df)
             test_df = fs.transform(test_df)
 
@@ -683,6 +773,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
         target_col = "Target" if tree_type == "regressor" else "Label"
+        dataset_type = self._resolve_dataset_type(payload)
 
         print(f"\n[{self.orchestrator_name}] === AVVIO INFERENZA DISTRIBUITA CENTRALIZZATA FAULT-TOLERANT ===")
         inference_start_time = time.perf_counter()
@@ -903,13 +994,26 @@ class CentralizedOrchestrator(BaseOrchestrator):
         
         total_inference_time = time.perf_counter() - inference_start_time
 
-        # 8. AGGREGAZIONE: SOFT VOTING (media delle probabilità per-albero + argmax) per
-        # la classificazione, MEDIA per la regressione, seguita dal calcolo delle metriche
+        # Soglia di decisione calibrata dalla baseline (vedi
+        # VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py):
+        # letta da config_<dataset_type>.json invece di ricadere sull'argmax
+        # implicito (soglia 0.50) di _aggregate_forest_predictions. None se il
+        # manifesto non la contiene ancora (fallback automatico al comportamento
+        # precedente, vedi read_decision_threshold_from_config).
+        decision_threshold = (
+            self.read_decision_threshold_from_config(dataset_type)
+            if tree_type == "classifier" else None
+        )
+
+        # 8. AGGREGAZIONE: SOFT VOTING (media delle probabilità per-albero) per la
+        # classificazione, a decision_threshold se disponibile (altrimenti argmax,
+        # invariato), MEDIA per la regressione, seguita dal calcolo delle metriche
         # sulla predizione finale.
         final_predictions, y_probs = self._aggregate_forest_predictions(
             predictions_matrix=predictions_matrix,
             tree_type=tree_type,
-            global_classes=global_classes
+            global_classes=global_classes,
+            decision_threshold=decision_threshold,
         )
         metrics = self.calculate_metrics(
             final_predictions=final_predictions,

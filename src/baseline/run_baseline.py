@@ -1243,6 +1243,31 @@ def run_baseline():
             },
             "soglia_vincolata_fpr": soglia_vincolata_fpr,
         }
+
+        # Persistita anche in config_real.json (non solo nel .pkl): serve al
+        # percorso distribuito (centralized.py/federated.py) per allineare
+        # l'inferenza alla stessa soglia della baseline, con lo stesso
+        # meccanismo di lettura già usato per 'feature_selezionate'. Scritta
+        # QUI (non alla riga originale del json.dump di config_data) perché
+        # la soglia è nota solo dopo l'addestramento/calibrazione finale,
+        # molto più avanti nel flusso di quando config_real.json viene
+        # inizialmente scritto con gli iperparametri.
+        if dataset_type == "real":
+            try:
+                with open(REAL_CONFIG_PATH, "r") as f:
+                    existing_config = json.load(f)
+                existing_config["decision_threshold"] = decision_threshold
+                existing_config["soglia_vincolata_fpr"] = soglia_vincolata_fpr
+                with open(REAL_CONFIG_PATH, "w") as f:
+                    json.dump(existing_config, f, indent=2)
+                print(f"[OK] Soglia di decisione persistita in '{REAL_CONFIG_PATH}' "
+                      f"(decision_threshold, soglia_vincolata_fpr) per il riuso da "
+                      f"centralized.py/federated.py.")
+            except Exception as e:
+                print(f"[ATTENZIONE] Impossibile aggiornare '{REAL_CONFIG_PATH}' con la "
+                      f"soglia di decisione: {e}. Il percorso distribuito ricadrà sul "
+                      f"comportamento di default (soglia implicita 0.50) finché non "
+                      f"rilanci run_baseline.py con questo file corretto.")
     else:
         test_mse = mean_squared_error(y_test, local_preds)
         test_rmse = float(np.sqrt(test_mse))

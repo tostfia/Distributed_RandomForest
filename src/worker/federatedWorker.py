@@ -12,6 +12,8 @@ from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
+from src.shared.utilities.undersampling import undersample_majority_class
+from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -25,6 +27,17 @@ _shm_y_ref = None
 
 
 RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
+# Stesso valore di run_baseline.py/centralized.py: senza allinearlo qui, lo
+# shard di train di ciascun worker federato resterebbe alla distribuzione
+# sbilanciata originale (o a quella prodotta dalla strategia di
+# partizionamento, es. molto più sbilanciata di quella globale con
+# partition_strategy='by_day'), mentre la baseline addestra sempre su un
+# train bilanciato 1:1 -- due modelli non confrontabili sulle metriche.
+# Stesso valore di run_baseline.py: vedi centralized.py per la motivazione
+# completa (allineamento di VOLUME del train prima dell'undersampling, non
+# ancora usato per calibrare una soglia in questo percorso).
+UNDERSAMPLING_RATIO = 1.0
+VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 
 def _init_fed_child_process(shm_name_X, shape_X, dtype_X, shm_name_y, shape_y, dtype_y):
     """Inizializza il processo figlio agganciandosi allo shared memory invece
@@ -474,6 +487,38 @@ class FederatedWorker(BaseWorker):
         df_train_clean = preprocessor.process(df_train_bin)
         df_test_clean = preprocessor.process(df_test_bin)
 
+        if not self.is_regression():
+            random_state = int(hyperparameters.get("random_state", 123))
+
+            # Split del validation set (15% del train shard, PRIMA
+            # dell'undersampling) -- stesso ordine/percentuale di
+            # run_baseline.py e di centralized.py: allinea il VOLUME dello
+            # shard che arriva all'undersampling a quello che la baseline
+            # userebbe, non ancora usato per calibrare una soglia in questo
+            # percorso federato (vedi VALIDATION_SIZE_FOR_THRESHOLD).
+            # Scartato subito dopo lo split.
+            validation_splitter = StratifiedDataSplitter(
+                target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
+                random_state=random_state,
+            )
+            df_train_clean, _ = validation_splitter.split(df_train_clean)
+
+            # Under-sampling della classe maggioritaria, SOLO sul train shard
+            # di QUESTO worker (mai sul test, stesso principio della baseline
+            # centrale): applicato per-shard, non globalmente, perché in un
+            # sistema federato i dati restano decentralizzati per design --
+            # ogni worker bilancia i propri dati locali. Rilevante soprattutto
+            # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
+            # Benign/Attacco di un singolo shard può discostarsi parecchio da
+            # quello del dataset globale.
+            print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
+                  f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
+            df_train_clean = undersample_majority_class(
+                df_train_clean, target_column=self.target_column,
+                majority_class=0, minority_class=1,
+                ratio=UNDERSAMPLING_RATIO, random_state=random_state,
+            )
+
         selected_features = self._resolve_selected_features(dataset_type, hyperparameters)
         
         if selected_features is not None:
@@ -603,7 +648,6 @@ class FederatedWorker(BaseWorker):
             rf.estimators_ = unpacked_model
             rf.n_features_in_ = self._cached_X_test.shape[1]
             rf.n_outputs_ = 1
-            y_pred = rf.predict(self._cached_X_test)
 
             y_probs = None
             if not actual_is_regressor and len(rf.classes_) == 2:
@@ -616,9 +660,24 @@ class FederatedWorker(BaseWorker):
                     print(f"[{self.worker_name}] [WARN] predict_proba ha restituito "
                           f"{proba_matrix.shape[1]} colonne, attese {len(rf.classes_)}: "
                           f"AUC non calcolabile su questo worker.")
+
+            # Soglia di decisione calibrata dalla baseline (letta da
+            # config_real.json dall'Orchestratore federato e inoltrata qui
+            # via hyperparameters, vedi BaseOrchestrator.
+            # read_decision_threshold_from_config): se disponibile e binario,
+            # sostituisce rf.predict() (argmax interno, soglia implicita
+            # 0.50) con una decisione esplicita sulle stesse probabilità già
+            # calcolate sopra. None -> comportamento invariato.
+            decision_threshold = hyperparameters.get("decision_threshold")
+            if not actual_is_regressor and len(rf.classes_) == 2 and decision_threshold is not None and y_probs is not None:
+                negative_label = rf.classes_[1 - positive_idx]
+                y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+            else:
+                y_pred = rf.predict(self._cached_X_test)
         else:
-            y_pred = unpacked_model.predict(self._cached_X_test)
             y_probs = None
+            positive_idx = None
+            classes = None
             if tree_type == "classifier" and hasattr(unpacked_model, "predict_proba"):
                 try:
                     classes = getattr(unpacked_model, "classes_", None)
@@ -628,6 +687,16 @@ class FederatedWorker(BaseWorker):
                         y_probs = proba_matrix[:, positive_idx]
                 except Exception as e:
                     print(f"[{self.worker_name}] [WARN] predict_proba non disponibile su questo modello: {e}")
+
+            # Stessa logica del ramo sopra: soglia calibrata dalla baseline
+            # se disponibile, altrimenti .predict() nativo (invariato).
+            decision_threshold = hyperparameters.get("decision_threshold")
+            if classes is not None and len(classes) == 2 and decision_threshold is not None and y_probs is not None:
+                positive_label = classes[positive_idx]
+                negative_label = classes[1 - positive_idx]
+                y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+            else:
+                y_pred = unpacked_model.predict(self._cached_X_test)
 
         response = {
             "y_pred": y_pred.tolist() if isinstance(y_pred, np.ndarray) else list(y_pred),

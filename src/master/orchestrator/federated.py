@@ -743,6 +743,17 @@ class FederatedOrchestrator(BaseOrchestrator):
             None if self.environment == "aws"
             else self.select_from_config(self._resolve_dataset_type(payload))
         )
+        # Soglia di decisione calibrata dalla baseline (vedi
+        # VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py):
+        # stesso pattern di feature_selezionate sopra, incluso il guard su AWS
+        # (il file locale config_<dataset_type>.json non esiste sul container
+        # dell'orchestratore in quell'ambiente). None -> ogni worker ricade sul
+        # comportamento di default (argmax/soglia implicita 0.50), vedi
+        # FederatedWorker.exposed_predict_subset_forest.
+        decision_threshold = (
+            None if self.environment == "aws"
+            else self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
+        )
 
         # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
         # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
@@ -809,6 +820,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "dataset_type": self._resolve_dataset_type(payload),
                         "feature_selezionate": feature_selezionate,
                         "tree_type": tree_type,
+                        "decision_threshold": decision_threshold,
                     }
                     if tree_type == "classifier" and global_classes is not None:
                         worker_hyperparameters["global_classes"] = global_classes

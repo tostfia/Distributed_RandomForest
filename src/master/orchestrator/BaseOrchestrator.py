@@ -1115,6 +1115,53 @@ class BaseOrchestrator(ABC):
         if removed:
             print(f"[{self.orchestrator_name}] [CHECKPOINT] Rimosse {removed} parti del checkpoint alberi.")
 
+    def read_decision_threshold_from_config(self, dataset_type: str = "real"):
+        """
+        Legge 'decision_threshold' dal manifesto config_<dataset_type>.json,
+        scritto da run_baseline.py DOPO la calibrazione finale della soglia
+        (vedi VALIDATION_SIZE_FOR_THRESHOLD in run_baseline.py). Stesso
+        pattern/percorso di ricerca file di FederatedOrchestrator.select_from_config
+        (che legge 'feature_selezionate' dallo stesso file), qui condiviso in
+        BaseOrchestrator perché serve sia al percorso centralizzato sia a
+        quello federato.
+
+        Ritorna None (mai un'eccezione) se il file non esiste, non è ancora
+        stato aggiornato con la soglia (run di run_baseline.py precedente
+        alla sua introduzione), o è malformato: in quel caso il chiamante
+        deve ricadere sul comportamento di default (soglia implicita 0.50),
+        esattamente come già succede se 'feature_selezionate' è assente.
+        """
+        config_filename = f"config_{dataset_type}.json"
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
+            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato: "
+                  f"nessuna soglia di decisione da riusare, ricado sul default (0.50).")
+            return None
+
+        try:
+            with open(config_path, "r") as f:
+                config_dati = json.load(f)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_filename} fallita: {e}")
+            return None
+
+        threshold = config_dati.get("decision_threshold")
+        if threshold is None:
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] 'decision_threshold' assente in "
+                  f"{config_filename} (manifesto prodotto da una versione precedente di "
+                  f"run_baseline.py?): ricado sul default (0.50). Rilancia run_baseline.py "
+                  f"per rigenerarlo con la soglia inclusa.")
+            return None
+
+        print(f"[{self.orchestrator_name}] Soglia di decisione letta da {config_path}: {threshold:.4f}")
+        return float(threshold)
+
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
         """
         Implementazione di base: gestisce il checkpoint LOGICO (Metadati su DynamoDB).
@@ -1157,7 +1204,8 @@ class BaseOrchestrator(ABC):
             self,
             predictions_matrix: np.ndarray,
             tree_type: str,
-            global_classes: np.ndarray = None
+            global_classes: np.ndarray = None,
+            decision_threshold: float = None
         ):
             """
             Aggrega le predizioni GREZZE per-albero in un'unica predizione finale per campione.
@@ -1171,10 +1219,18 @@ class BaseOrchestrator(ABC):
 
             Classificazione: predictions_matrix ha shape (n_alberi, n_campioni, n_classi_globali)
             e contiene le probabilità per-albero (predict_proba), già allineate allo stesso
-            spazio di classi globale. Si fa SOFT VOTING (media delle probabilità, poi argmax),
-            lo stesso meccanismo che sklearn usa internamente in RandomForestClassifier —
-            invece del voto di maggioranza sulle etichette dure, che produce una stima di
-            probabilità quantizzata a passi di 1/n_alberi ed è quindi meno informativa per l'AUC.
+            spazio di classi globale. Si fa SOFT VOTING (media delle probabilità), lo stesso
+            meccanismo che sklearn usa internamente in RandomForestClassifier.
+
+            decision_threshold: se fornito (solo binario, ignorato altrimenti), la classe
+            positiva (etichetta con valore maggiore, es. 1 in 0/1) viene assegnata quando
+            la sua probabilità media supera QUESTA soglia, invece del comportamento di
+            default (argmax, equivalente a una soglia implicita di 0.5). Serve ad allineare
+            l'inferenza distribuita alla soglia calibrata dalla baseline (vedi
+            run_baseline.py, VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in
+            config_real.json) invece di ricadere silenziosamente sul default sklearn.
+            None (default) -> comportamento invariato rispetto a prima (argmax).
+
             Regressione: predictions_matrix ha shape (n_alberi, n_campioni) di valori grezzi,
             aggregati con una semplice media (comportamento invariato).
             """
@@ -1193,10 +1249,8 @@ class BaseOrchestrator(ABC):
                     )
                 global_classes = np.asarray(global_classes)
 
-                # Soft voting: media delle probabilità per-albero sulle stesse colonne di classe,
-                # poi argmax — coerente con RandomForestClassifier.predict di sklearn.
+                # Soft voting: media delle probabilità per-albero sulle stesse colonne di classe.
                 avg_proba = np.mean(predictions_matrix, axis=0)
-                final_predictions = global_classes[np.argmax(avg_proba, axis=1)]
 
                 # y_probs (score continuo per l'AUC) è ben definito solo nel caso binario.
                 if len(global_classes) == 2:
@@ -1205,6 +1259,19 @@ class BaseOrchestrator(ABC):
                     y_probs = avg_proba[:, positive_idx]
                 else:
                     y_probs = None
+
+                if decision_threshold is not None and len(global_classes) == 2:
+                    negative_idx = 1 - positive_idx
+                    positive_label = global_classes[positive_idx]
+                    negative_label = global_classes[negative_idx]
+                    final_predictions = np.where(
+                        y_probs >= decision_threshold, positive_label, negative_label
+                    )
+                else:
+                    # Comportamento di default (invariato): argmax, coerente con
+                    # RandomForestClassifier.predict di sklearn -- equivalente a
+                    # soglia implicita 0.5 nel caso binario.
+                    final_predictions = global_classes[np.argmax(avg_proba, axis=1)]
             else:
                 if predictions_matrix.ndim != 2:
                     raise ValueError(
