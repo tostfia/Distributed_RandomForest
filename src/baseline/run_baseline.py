@@ -8,7 +8,10 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)  # i tuoi print restano l'u
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score, f1_score, confusion_matrix
+from sklearn.metrics import (
+    mean_absolute_error, mean_squared_error, precision_score, r2_score,
+    recall_score, roc_auc_score, precision_recall_curve, roc_curve, f1_score, confusion_matrix,
+)
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.config import SystemConfig
 
@@ -418,6 +421,27 @@ def run_baseline():
     # in letteratura come punto di partenza prima di esplorare rapporti
     # diversi.
     UNDERSAMPLING_RATIO = 1.0
+    # Validation set per la calibrazione della soglia di decisione finale
+    # (vedi FASE 4): ritagliato dal train PRIMA dell'undersampling, quindi
+    # con la vera distribuzione sbilanciata (stessa proporzione Benign/
+    # Attacco del test set) -- MAI toccato da undersampling/training.
+    # Nasce per correggere un problema concreto osservato: scegliere la
+    # soglia via ROC/Youden sulle probabilità OOB di un modello addestrato
+    # su train RIBILANCIATO eredita comunque la distorsione del
+    # ribilanciamento (le probabilità OOB sono anch'esse calcolate sullo
+    # stesso train ribilanciato). Un validation set separato, mai
+    # ribilanciato, non ha questo problema -- e resta comunque distinto dal
+    # test set, quindi nessun leakage nella valutazione finale.
+    VALIDATION_SIZE_FOR_THRESHOLD = 0.15
+    # Soglia alternativa scelta con un vincolo di business invece che con
+    # F1-max: "massimizza la recall SUBORDINATAMENTE a un FPR sul
+    # validation set <= TARGET_FPR_CONSTRAINT" (criterio di Neyman-Pearson,
+    # standard nei sistemi IDS reali dove un FPR alto satura il SOC di
+    # falsi allarmi -- vedi discussione). Calcolato in aggiunta alla soglia
+    # F1-max, non al suo posto: il report mostra entrambi gli operating
+    # point, così la scelta finale resta esplicita e motivata, non nascosta
+    # in una costante.
+    TARGET_FPR_CONSTRAINT = 0.01
 
     target_col = "Label"
     BOOT_CONFIG_PATH = os.path.join("./.local_storage", "config.json")
@@ -497,6 +521,10 @@ def run_baseline():
     else:
         SKIP_TUNING = False  # non usata nei rami sintetici, valore neutro
 
+    # Default: nessun validation set (usato solo dal ramo dataset reale, per
+    # la calibrazione della soglia -- vedi VALIDATION_SIZE_FOR_THRESHOLD).
+    validation_df = None
+
     if dataset_type == "synthetic":
         print(">>> FASE 1: Generazione e Preprocessing Dataset Sintetico")
         best_hp_reale = None
@@ -542,7 +570,8 @@ def run_baseline():
             # scalabilità con la baseline single-node (unico scopo di questo
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
-            n_features = tmp_cfg.get("n_features", 100)
+            # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
+            n_features = tmp_cfg.get("n_features", 50)
         else:
             n_features = tmp_cfg.get("n_features", 30)
             # Default allineato a SyntheticDataLoader (n_samples=300000).
@@ -556,7 +585,7 @@ def run_baseline():
         # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
         # target) -- livello moderato, coerente con la pratica comune per
         # dataset sintetici "non banali ma non dominati dal rumore".
-        noise = tmp_cfg.get("noise", 5)
+        noise = tmp_cfg.get("noise", 2.5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
         n_clusters_per_class = tmp_cfg.get("n_clusters_per_class", 2)
@@ -671,6 +700,18 @@ def run_baseline():
         print(" • Preprocessing indipendente sul Test Set...")
         test_df = preprocessor.process(test_df)
 
+        # Validation set per la calibrazione della soglia di decisione
+        # (vedi FASE 4 e VALIDATION_SIZE_FOR_THRESHOLD): ritagliato QUI,
+        # PRIMA dell'undersampling, così mantiene la vera distribuzione
+        # sbilanciata (stessa proporzione Benign/Attacco del test set) --
+        # non toccato da undersampling né usato per il training.
+        print(f" • Split di un validation set ({VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}% del train, "
+              f"distribuzione originale, per la calibrazione della soglia)...")
+        validation_splitter = StratifiedDataSplitter(
+            target_column=target_col, test_size=VALIDATION_SIZE_FOR_THRESHOLD, random_state=RANDOM_SEED
+        )
+        train_df, validation_df = validation_splitter.split(train_df)
+
         print(" • Under-sampling della classe maggioritaria (solo train set)...")
         train_df = undersample_majority_class(
             train_df, target_column=target_col,
@@ -692,6 +733,10 @@ def run_baseline():
     y_train = train_df[target_col]
     X_test = test_df.drop(columns=[target_col])
     y_test = test_df[target_col]
+    # Default: nessun validation set per la calibrazione della soglia
+    # (dataset sintetico, o regressore -- non applicabile). Sovrascritto più
+    # avanti SOLO nel ramo dataset reale, dopo la feature selection.
+    X_val, y_val = None, None
 
     if dataset_type == "synthetic":
         dizionario_feature = {"eliminate": [], "salvate": list(X_train.columns)}
@@ -750,6 +795,8 @@ def run_baseline():
             )
             train_df = fs.fit_transform(train_df)
             test_df = fs.transform(test_df)
+            if validation_df is not None:
+                validation_df = fs.transform(validation_df)
             dizionario_feature = fs.feature_summary_
         else:
             print("\n>>> FASE 2: Esplorazione Spazio Iperparametri (Tuning via stima OOB, "
@@ -774,18 +821,26 @@ def run_baseline():
             # a optuna_oob_hyperparameter_search).
             train_df = best_train_selected
             test_df = best_fs.transform(test_df)
+            if validation_df is not None:
+                validation_df = best_fs.transform(validation_df)
             dizionario_feature = best_fs.feature_summary_
 
-        # Ricostruisce X_train/y_train/X_test/y_test dal train/test ORA
-        # ridotto alle feature selezionate (nel ramo SKIP_TUNING appena
-        # calcolate sopra; nel ramo di tuning, quelle del max_features
-        # vincente) -- necessario perché la costruzione precedente usava
-        # ancora il dataset completo a 69 feature, dato che la feature
-        # selection è stata spostata dopo quel punto.
+        # Ricostruisce X_train/y_train/X_test/y_test (e X_val/y_val, se
+        # presente) dal train/test/validation ORA ridotti alle feature
+        # selezionate (nel ramo SKIP_TUNING appena calcolate sopra; nel ramo
+        # di tuning, quelle del max_features vincente) -- necessario perché
+        # la costruzione precedente usava ancora il dataset completo a 69
+        # feature, dato che la feature selection è stata spostata dopo
+        # quel punto.
         X_train = train_df.drop(columns=[target_col])
         y_train = train_df[target_col]
         X_test = test_df.drop(columns=[target_col])
         y_test = test_df[target_col]
+        if validation_df is not None:
+            X_val = validation_df.drop(columns=[target_col])
+            y_val = validation_df[target_col]
+        else:
+            X_val, y_val = None, None
         print(f" • Volume Train (DOPO la feature selection): {X_train.shape} | "
               f"Volume Test: {X_test.shape}")
 
@@ -1019,13 +1074,86 @@ def run_baseline():
 
     print("\n[LOCAL] Calcolo delle predizioni e latenza sul Test Set indipendente...")
     start_inferenza = time.perf_counter()
-    local_preds = tree_clf.predict(X_test)
-    
-    # Gestione delle probabilità legata al TASK, non al dataset
+
     if user_tree_type == "classifier":
         local_proba = tree_clf.predict_proba(X_test)[:, 1]
+        local_preds_default = tree_clf.predict(X_test)  # soglia implicita 0.50, tenuta per confronto
+
+        if X_val is not None:
+            # --- Soglia di decisione scelta sul VALIDATION SET, non sul
+            # test set --- selezionare la soglia guardando il test set
+            # sarebbe leakage (si taratura un iperparametro, la soglia,
+            # sullo stesso set su cui si riportano poi le metriche finali).
+            # Il validation set (vedi VALIDATION_SIZE_FOR_THRESHOLD) è
+            # ritagliato dal train PRIMA dell'undersampling: mantiene la
+            # vera distribuzione sbilanciata, quindi la soglia scelta qui
+            # non eredita la distorsione di un train ribilanciato (a
+            # differenza di una soglia scelta sulle probabilità OOB di un
+            # modello addestrato su train ribilanciato, che sconterebbe la
+            # stessa distorsione).
+            val_proba = tree_clf.predict_proba(X_val)[:, 1]
+            precisions, recalls, pr_thresholds = precision_recall_curve(y_val, val_proba)
+            # precision_recall_curve restituisce un punto finale (recall=0,
+            # precision=1) senza soglia corrispondente: scartato dal calcolo
+            # dell'F1 qui sotto (precisions[:-1]/recalls[:-1]), altrimenti
+            # pr_thresholds e i due array precision/recall avrebbero
+            # lunghezze diverse.
+            f1_scores = np.where(
+                (precisions[:-1] + recalls[:-1]) > 0,
+                2 * precisions[:-1] * recalls[:-1] / (precisions[:-1] + recalls[:-1] + 1e-12),
+                0.0,
+            )
+            best_idx = int(np.argmax(f1_scores))
+            decision_threshold = float(pr_thresholds[best_idx])
+            print(f"   [SOGLIA] Soglia scelta sul validation set (massimizzazione F1): "
+                  f"{decision_threshold:.4f} (Precision={precisions[best_idx]:.4f}, "
+                  f"Recall={recalls[best_idx]:.4f}, F1={f1_scores[best_idx]:.4f} sul validation; "
+                  f"default implicito di .predict() = 0.50).")
+            local_preds = (local_proba >= decision_threshold).astype(int)
+
+            # --- Soglia alternativa: vincolo di business FPR <= TARGET_FPR_CONSTRAINT ---
+            # Calcolata sullo STESSO validation set (mai sul test), criterio
+            # di Neyman-Pearson: tra le soglie che rispettano il vincolo,
+            # quella con la recall (TPR) più alta -- non un secondo modello,
+            # solo un secondo punto operativo sulla stessa ROC. Tenuta
+            # SEPARATA dalla soglia F1-max scelta sopra (quella resta la
+            # soglia "ufficiale" del modello, usata per local_preds): questo
+            # è un confronto aggiuntivo nel report, non una sostituzione.
+            fpr_val, tpr_val, roc_thresholds = roc_curve(y_val, val_proba)
+            acceptable = np.where(fpr_val <= TARGET_FPR_CONSTRAINT)[0]
+            if len(acceptable) > 0:
+                best_constrained_idx = int(acceptable[np.argmax(tpr_val[acceptable])])
+                threshold_low_fpr = float(roc_thresholds[best_constrained_idx])
+                fpr_at_low = float(fpr_val[best_constrained_idx])
+                tpr_at_low = float(tpr_val[best_constrained_idx])
+                print(f"   [SOGLIA] Soglia alternativa vincolata (FPR <= {TARGET_FPR_CONSTRAINT*100:.1f}% "
+                      f"sul validation): {threshold_low_fpr:.4f} (FPR={fpr_at_low:.4f}, "
+                      f"Recall={tpr_at_low:.4f} sul validation).")
+                local_preds_low_fpr = (local_proba >= threshold_low_fpr).astype(int)
+            else:
+                # Nessuna soglia nella ROC del validation rispetta il vincolo
+                # (può succedere con un vincolo molto stringente su un
+                # validation piccolo/rumoroso): nessuna soglia alternativa
+                # calcolabile, non un errore.
+                threshold_low_fpr = None
+                local_preds_low_fpr = None
+                print(f"   [SOGLIA] Nessuna soglia nel validation rispetta il vincolo "
+                      f"FPR <= {TARGET_FPR_CONSTRAINT*100:.1f}%: soglia alternativa non disponibile.")
+        else:
+            # Nessun validation set disponibile (dataset sintetico): soglia
+            # di default, comportamento invariato rispetto a prima.
+            decision_threshold = 0.5
+            local_preds = local_preds_default
+            threshold_low_fpr = None
+            local_preds_low_fpr = None
     else:
         local_proba = None
+        local_preds_default = None
+        decision_threshold = None
+        threshold_low_fpr = None
+        local_preds_low_fpr = None
+        local_preds = tree_clf.predict(X_test)
+
     tempo_inferenza_totale = time.perf_counter() - start_inferenza
 
     # ---------------------------------------------------------
@@ -1038,13 +1166,60 @@ def run_baseline():
         test_f1 = f1_score(y_test, local_preds, zero_division=0)
         test_roc_auc = roc_auc_score(y_test, local_proba) if local_proba is not None else 0.0
         cm = confusion_matrix(y_test, local_preds)
+        tn, fp, fn, tp = cm.ravel()
+        test_fpr = float(fp / (fp + tn)) if (fp + tn) > 0 else 0.0
+
+        # Metriche a soglia di default (0.50), tenute SOLO per confronto in
+        # relazione -- non sono quelle "ufficiali" del modello, che restano
+        # quelle a decision_threshold (vedi sopra).
+        test_accuracy_default = np.mean(local_preds_default == y_test)
+        test_precision_default = precision_score(y_test, local_preds_default, zero_division=0)
+        test_recall_default = recall_score(y_test, local_preds_default, zero_division=0)
+        test_f1_default = f1_score(y_test, local_preds_default, zero_division=0)
+        cm_default = confusion_matrix(y_test, local_preds_default)
+        tn_d, fp_d, _, _ = cm_default.ravel()
+        test_fpr_default = float(fp_d / (fp_d + tn_d)) if (fp_d + tn_d) > 0 else 0.0
+
+        # Secondo operating point: soglia vincolata FPR<=TARGET_FPR_CONSTRAINT
+        # sul validation, VALUTATA QUI sul test set (mai usata per scegliere
+        # la soglia, solo per riportarne l'effetto reale) -- vedi discussione
+        # su criterio di Neyman-Pearson sopra.
+        if local_preds_low_fpr is not None:
+            test_accuracy_low_fpr = np.mean(local_preds_low_fpr == y_test)
+            test_precision_low_fpr = precision_score(y_test, local_preds_low_fpr, zero_division=0)
+            test_recall_low_fpr = recall_score(y_test, local_preds_low_fpr, zero_division=0)
+            test_f1_low_fpr = f1_score(y_test, local_preds_low_fpr, zero_division=0)
+            cm_low_fpr = confusion_matrix(y_test, local_preds_low_fpr)
+            tn_l, fp_l, _, _ = cm_low_fpr.ravel()
+            test_fpr_low_fpr = float(fp_l / (fp_l + tn_l)) if (fp_l + tn_l) > 0 else 0.0
+            soglia_vincolata_fpr = {
+                "soglia": threshold_low_fpr,
+                "accuracy": test_accuracy_low_fpr,
+                "precision": test_precision_low_fpr,
+                "recall": test_recall_low_fpr,
+                "f1": test_f1_low_fpr,
+                "fpr": test_fpr_low_fpr,
+                "matrice_confusione": cm_low_fpr.tolist(),
+            }
+        else:
+            soglia_vincolata_fpr = None
 
         metriche_test = {
             "accuracy": test_accuracy,
             "precision": test_precision,
             "recall": test_recall,
             "f1": test_f1,
-            "roc_auc": test_roc_auc
+            "roc_auc": test_roc_auc,
+            "fpr": test_fpr,
+            "decision_threshold": decision_threshold,
+            "confronto_soglia_default_0_50": {
+                "accuracy": test_accuracy_default,
+                "precision": test_precision_default,
+                "recall": test_recall_default,
+                "f1": test_f1_default,
+                "fpr": test_fpr_default,
+            },
+            "soglia_vincolata_fpr": soglia_vincolata_fpr,
         }
     else:
         test_mse = mean_squared_error(y_test, local_preds)
@@ -1082,6 +1257,7 @@ def run_baseline():
         "dataset_shape": {
             "train": list(X_train.shape),
             "test": list(X_test.shape),
+            "validation": list(X_val.shape) if X_val is not None else None,
             "dataset_type": dataset_type,
             "tree_type": user_tree_type,
         },
@@ -1160,14 +1336,62 @@ def run_baseline():
     print(f"\n3. PERFORMANCE REALI SUL TEST SET ({user_tree_type.upper()})")
     print(LINEA_SINGOLA)
     if user_tree_type == "classifier":
+        soglia_desc = (
+            "scelta su validation set separato, massimizzazione F1 -- vedi sezione 3b"
+            if X_val is not None else
+            "default 0.50 (nessun validation set per questo dataset)"
+        )
+        print(f"  ▸ Soglia di decisione: {metriche_test['decision_threshold']:.4f} ({soglia_desc})")
         print(f"  ▸ ACCURACY SUL TEST SET   : {metriche_test['accuracy'] * 100:6.2f}%")
         print(f"  ▸ PRECISION SUL TEST SET  : {metriche_test['precision'] * 100:6.2f}%")
         print(f"  ▸ RECALL SUL TEST SET     : {metriche_test['recall'] * 100:6.2f}%")
         print(f"  ▸ F1-SCORE SUL TEST SET   : {metriche_test['f1'] * 100:6.2f}%")
+        print(f"  ▸ FPR SUL TEST SET        : {metriche_test['fpr'] * 100:6.2f}%")
         print(f"  ▸ ROC-AUC SUL TEST SET    : {metriche_test['roc_auc']:6.4f}")
         print("\n  Matrice di Confusione sul Test Set:")
         for riga in cm:
             print(" " * 6 + " ".join(f"[{val:4d}]" for val in riga))
+
+        d = metriche_test["confronto_soglia_default_0_50"]
+        print(f"\n3b. CONFRONTO CON LA SOGLIA DI DEFAULT (0.50, quella implicita di .predict())")
+        print(LINEA_SINGOLA)
+        print(f"  {'Metrica':<12} | {'Soglia scelta':>14} | {'Soglia 0.50':>12} | {'Delta':>8}")
+        for nome, chiave in [("Accuracy", "accuracy"), ("Precision", "precision"),
+                              ("Recall", "recall"), ("F1-Score", "f1"), ("FPR", "fpr")]:
+            v_scelta = metriche_test[chiave] * 100
+            v_default = d[chiave] * 100
+            print(f"  {nome:<12} | {v_scelta:13.2f}% | {v_default:11.2f}% | {v_scelta - v_default:+7.2f}pp")
+        print("  ▸ Nota: la soglia è scelta su un validation set separato (ritagliato dal train "
+              "PRIMA dell'undersampling, quindi con la vera distribuzione sbilanciata), non sul "
+              "test set -- evita sia il leakage (tarare la soglia sullo stesso set su cui si "
+              "riportano le metriche finali) sia la distorsione di calibrazione che una soglia "
+              "scelta su un train ribilanciato erediterebbe.")
+
+        sv = metriche_test["soglia_vincolata_fpr"]
+        print(f"\n3c. OPERATING POINT ALTERNATIVO -- VINCOLO DI BUSINESS FPR <= "
+              f"{TARGET_FPR_CONSTRAINT*100:.1f}% (criterio di Neyman-Pearson)")
+        print(LINEA_SINGOLA)
+        if sv is not None:
+            print(f"  ▸ Soglia: {sv['soglia']:.4f} (scelta sul validation: tra le soglie con FPR "
+                  f"<= {TARGET_FPR_CONSTRAINT*100:.1f}%, quella con recall più alta)")
+            print(f"  {'Metrica':<12} | {'F1-max':>10} | {'FPR<={:.0f}%'.format(TARGET_FPR_CONSTRAINT*100):>10} | {'Delta':>8}")
+            for nome, chiave in [("Accuracy", "accuracy"), ("Precision", "precision"),
+                                  ("Recall", "recall"), ("F1-Score", "f1"), ("FPR", "fpr")]:
+                v_f1max = metriche_test[chiave] * 100
+                v_vinc = sv[chiave] * 100
+                print(f"  {nome:<12} | {v_f1max:9.2f}% | {v_vinc:9.2f}% | {v_vinc - v_f1max:+7.2f}pp")
+            print("\n  Matrice di Confusione (soglia vincolata FPR):")
+            for riga in sv["matrice_confusione"]:
+                print(" " * 6 + " ".join(f"[{val:4d}]" for val in riga))
+            print(f"  ▸ Nota: soglia scelta e valutata rispettivamente su validation e test set "
+                  f"(mai la stessa), stesso principio della soglia F1-max in 3b -- nessun leakage. "
+                  f"Utile per un confronto esplicito 'F1-max' (obiettivo bilanciato) vs 'FPR "
+                  f"vincolato' (obiettivo operativo tipico di un SOC, dove un FPR alto produce "
+                  f"alert fatigue), da motivare in relazione in base al caso d'uso.")
+        else:
+            print(f"  ▸ Nessuna soglia nel validation set rispetta il vincolo FPR <= "
+                  f"{TARGET_FPR_CONSTRAINT*100:.1f}%: operating point alternativo non disponibile "
+                  f"con questo modello/validation set.")
     else:
         print(f"  ▸ MSE SUL TEST SET   : {metriche_test['mse']:.4f}")
         print(f"  ▸ RMSE SUL TEST SET  : {metriche_test['rmse']:.4f}")
@@ -1184,7 +1408,8 @@ def run_baseline():
     print(f"  • T_1node - Addestramento MULTICORE (n_jobs=-1): {t_1node_parallel:8.4f} s  "
           f"[{cpu_disponibili} core, speedup locale {speedup_multicore:.2f}x]")
     print(f"  • Tempo Totale di Inferenza (Testing Set) : {tempo_inferenza_totale:8.4f} s")
-    print(f"  • Volume dati: train={X_train.shape}  test={X_test.shape}")
+    print(f"  • Volume dati: train={X_train.shape}  test={X_test.shape}"
+          + (f"  validation={X_val.shape}" if X_val is not None else ""))
 
     print(f"\n5. COME CONFRONTARE QUESTI NUMERI COL CLUSTER")
     print(LINEA_SINGOLA)

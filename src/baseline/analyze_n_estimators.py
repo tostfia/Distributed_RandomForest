@@ -123,6 +123,12 @@ CLF_TARGET_ROWS_PER_DAY = 100_000  # stesso valore di run_baseline.py
 CLF_UNDERSAMPLING_RATIO = 1.0
 CLF_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
 CLF_DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
+# Stessi valori di run_baseline.py (MULTICOLLINEARITY_DISTANCE_THRESHOLD e
+# VALIDATION_SIZE_FOR_THRESHOLD): se li cambi lì, cambiali identici anche
+# qui, altrimenti il train set su cui si misura la curva OOB non è più lo
+# stesso che run_baseline.py userebbe davvero per l'addestramento finale.
+CLF_MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.2
+CLF_VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 
 # ---------------------------------------------------------------------------
 # REGRESSIONE -- dataset sintetico
@@ -174,9 +180,13 @@ def prepare_classifier_dataset(tuned_hp):
     """
     Ricostruisce lo STESSO train set che run_baseline.py userebbe con questi
     iperparametri: campionamento ribilanciato per giorno, binarizzazione,
-    split, preprocessing, under-sampling, feature selection con lo stesso
-    max_features vincente del tuning -- poi un sottocampionamento SOLO
-    diagnostico (vedi CLF_DIAGNOSTIC_SUBSAMPLE_SIZE).
+    split, preprocessing, split del validation set per la calibrazione
+    della soglia (scartato qui: non serve a questa diagnostica, ma va
+    comunque rimosso dal train PRIMA dell'undersampling per restare fedeli
+    al volume/composizione realmente usati in addestramento), under-
+    sampling, feature selection con lo stesso max_features vincente del
+    tuning -- poi un sottocampionamento SOLO diagnostico (vedi
+    CLF_DIAGNOSTIC_SUBSAMPLE_SIZE).
     """
     data_folder = os.environ.get("DATASET_LOCAL_PATH", "./dataset_cache")
     if not os.path.exists(data_folder):
@@ -185,7 +195,7 @@ def prepare_classifier_dataset(tuned_hp):
             f"Imposta DATASET_LOCAL_PATH come per run_baseline.py."
         )
 
-    print(f"[1/4] Caricamento dati da '{data_folder}' (campionamento ribilanciato per giorno, "
+    print(f"[1/5] Caricamento dati da '{data_folder}' (campionamento ribilanciato per giorno, "
           f"target ~{CLF_TARGET_ROWS_PER_DAY} righe/giorno)...")
     loader = RawCSVDataLoader(
         data_url=data_folder, dataset_seed=RANDOM_SEED,
@@ -193,14 +203,28 @@ def prepare_classifier_dataset(tuned_hp):
     )
     df_raw = loader.load()
 
-    print("[2/4] Binarizzazione + split stratificato + preprocessing...")
+    print("[2/5] Binarizzazione + split stratificato + preprocessing...")
     preprocessor = CICIDSPreprocessor(target_column=CLF_TARGET_COL)
     splitter = StratifiedDataSplitter(target_column=CLF_TARGET_COL, test_size=TEST_SIZE, random_state=RANDOM_SEED)
     df_binarized = preprocessor.binarize_target(df_raw)
     train_df, _ = splitter.split(df_binarized)
     train_df = preprocessor.process(train_df)
 
-    print("[3/4] Under-sampling della classe maggioritaria (solo train set) + feature selection "
+    # Stesso split del validation set fatto in run_baseline.py, PRIMA
+    # dell'undersampling (vedi VALIDATION_SIZE_FOR_THRESHOLD lì): il
+    # validation stesso non serve a questa diagnostica (non si sceglie
+    # nessuna soglia qui), ma va comunque tolto dal train per riottenere
+    # lo stesso volume/composizione su cui run_baseline.py addestra
+    # davvero il modello finale -- altrimenti la curva OOB misurata qui
+    # userebbe più righe di quelle che il modello di produzione vede.
+    print(f"[3/5] Split di un validation set ({CLF_VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}% del train, "
+          f"come in run_baseline.py -- scartato qui, non serve a questa diagnostica)...")
+    validation_splitter = StratifiedDataSplitter(
+        target_column=CLF_TARGET_COL, test_size=CLF_VALIDATION_SIZE_FOR_THRESHOLD, random_state=RANDOM_SEED
+    )
+    train_df, _ = validation_splitter.split(train_df)
+
+    print("[4/5] Under-sampling della classe maggioritaria (solo train set) + feature selection "
           f"(max_features='{tuned_hp.get('max_features', 'sqrt')}', dal tuning)...")
     train_df = undersample_majority_class(
         train_df, target_column=CLF_TARGET_COL,
@@ -210,13 +234,14 @@ def prepare_classifier_dataset(tuned_hp):
     fs = CICIDSFeatureSelector(
         target_column=CLF_TARGET_COL, rf_random_state=RANDOM_SEED,
         rf_max_features=tuned_hp.get("max_features", "sqrt"),
-        reduce_multicollinearity=True, multicollinearity_distance_threshold=0.3,
+        reduce_multicollinearity=True,
+        multicollinearity_distance_threshold=CLF_MULTICOLLINEARITY_DISTANCE_THRESHOLD,
         dendrogram_plot_path=f"feature_correlation_dendrogram_{tuned_hp.get('max_features', 'sqrt')}_n_est_diagnostica.png",
     )
     train_df = fs.fit_transform(train_df)
 
     if len(train_df) > CLF_DIAGNOSTIC_SUBSAMPLE_SIZE:
-        print(f"[4/4] Sottocampionamento diagnostico: {len(train_df):,} -> "
+        print(f"[5/5] Sottocampionamento diagnostico: {len(train_df):,} -> "
               f"{CLF_DIAGNOSTIC_SUBSAMPLE_SIZE:,} righe (stratificato, "
               f"seed={RANDOM_SEED}).".replace(",", "."))
         train_df, _ = train_test_split(
@@ -225,7 +250,7 @@ def prepare_classifier_dataset(tuned_hp):
         )
         train_df = train_df.reset_index(drop=True)
     else:
-        print(f"[4/4] Train set ({len(train_df):,} righe) sotto la soglia di sottocampionamento: "
+        print(f"[5/5] Train set ({len(train_df):,} righe) sotto la soglia di sottocampionamento: "
               f"uso tutte le righe disponibili.".replace(",", "."))
 
     X = train_df.drop(columns=[CLF_TARGET_COL]).to_numpy()

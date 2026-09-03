@@ -27,6 +27,19 @@ SOURCE_DAY_COLUMN = "_capture_day"
 # "Friday-02-03-2018_TrafficForML_CICFlowMeter.csv" ->  "Friday-02-03-2018"
 _DAY_PATTERN = re.compile(r"^([A-Za-z]+-\d{2}-\d{2}-\d{4})")
 
+# Giorni di cattura in cui il CIC-IDS2018 include l'attacco "Infiltration"
+# (fonte: documentazione ufficiale del dataset, unb.ca/cic/datasets/ids-2018
+# -- Infiltration compare SOLO in questi due file, a differenza di
+# DDoS/DoS/Bot/Brute Force che ricorrono anche altrove con moltissimi
+# esempi). Anche dentro questi due file Infiltration resta una minoranza
+# rispetto al Benign catturato lo stesso giorno: un campionamento uniforme
+# riga-per-riga (come per gli altri 8 giorni) la dilluirebbe ulteriormente
+# PRIMA ancora che split/undersampling possano intervenire -- diagnosticato
+# empiricamente in diagnose_false_negatives.py (Infiltration: recall
+# 15.56% sul test, 99.4% dei Falsi Negativi totali del modello). Vedi
+# RawCSVDataLoader._rebalance_protected_source per il trattamento speciale.
+DEFAULT_PROTECTED_MINORITY_DAYS = frozenset({"Wednesday-28-02-2018", "Thursday-01-03-2018"})
+
 
 def _extract_capture_day(source: str) -> str:
     """
@@ -86,6 +99,22 @@ class RawCSVDataLoader(DatasetLoader):
     ripetere il conteggio ad ogni run — rilevante soprattutto su S3, dove
     ogni conteggio è comunque una chiamata di rete, seppur economica.
 
+    GIORNI "PROTETTI" (protected_minority_days) -- eccezione al punto 3
+    sopra. Alcuni giorni contengono una classe di attacco rara che non
+    compare in nessun altro file (es. Infiltration, vedi
+    DEFAULT_PROTECTED_MINORITY_DAYS): campionarli con la stessa fraction
+    uniforme riga-per-riga usata per gli altri giorni diluirebbe
+    ulteriormente una classe già scarsa PRIMA che split/undersampling
+    possano intervenire. Per questi giorni il loader:
+      1. legge il file per intero (fraction=1.0, nessun campionamento in
+         streaming);
+      2. tiene TUTTE le righe non-Benign (qualunque sotto-tipo di attacco
+         presente in quel file);
+      3. sotto-campiona SOLO il Benign per restare vicino a
+         target_rows_per_day (budget = target_rows_per_day - n_non_benign),
+         stesso principio di undersample_majority_class ma applicato
+         per-file, PRIMA dello split (vedi _rebalance_protected_source).
+
     TAGGING DEL GIORNO DI CATTURA (tag_source_day) -- se True, aggiunge la
     colonna SOURCE_DAY_COLUMN ad ogni riga con il giorno di provenienza.
     Necessario per lo split day-aware diagnostico (dayaware_holdout.py) a
@@ -106,6 +135,7 @@ class RawCSVDataLoader(DatasetLoader):
         s3_anon: bool = False,
         target_rows_per_day: Optional[int] = None,
         tag_source_day: bool = False,
+        protected_minority_days: Optional[frozenset] = None,
     ):
         if isinstance(data_url, str):
             self.data_url = data_url.strip().strip("'\"")
@@ -119,6 +149,14 @@ class RawCSVDataLoader(DatasetLoader):
         self.s3_anon = s3_anon
         self.target_rows_per_day = target_rows_per_day
         self.tag_source_day = tag_source_day
+        # Overridabile per dataset/versioni future del CICIDS con giorni
+        # "rari" diversi; di default i due giorni Infiltration documentati
+        # sopra (vedi DEFAULT_PROTECTED_MINORITY_DAYS).
+        self.protected_minority_days = (
+            protected_minority_days
+            if protected_minority_days is not None
+            else DEFAULT_PROTECTED_MINORITY_DAYS
+        )
 
         # DAO dedicati per tipo di sorgente (non per ambiente di deploy)
         self._local_dao = LocalFileSystemDAO()
@@ -156,8 +194,26 @@ class RawCSVDataLoader(DatasetLoader):
 
         for source in sources:
             per_source_fraction = self.sample_fraction
+            is_protected = (
+                self.target_rows_per_day is not None
+                and _extract_capture_day(source) in self.protected_minority_days
+            )
+
             if self.target_rows_per_day is not None:
                 total_rows = row_counts.get(source, 0)
+
+                if is_protected:
+                    # Vedi DEFAULT_PROTECTED_MINORITY_DAYS / docstring
+                    # classe: nessuna fraction uniforme qui, si legge tutto
+                    # e si ribilancia dopo (_rebalance_protected_source).
+                    print(f"   - Lettura sorgente PROTETTA (classe minoritaria nota): {source} "
+                          f"({total_rows} righe totali -> lettura completa, poi "
+                          f"ribilanciamento locale Benign/non-Benign)")
+                    df_temp = self._read_single_csv(source=source, sample_fraction=1.0)
+                    df_temp = self._rebalance_protected_source(df_temp, source)
+                    chunks.append(df_temp)
+                    continue
+
                 per_source_fraction = (
                     min(1.0, self.target_rows_per_day / total_rows) if total_rows > 0 else 1.0
                 )
@@ -184,6 +240,51 @@ class RawCSVDataLoader(DatasetLoader):
                 print(f"     {day:<25} {count:>8} righe")
 
         return df
+
+    def _rebalance_protected_source(self, df_temp: pd.DataFrame, source: str) -> pd.DataFrame:
+        """
+        Ribilanciamento locale per un file "protetto" (vedi
+        DEFAULT_PROTECTED_MINORITY_DAYS / docstring classe): tiene TUTTE le
+        righe non-Benign (qualunque sotto-tipo di attacco presente in
+        questo file, non solo Infiltration) e sotto-campiona SOLO il
+        Benign per restare vicino a target_rows_per_day -- stesso
+        principio di undersample_majority_class (undersampling.py), ma
+        applicato qui per-singolo-file, PRIMA dello split, così una classe
+        già rara non viene ulteriormente diluita da un campionamento in
+        streaming cieco al Label.
+        """
+        if "Label" not in df_temp.columns:
+            print(f"     [ATTENZIONE] Colonna 'Label' assente in '{source}': impossibile "
+                  f"ribilanciare per classe, file tenuto per intero senza campionamento.")
+            return df_temp
+
+        benign_mask = df_temp["Label"].astype(str).str.strip() == "Benign"
+        non_benign_df = df_temp[~benign_mask]
+        benign_df = df_temp[benign_mask]
+
+        n_non_benign = len(non_benign_df)
+        benign_budget = max(0, self.target_rows_per_day - n_non_benign)
+
+        if len(benign_df) > benign_budget:
+            benign_df = (
+                benign_df.sample(n=benign_budget, random_state=self.dataset_seed)
+                if benign_budget > 0
+                else benign_df.iloc[0:0]
+            )
+
+        result = pd.concat([non_benign_df, benign_df], ignore_index=True)
+        # Mescolato (stessa igiene applicata in undersample_majority_class):
+        # altrimenti tutte le righe non-Benign finirebbero in blocco
+        # all'inizio del file.
+        result = result.sample(frac=1.0, random_state=self.dataset_seed).reset_index(drop=True)
+
+        print(f"     [RIBILANCIAMENTO LOCALE] '{source}': {n_non_benign} righe non-Benign "
+              f"mantenute INTERE (nessun campionamento), Benign ridotto da "
+              f"{(benign_mask).sum()} a {len(benign_df)} righe (budget = "
+              f"target_rows_per_day - non_benign = {self.target_rows_per_day} - "
+              f"{n_non_benign}). Righe totali risultanti: {len(result)}.")
+
+        return result
 
     def _get_row_counts(self, sources: List[str]) -> dict:
         """
