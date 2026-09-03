@@ -18,7 +18,6 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.preprocessing import CICIDSPreprocessor
-from src.shared.utilities.featureselection import CICIDSFeatureSelector
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import (
@@ -45,7 +44,6 @@ TARGET_ROWS_PER_DAY = 100_000
 # METRICHE (quello sui tempi resterebbe comunque valido, essendo
 # indipendente da questi due parametri).
 UNDERSAMPLING_RATIO = 1.0
-MULTICOLLINEARITY_DISTANCE_THRESHOLD = 0.2
 # Stesso valore di run_baseline.py: 15% del train ritagliato PRIMA
 # dell'undersampling. Nella baseline serve a calibrare la soglia di
 # decisione su un validation set con la vera distribuzione sbilanciata; qui
@@ -246,34 +244,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- FEATURE SELECTION (Solo Real) ---
         if dataset_type == "real":
-            # Letto dal manifesto (scritto da run_baseline.py) invece di un
-            # letterale fisso: permette di rilanciare lo stesso job con soglie
-            # diverse (es. un valore positivo per un filtro più aggressivo)
-            # senza dover editare questo file — utile per un ablation study.
-            # Default allineato a IMPORTANCE_THRESHOLD di run_baseline.py
-            # (0.0, non più 0.05): altrimenti il flusso "di default" (nessun
-            # override nel payload) selezionerebbe un set di feature diverso
-            # da quello della baseline anche a parità di tutto il resto.
-            importance_threshold = payload.get("importance_threshold", 0.0)
-            # rf_max_features/reduce_multicollinearity/multicollinearity_
-            # distance_threshold prima assenti qui (uso dei default della
-            # classe, non quelli di run_baseline.py): la feature selection
-            # produceva un set di feature diverso da quello della baseline
-            # anche a parità di importance_threshold. rf_max_features letto
-            # dagli iperparametri del payload (lo stesso max_features vincente
-            # del tuning, già usato più avanti per costruire gli alberi -- vedi
-            # _execute_training_step), non ridichiarato qui a parte.
-            fs = CICIDSFeatureSelector(
-                target_column=target_col,
-                importance_threshold=importance_threshold,
-                rf_random_state=base_seed,
-                rf_max_features=hp.get("max_features", "sqrt" if tree_type == "classifier" else 1 / 3),
-                reduce_multicollinearity=True,
-                multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
-                dendrogram_plot_path=f"feature_correlation_dendrogram_{job_id}_centralized.png",
-            )
-            train_df = fs.fit_transform(train_df)
-            test_df = fs.transform(test_df)
+            # PRIMA qui si rifaceva un fit COMPLETO di CICIDSFeatureSelector
+            # (un Random Forest + permutation importance da zero) sul lato
+            # distribuito -- duplicando un lavoro che la baseline ha già
+            # fatto, e per giunta rischiando di produrre un set di feature
+            # DIVERSO da quello della baseline anche a parità di
+            # iperparametri (nessuna garanzia che un fit indipendente
+            # converga esattamente sulle stesse feature). Il tuning e la
+            # feature selection restano ESCLUSIVAMENTE compiti della
+            # baseline (run_baseline.py): il percorso distribuito si limita
+            # a consumarne l'output già calcolato, esattamente come già
+            # fa federatedWorker.py (_resolve_selected_features) -- stesso
+            # meccanismo, stesso file, ora condiviso via
+            # BaseOrchestrator.read_selected_features_from_config.
+            feature_selezionate = self.read_selected_features_from_config(dataset_type)
+            if feature_selezionate is not None:
+                colonne_da_tenere = [c for c in feature_selezionate if c != target_col] + [target_col]
+                print(f"[{self.orchestrator_name}] Applicazione spazio feature dalla baseline "
+                      f"({len(feature_selezionate)} colonne).")
+                train_df = train_df[colonne_da_tenere]
+                test_df = test_df[colonne_da_tenere]
+            else:
+                print(f"[{self.orchestrator_name}] [ATTENZIONE] Nessuna feature selezionata "
+                      f"disponibile da config_real.json: uso il set completo (69 feature circa). "
+                      f"Esegui prima run_baseline.py per un confronto allineato alla baseline.")
 
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":

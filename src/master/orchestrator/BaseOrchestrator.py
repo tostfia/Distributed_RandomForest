@@ -1115,6 +1115,55 @@ class BaseOrchestrator(ABC):
         if removed:
             print(f"[{self.orchestrator_name}] [CHECKPOINT] Rimosse {removed} parti del checkpoint alberi.")
 
+    def read_selected_features_from_config(self, dataset_type: str = "real"):
+        """
+        Legge 'feature_selezionate' dal manifesto config_<dataset_type>.json,
+        prodotto da run_baseline.py (tuning + feature selection, permutation
+        importance OOB + riduzione multicollinearità). Condivisa tra
+        centralized.py e FederatedOrchestrator.select_from_config: entrambi i
+        percorsi distribuiti devono SOLO applicare questa lista (subset di
+        colonne), MAI ricalcolare la feature selection da soli -- rifittare
+        un CICIDSFeatureSelector sul lato distribuito duplicherebbe lavoro
+        già fatto dalla baseline (un fit di RF + permutation importance),
+        e in generale rischierebbe di produrre un set di feature diverso da
+        quello della baseline anche a parità di iperparametri, invalidando
+        il confronto. Stesso percorso di ricerca file di
+        read_decision_threshold_from_config.
+
+        Ritorna None (mai un'eccezione) se il file non esiste o la chiave è
+        assente/vuota: il chiamante deve ricadere sul set di feature completo,
+        con un avviso esplicito (mai un fallback silenzioso).
+        """
+        config_filename = f"config_{dataset_type}.json"
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
+            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato in "
+                  f"nessuno dei percorsi cercati: nessuna feature selezionata da riusare.")
+            return None
+
+        try:
+            with open(config_path, "r") as f:
+                config_dati = json.load(f)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_filename} fallita: {e}")
+            return None
+
+        feature_selezionate = config_dati.get("feature_selezionate", None)
+        if not feature_selezionate:
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] 'feature_selezionate' assente o vuoto "
+                  f"in {config_filename}.")
+            return None
+
+        print(f"[{self.orchestrator_name}] Config caricata da {config_path}. "
+              f"Trovate {len(feature_selezionate)} feature.")
+        return feature_selezionate
+
     def read_decision_threshold_from_config(self, dataset_type: str = "real"):
         """
         Legge 'decision_threshold' dal manifesto config_<dataset_type>.json,

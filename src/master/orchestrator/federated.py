@@ -1150,30 +1150,11 @@ class FederatedOrchestrator(BaseOrchestrator):
         return []
 
     def select_from_config(self, dataset_type: str = "real"):
-        config_filename = f"config_{dataset_type}.json"
-        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
-
-        if not os.path.exists(config_path):
-            current_file_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
-            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
-
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    config_dati = json.load(f)
-                feature_selezionate = config_dati.get("feature_selezionate", None)
-                if not feature_selezionate:
-                    print(f"[{self.orchestrator_name}] [ATTENZIONE] 'feature_selezionate' assente o vuoto nel config.")
-                    return None
-                print(f"[{self.orchestrator_name}] Config caricata da {config_path}. Trovate {len(feature_selezionate)} feature.")
-                return feature_selezionate
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [ERRORE] Lettura config fallita: {e}")
-        else:
-            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato in nessuno dei percorsi:")
-            print(f"  • {config_path}")
-        return None
+        """Alias storico: delega al metodo condiviso in BaseOrchestrator
+        (read_selected_features_from_config), riusato ora anche da
+        centralized.py. Mantenuto per non rompere le chiamate esistenti in
+        questo file."""
+        return self.read_selected_features_from_config(dataset_type)
 
 if __name__ == "__main__":
     print("[BOOT] Avvio del nodo Orchestratore Federato...")
