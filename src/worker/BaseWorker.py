@@ -279,7 +279,7 @@ class BaseWorker(Service, ABC):
 
         # 2. CALCOLO DINAMICO DEI CORE
         # Su ECS Fargate ogni task worker ha la propria CPU DEDICATA E ISOLATA
-        # (quella assegnata con WORKER_CPU nella task definition in deploy.sh):
+        # (quella assegnata con WORKER_CPU nella task definition in Terraform (ecs_task_definitions.tf)):
         # non condivide MAI la macchina fisica con gli altri worker del cluster,
         # indipendentemente da quanti risultano registrati nel ServiceRegistry.
         # La divisione dei core "per co-locazione" ha senso SOLO in locale/Docker

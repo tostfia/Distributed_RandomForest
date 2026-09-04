@@ -29,7 +29,7 @@ variable "training_mode" {
 variable "num_workers" {
   description = "Numero di worker da avviare (desired-count in centralized, numero di indici fissi 1..N in federated)."
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "orchestrator_desired_count" {
@@ -47,7 +47,7 @@ variable "worker_cpu" {
 variable "worker_memory" {
   description = "Memoria (MiB) allocata per worker. Deve essere un valore compatibile con worker_cpu secondo le combinazioni Fargate."
   type        = string
-  default     = "16384"
+  default     = "8192"
 }
 
 variable "orchestrator_cpu" {

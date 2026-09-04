@@ -50,7 +50,7 @@ def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
     il ramo Docker né quello 'lsof sulla porta locale' possono funzionare qui.
 
     In centralized il worker scelto è arbitrario (sono intercambiabili per
-    design, vedi commento in deploy.sh) e worker_index viene ignorato: si
+    design, vedi commento in Terraform, ecs_task_definitions.tf) e worker_index viene ignorato: si
     colpisce sempre 'worker-service'. In federated, worker_index (1-based)
     viene scelto dal chiamante (vedi
     BaseTestScenario._pick_worker_index_with_real_work) invece di essere

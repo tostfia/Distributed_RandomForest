@@ -21,7 +21,7 @@ set -e
 # collegata, senza persistenza server-side).
 #
 # Prerequisiti:
-#   - deploy.sh già eseguito con successo (worker-service/orchestrator-service
+#   - 'terraform apply' già eseguito con successo (worker-service/orchestrator-service
 #     RUNNING sul cluster 'forest-cluster')
 #   - .env con ENV_MODE=aws e credenziali AWS Academy correnti
 #   - engine.py deve leggere la scelta da os.environ.get("SCENARIO") prima
@@ -62,7 +62,11 @@ fi
 TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
 REGION="${ENV_REGION:-us-east-1}"
 NUM_WORKERS="${ENV_NUM_WORKERS:-2}"
-BUCKET_NAME="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
+if [ -z "$ENV_BUCKET_NAME" ]; then
+  echo "[ERRORE] DATASETS_BUCKET_NAME non impostato nel .env."
+  exit 1
+fi
+BUCKET_NAME="$ENV_BUCKET_NAME"
 CLUSTER_NAME="forest-cluster"
 REPO_NAME="rf-distributed"
 SG_NAME="rf-distributed-sg"
@@ -171,7 +175,7 @@ for arn in $ALL_SERVICE_ARNS; do
   fi
 done
 if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
-  echo "[ERRORE] Nessun Service worker/orchestrator trovato sul cluster '$CLUSTER_NAME'. Hai lanciato deploy.sh?"
+  echo "[ERRORE] Nessun Service worker/orchestrator trovato sul cluster '$CLUSTER_NAME'. Hai lanciato 'terraform apply'?"
   exit 1
 fi
 echo "    Service trovati: ${TARGET_SERVICES[*]}"
@@ -190,7 +194,7 @@ for ((i=0; i<TOTAL_SERVICES; i+=CHUNK_SIZE)); do
 done
 echo "    OK, infrastruttura pronta."
 
-echo "==> [3/5] Recupero VPC/subnet/Security Group (stessi usati da deploy.sh)..."
+echo "==> [3/5] Recupero VPC/subnet/Security Group (stessi usati da Terraform)..."
 VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" \
   --query "Vpcs[0].VpcId" --output text --region "$REGION")
 SUBNET_IDS=$(aws ec2 describe-subnets \
@@ -225,7 +229,7 @@ cat <<EOF > /tmp/test-engine-task-def.json
   "requiresCompatibilities": ["FARGATE"],
   "networkMode": "awsvpc",
   "cpu": "2048",
-  "memory": "16384",
+  "memory": "8192",
   "taskRoleArn": "${LABROLE_ARN}",
   "executionRoleArn": "${LABROLE_ARN}",
   "containerDefinitions": [
@@ -254,8 +258,7 @@ cat <<EOF > /tmp/test-engine-task-def.json
         "options": {
           "awslogs-group": "/ecs/rf-test-engine",
           "awslogs-region": "${REGION}",
-          "awslogs-stream-prefix": "test-engine",
-          "awslogs-create-group": "true"
+          "awslogs-stream-prefix": "test-engine"
         }
       }
     }

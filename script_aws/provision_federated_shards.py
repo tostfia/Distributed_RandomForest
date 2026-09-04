@@ -33,9 +33,7 @@ from botocore.exceptions import ClientError
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 
-DEFAULT_BUCKET = os.environ.get(
-    "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
-)
+DEFAULT_BUCKET = os.environ.get("DATASETS_BUCKET_NAME")
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
 # Stesso valore di run_baseline.py/centralized.py/provision_local_shards.py:
 # campionamento ribilanciato per giorno invece di sample_fraction=0.05
@@ -157,6 +155,12 @@ def main() -> None:
                         help="Nome della colonna che identifica il giorno/file di origine, "
                              "richiesta solo con partition_strategy='by_day'.")
     args = parser.parse_args()
+
+    if not args.bucket:
+        raise SystemExit(
+            "[ERRORE] Nessun bucket specificato: imposta DATASETS_BUCKET_NAME "
+            "nell'ambiente oppure passa --bucket esplicitamente."
+        )
 
     provision(
         num_workers=args.num_workers,

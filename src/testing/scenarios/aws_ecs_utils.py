@@ -1,6 +1,6 @@
 """
 Helper condivisi per gli scenari di test eseguiti contro l'infrastruttura
-AWS ECS/Fargate (deploy.sh: cluster 'forest-cluster', service
+AWS ECS/Fargate (Terraform (ecs_task_definitions.tf): cluster 'forest-cluster', service
 'orchestrator-service' desired-count=2, service 'worker-service' o
 'worker-service-1'..'worker-service-N').
 
@@ -138,7 +138,7 @@ def resolve_worker_service_name(worker_index: int = 1) -> str:
     """
     In modalità federated ogni worker ha un service ECS dedicato a indice
     fisso ('worker-service-1'..'worker-service-N', desired-count=1
-    ciascuno, vedi deploy.sh). In modalità centralized esiste un unico
+    ciascuno, vedi Terraform, ecs_task_definitions.tf). In modalità centralized esiste un unico
     'worker-service' con worker anonimi/intercambiabili: l'indice non ha
     alcun significato e viene ignorato.
     """
@@ -155,7 +155,7 @@ def pick_and_kill_worker_task(ecs_client, reason: str, worker_index: int = 1, cl
     ascolto sulla porta 18861 usato nei rami locali di fault.py/fault_inf.py.
 
     In centralized il worker scelto è arbitrario (sono intercambiabili per
-    design, vedi commento in deploy.sh), in federated si colpisce sempre
+    design, vedi commento in Terraform, ecs_task_definitions.tf), in federated si colpisce sempre
     'worker-service-1' per coerenza col comportamento locale (che colpisce
     sempre lo stesso worker fisso sulla porta 18861).
 

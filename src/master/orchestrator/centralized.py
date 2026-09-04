@@ -57,7 +57,7 @@ VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 # Timeout (in secondi) delle chiamate RPC sincrone verso i worker.
 #
 # PRIMA: due letterali 600 incastonati nelle chiamate a rpyc.connect (nel thread
-# di dispatch dell'addestramento e in quello dell'inferenza). deploy.sh leggeva
+# di dispatch dell'addestramento e in quello dell'inferenza). Terraform (ecs_task_definitions.tf) leggeva
 # RPC_SYNC_TIMEOUT_SECONDS / RPC_INFERENCE_SYNC_TIMEOUT_SECONDS dal .env e le
 # iniettava nella task definition ECS dell'orchestratore, ma il codice
 # centralizzato non le leggeva: la configurazione c'era, era documentata, e non
@@ -66,7 +66,7 @@ VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 # I DEFAULT RESTANO 600/600, non i 1800/900 di federated.py: così, quando le
 # variabili non sono impostate — cioè in locale e in Docker Compose — il
 # comportamento è identico byte per byte a quello precedente. Su AWS, dove
-# deploy.sh le valorizza, il timeout diventa finalmente quello dichiarato nel
+# Terraform (ecs_task_definitions.tf) le valorizza, il timeout diventa finalmente quello dichiarato nel
 # .env, che è il punto di tutta questa configurazione.
 RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 600)
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 600)

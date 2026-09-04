@@ -13,19 +13,15 @@ locals {
     { name = "EC2_ID", value = "Fargate" },
     { name = "RUNNING_IN_DOCKER", value = "true" },
     { name = "AWS_DEFAULT_REGION", value = var.aws_region },
-    { name = "DATASETS_BUCKET_NAME", value = aws_s3_bucket.datasets.bucket },
+    # Riferimento alla variabile locale definita in s3.tf
+    { name = "DATASETS_BUCKET_NAME", value = local.datasets_bucket_name },
   ]
 }
-
 # ---------------------------------------------------------------------
-# ORCHESTRATOR (unica family, sempre presente in entrambe le modalità).
-# ORCHESTRATOR_INDEX viene derivato a runtime dal Task ARN via ECS
-# Container Metadata Endpoint, identico a deploy.sh: è ciò che permette
-# a due istanze orchestrator di distinguersi per la leader election
-# senza dover essere ri-configurate a mano.
+# ORCHESTRATOR 
 # ---------------------------------------------------------------------
 resource "aws_ecs_task_definition" "orchestrator" {
-  family                   = "rf-orchestrator-task"
+  family                   = "lab-orchestrator-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.orchestrator_cpu
@@ -50,10 +46,9 @@ resource "aws_ecs_task_definition" "orchestrator" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = "/ecs/rf-orchestrator"
+          "awslogs-group"         = "/ecs/lab-orchestrator"
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "orchestrator"
-          "awslogs-create-group"  = "true"
         }
       }
     }
@@ -63,13 +58,15 @@ resource "aws_ecs_task_definition" "orchestrator" {
 }
 
 # ---------------------------------------------------------------------
-# WORKER - modalità CENTRALIZED: un'unica family, worker anonimi e
-# intercambiabili, scalati tramite desired_count sul Service.
+# WORKER - modalità CENTRALIZED
 # ---------------------------------------------------------------------
 resource "aws_ecs_task_definition" "worker_centralized" {
   count = var.training_mode == "centralized" ? 1 : 0
 
-  family                   = "rf-worker-task"
+  # Stessa family dell'orchestrator: è l'unica autorizzata dalla SCP.
+  # Terraform la tratta comunque come risorsa distinta (ARN/revisione
+  # propria); cambia solo la stringa family sottostante.
+  family                   = "lab-orchestrator-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.worker_cpu
@@ -93,10 +90,9 @@ resource "aws_ecs_task_definition" "worker_centralized" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = "/ecs/rf-worker"
+          "awslogs-group"         = "/ecs/lab-worker"
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "worker"
-          "awslogs-create-group"  = "true"
         }
       }
     }
@@ -106,16 +102,13 @@ resource "aws_ecs_task_definition" "worker_centralized" {
 }
 
 # ---------------------------------------------------------------------
-# WORKER - modalità FEDERATED: una family per ciascun indice fisso
-# 1..num_workers (binding worker<->shard, coerente con quanto richiesto
-# da provision_federated_shards.py). WORKER_INDEX è iniettato staticamente
-# nella Task Definition, non derivato a runtime come per l'orchestrator,
-# perché ogni indice deve mappare SEMPRE sullo stesso shard S3.
+# WORKER - modalità FEDERATED
 # ---------------------------------------------------------------------
 resource "aws_ecs_task_definition" "worker_federated" {
   count = var.training_mode == "federated" ? var.num_workers : 0
 
-  family                   = "rf-worker-task-${count.index + 1}"
+  # Stessa family per ogni indice: è l'unica autorizzata dalla SCP.
+  family                   = "lab-orchestrator-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.worker_cpu
@@ -140,10 +133,9 @@ resource "aws_ecs_task_definition" "worker_federated" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = "/ecs/rf-worker"
+          "awslogs-group"         = "/ecs/lab-worker"
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "worker-${count.index + 1}"
-          "awslogs-create-group"  = "true"
         }
       }
     }

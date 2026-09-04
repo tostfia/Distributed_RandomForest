@@ -28,7 +28,7 @@ BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket
 # locale/Docker se la variabile non e' impostata. Due costanti separate perché
 # training e inferenza avevano gia' default diversi (600s e 300s).
 #
-# int(os.environ.get(...)) è stato sostituito da env_timeout_seconds: deploy.sh,
+# int(os.environ.get(...)) è stato sostituito da env_timeout_seconds: Terraform (ecs_task_definitions.tf),
 # quando la chiave manca nel .env, ripiega su "1800s"/"900s" — col suffisso — e
 # int("1800s") solleva ValueError a livello di modulo, uccidendo il container
 # all'import. Vedi il docstring di env_timeout_seconds in BaseOrchestrator.py.

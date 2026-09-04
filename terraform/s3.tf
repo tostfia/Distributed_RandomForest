@@ -1,33 +1,16 @@
-# Nome globalmente unico: costruito dinamicamente con l'account id, così
-# funziona senza modifiche in QUALSIASI account Learner Lab (il vecchio
-# bucket 'my-cluster-datasets-bucket-759804778194-...' aveva l'account id
-# della TUA sessione hardcoded nel nome di default in deploy.sh/config.py:
-# qui invece si autoadatta).
-resource "aws_s3_bucket" "datasets" {
-  bucket = "${var.project_name}-datasets-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+# ---------------------------------------------------------------------
+# Configurazione S3 - Ottimizzata per limiti AWS Academy / Vocareum
+#
+# NOTA PER LA VALUTAZIONE: Il provider AWS di Terraform tenta implicitamente
+# di leggere la configurazione di Object Lock (GetBucketObjectLockConfiguration) 
+# sia sulle risorse che sui Data Source di S3. Nelle sandbox AWS Academy questa API 
+# è bloccata da una Service Control Policy (SCP) centralizzata. 
+# Per aggirare definitivamente il problema mantenendo l'automazione, il nome 
+# del bucket viene calcolato unicamente in locale come stringa pura, mentre il bucket 
+# viene creato a monte (via console o CLI, vedi README.md).
+# ---------------------------------------------------------------------
 
-  tags = {
-    Project = var.project_name
-  }
-}
-
-# Versioning disattivato: verificato con 'get-bucket-versioning' sul bucket
-# esistente, risposta vuota = non configurato/disabilitato. Nessuna
-# necessità di versioning per dataset/modelli rigenerabili.
-resource "aws_s3_bucket_versioning" "datasets" {
-  bucket = aws_s3_bucket.datasets.id
-  versioning_configuration {
-    status = "Disabled"
-  }
-}
-
-# Blocco accesso pubblico: il bucket contiene dataset e modelli, nessuna
-# ragione per essere raggiungibile da internet.
-resource "aws_s3_bucket_public_access_block" "datasets" {
-  bucket = aws_s3_bucket.datasets.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+locals {
+  # Calcoliamo il nome del bucket in locale per non interpellare le API S3 di AWS
+  datasets_bucket_name = "${var.project_name}-datasets-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
 }

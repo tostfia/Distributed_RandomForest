@@ -12,7 +12,7 @@ BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
 
 # ---------------------------------------------------------------------
 # Rilevamento della modalità corrente dal .env, con la stessa priorità
-# usata da deploy.sh (TRAINING_MODE > default "centralized").
+# usata da Terraform (TRAINING_MODE > default "centralized").
 # Serve solo per --purge-legacy-mode: capire quali service NON
 # appartengono alla modalità attualmente in uso.
 # ---------------------------------------------------------------------
@@ -344,6 +344,6 @@ else
   if [ "$PURGE_LEGACY_MODE" -eq 1 ] && [ "${#LEGACY_SERVICES[@]}" -gt 0 ]; then
     echo ""
     echo "Eliminati definitivamente (--purge-legacy-mode, modalità $TRAINING_MODE): ${LEGACY_SERVICES[*]}"
-    echo "Per riaverli, serve un deploy.sh completo nell'altra modalità (li ricrea da zero)."
+    echo "Per riaverli, cambia training_mode in terraform.tfvars e rilancia terraform apply (li ricrea da zero)."
   fi
 fi

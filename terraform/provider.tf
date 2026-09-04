@@ -1,20 +1,23 @@
-# ---------------------------------------------------------------------
-# Provider AWS.
-#
-# In AWS Academy Learner Lab le credenziali sono TEMPORANEE (access key +
-# secret key + session token, scadono ogni ~4h) e vanno prese dalla scheda
-# "AWS Details" del Lab. Terraform le legge, come la AWS CLI, da una di
-# queste fonti (in ordine di precedenza standard):
-#   1. Variabili d'ambiente AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
-#      AWS_SESSION_TOKEN (consigliato: copia/incolla dal Lab prima di
-#      lanciare terraform apply/destroy)
-#   2. File ~/.aws/credentials, profilo [default]
-#
-# Non serve configurare nulla qui: il provider le raccoglie da sole.
-# Se durante l'apply ricevi errori di autenticazione/scadenza token,
-# aggiorna le credenziali dal Learner Lab e rilancia (terraform riprende
-# da dove si era fermato grazie allo state).
-# ---------------------------------------------------------------------
 provider "aws" {
   region = var.aws_region
+  
+  # Indica a Terraform di usare lo stile standard per gli endpoint S3
+  s3_use_path_style = true
+  # DISATTIVA I CONTROLLI CHE FANNO FALLIRE IL LAB:
+  # Dice al provider di non chiamare le API di validazione avanzata dei metadati,
+  # delle credenziali e delle regioni, che spesso invocano policy protette.
+  skip_metadata_api_check     = true
+  skip_region_validation      = true
+  skip_credentials_validation = true
+
+  # La SCP del Learner Lab nega la creazione di risorse ECS (task
+  # definition, cluster, ecc.) se la richiesta non porta almeno un tag.
+  # default_tags applica questo tag automaticamente a ogni risorsa AWS
+  # creata da Terraform che supporta il tagging, senza doverlo scrivere
+  # a mano su ogni resource block.
+  default_tags {
+    tags = {
+      Project = "SDCC-ML"
+    }
+  }
 }

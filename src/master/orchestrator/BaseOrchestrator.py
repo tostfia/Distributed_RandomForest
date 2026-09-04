@@ -129,7 +129,7 @@ def env_timeout_seconds(var_name: str, default: int) -> int:
     'default' se la variabile è assente, vuota o non interpretabile.
 
     PERCHÉ NON BASTA int(os.environ.get(NOME, default))
-    deploy.sh, quando la chiave non è presente nel .env, ripiega su valori
+    Terraform (ecs_task_definitions.tf), quando la chiave non è presente nel .env, ripiega su valori
     scritti CON il suffisso: DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800s}".
     Quel valore finisce tale e quale nella task definition ECS, e int("1800s")
     solleva ValueError — a livello di modulo, quindi PRIMA che qualunque

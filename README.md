@@ -40,16 +40,21 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   ├── worker/             # nodo di calcolo (addestramento locale dei singoli alberi)
 │   ├── baseline/           # addestramento locale non distribuito, usato come riferimento
 │   ├── shared/config.py    # caricamento configurazione da .env
-│   └── testing/            # test engine di sistema (scenari 1-8) e generazione grafici
-├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, API Gateway)
+│   └── testing/            # test engine di sistema (scenari 1-9) e generazione grafici
+├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, API Gateway) — vedi terraform/README.md
 ├── script_local/            # script per l'esecuzione locale
-│   ├── run_local.sh         # avvio bare-metal senza Docker, multi-terminale
-│   ├── run_test.sh          # avvio Docker Compose + test engine
-│   └── clean_local.sh       # pulizia storage/modelli/cache locali
-├── script_aws/               # script per il deploy/gestione manuale su AWS
-│   ├── deploy.sh             # deploy via AWS CLI (alternativo a Terraform)
-│   ├── run_aws.sh            # avvio client contro l'infrastruttura AWS
-│   └── run_test_engine_ecs.sh   # test engine interattivo via ECS Exec
+│   ├── run_local.sh              # avvio bare-metal senza Docker, multi-terminale
+│   ├── run_docker.sh             # avvio Docker Compose RACCOMANDATO: provisioning + rete + limiti CPU/RAM da .env
+│   ├── run_test.sh               # avvio Docker Compose + test engine (per i test di sistema, sez. 7)
+│   ├── provision_local_shards.py # provisioning offline degli shard federati su disco (gemello locale dello script AWS)
+│   ├── clean_local.sh            # pulizia selettiva di storage/modelli/cache locali
+│   └── preserve_baseline_boot.py # helper di clean_local.sh: preserva la config baseline attraverso il reset
+├── script_aws/               # script operativi contro l'infrastruttura AWS già deployata da Terraform
+│   ├── run_aws.sh                    # avvio client contro l'infrastruttura AWS
+│   ├── run_test_engine_ecs.sh        # test engine come task ECS one-off (scenari 1-9, non interattivo)
+│   ├── provision_federated_shards.py # provisioning offline degli shard federati su S3
+│   ├── teardown.sh                   # scala i Service a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
+│   └── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
 ├── dataset_cache/            # cache locale dei dataset (CICIDS reale + sintetico)
 ├── docker-compose.yml
 ├── Dockerfile
@@ -59,7 +64,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 └── aws_creds.sh               # helper per impostare le credenziali AWS Academy Learner Lab
 ```
 
-> Se la struttura reale del tuo repository differisce da questa (nomi cartelle, script mancanti/aggiunti), aggiorna questa sezione prima di pubblicarlo: qui è ricostruita da quanto documentato nel progetto, non da un'ispezione diretta dei file.
+> Se la struttura reale del tuo repository differisce da questa (nomi cartelle, script mancanti/aggiunti), aggiorna questa sezione prima di pubblicarlo.
 
 ---
 
@@ -71,7 +76,6 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 - **AWS CLI v2**, configurato con le credenziali del tuo account (vedi sotto se usi un AWS Academy Learner Lab)
 - Su Linux, i comandi di simulazione rete richiedono il pacchetto `iproute2` (fornisce `tc`)
 - **Solo per l'esecuzione bare-metal senza Docker** (`run_local.sh`): un emulatore di terminale grafico, es. `gnome-terminal` (`sudo dnf install gnome-terminal` su Fedora) o `kgx`
-- **Solo per entrare interattivamente nel test engine su AWS** (`run_test_engine_ecs.sh`, via `aws ecs execute-command`): il [Session Manager Plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) per l'AWS CLI (`.deb`/`.rpm` a seconda della distro)
 
 > **Nota:** su alcuni sistemi `pip install -r requirements.txt` può installare una versione di `botocore` incompatibile con l'AWS CLI già presente. Se `aws` inizia a dare errori dopo l'installazione, forza una versione compatibile con `pip install "botocore<1.43.0"`.
 
@@ -86,7 +90,7 @@ git clone <URL_DEL_REPOSITORY>
 cd Distributed_RandomForest
 ```
 
-### 2. Crea e attiva un ambiente virtuale (opzionale ma consigliato se vuoi lanciare script Python fuori da Docker, es. `upload_dataset.sh` o gli script in `scripts/`)
+### 2. Crea e attiva un ambiente virtuale (opzionale ma consigliato se vuoi lanciare script Python fuori da Docker, es. `upload_dataset.sh` o gli script in `script_aws/`)
 
 ```bash
 python3 -m venv venv
@@ -122,6 +126,21 @@ export MY_GID=$(id -g)
 ```
 
 ### 5. Build e avvio
+
+**Consigliato: `run_docker.sh`.** A differenza di un `docker compose up` manuale, questo script:
+- esegue automaticamente il **provisioning degli shard federati** se `TRAINING_MODE=federated` (senza, l'orchestrator si aspetta shard già presenti e non li genera più a runtime — vedi [provision_local_shards.py](#modalità-di-training-centralizzata-vs-federata));
+- **azzera il delay di rete di default**: `docker-compose.yml` applica `50ms` di latenza artificiale su ogni worker se la variabile `NET_SCENARIO` non è impostata — `run_docker.sh puro` la neutralizza esplicitamente (`delay 0ms`), `run_docker.sh delay` la usa apertura per introdurre latenza voluta. Un `docker compose up` manuale **non fa questo azzeramento**: i worker partirebbero con 50ms di ritardo artificiale non richiesto;
+- applica i limiti di CPU/RAM da `.env` (`WORKER_CPUS`, `WORKER_MEM_LIMIT`, ecc.), utile per non saturare la macchina di sviluppo con `NUM_WORKERS` alto.
+
+```bash
+chmod +x script_local/run_docker.sh
+./script_local/run_docker.sh puro     # avvio senza ritardo di rete
+./script_local/run_docker.sh delay    # avvio con 50ms di latenza artificiale
+```
+
+Lo script chiede il numero di orchestratori (1-2), legge `NUM_WORKERS`/`TRAINING_MODE` dal `.env`, builda l'immagine se necessario e avvia il cluster in background; il client resta sull'host e parte automaticamente al termine.
+
+**Alternativa manuale** (`docker compose` diretto) — utile per debug puntuale o per uno `--scale` diverso da quanto gestito dallo script, ma **senza** provisioning automatico né azzeramento del delay di rete: se la usi in `TRAINING_MODE=federated` esegui prima a mano `python -m script_local.provision_local_shards`, e se ti serve zero latenza artificiale esporta `NET_SCENARIO="delay 0ms"` prima di `up`.
 
 ```bash
 docker compose build
@@ -172,7 +191,7 @@ Lo script chiede quanti orchestratori avviare (1 o 2), legge `NUM_WORKERS` dal `
 
 ## Esecuzione su AWS (Terraform + ECS Fargate)
 
-Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per orchestrator/worker, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**.
+Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per orchestrator/worker, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**. Per i dettagli completi (incluse le restrizioni SCP del Learner Lab e come aggirarle) vedi **[`terraform/README.md`](terraform/README.md)**; qui il riassunto operativo.
 
 ### 1. Credenziali AWS
 
@@ -210,10 +229,10 @@ Il primo `apply` è più lento perché builda e pusha automaticamente l'immagine
 ./upload_dataset.sh    # multipart upload con retry automatico
 ```
 
-Se il training è in modalità **federata**, prima di sottomettere un job va eseguito il provisioning degli shard per-nodo:
+Se il training è in modalità **federata**, prima di sottomettere un job va eseguito il provisioning degli shard per-nodo. Il tuo `.env` deve avere `DATASETS_BUCKET_NAME` impostato (lo script fallisce esplicitamente se manca, invece di usare un bucket di default):
 
 ```bash
-python -m scripts.provision_federated_shards --num-workers <N>
+python -m script_aws.provision_federated_shards --num-workers <N>
 ```
 
 ### 5. Esecuzione di un job contro l'infrastruttura AWS
@@ -221,40 +240,55 @@ python -m scripts.provision_federated_shards --num-workers <N>
 Aggiorna il tuo `.env` locale con i valori d'output di Terraform (`ENV_MODE=aws`, `TRAINING_MODE`, `DATASETS_BUCKET_NAME`, `AWS_DEFAULT_REGION`, `NUM_WORKERS`, `API_GATEWAY_URL`), poi:
 
 ```bash
-./run_aws.sh
+./script_aws/run_aws.sh
 ```
 
 Lo script attende che i Service ECS (worker + orchestrator) siano stabili prima di procedere, per non sottomettere job mentre l'infrastruttura sta ancora avviandosi.
 
 ### 6. Fermare/distruggere
 
-Per scalare a zero senza distruggere l'infrastruttura (utile per pause tra sessioni di test):
+Per scalare a zero senza distruggere l'infrastruttura (utile per pause tra sessioni di test), il modo più completo è `script_aws/teardown.sh` — scala i Service a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
+
+```bash
+./script_aws/teardown.sh
+```
+
+In alternativa, per fermare solo i Service senza toccare lo stato applicativo:
 
 ```bash
 aws ecs update-service --cluster forest-cluster --service orchestrator-service --desired-count 0 --region <REGION>
 # ripeti per ciascun worker-service
 ```
 
-Per distruggere tutto (ECS, ECR con l'immagine, S3 con contenuto, DynamoDB, SQS, Security Group) a fine sessione di valutazione:
+Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifica (in sola lettura) che non sia rimasto nulla attivo che continui a fatturare — task Fargate, NAT Gateway, Load Balancer, Elastic IP non associati:
+
+```bash
+./script_aws/check_left_over.sh
+```
+
+Per distruggere tutto (ECS, ECR con l'immagine, DynamoDB, SQS, Security Group) a fine sessione di valutazione:
 
 ```bash
 cd terraform
 terraform destroy
 ```
 
-### Test engine interattivo su AWS
+> Il bucket S3 e i log group CloudWatch, creati manualmente per aggirare le restrizioni SCP del Learner Lab (vedi `terraform/README.md`), **non** vengono rimossi da `terraform destroy` — richiedono pulizia manuale separata se vuoi eliminarli del tutto.
 
-Per entrare nel menu interattivo del test engine (gli stessi scenari 1-8 del flusso locale) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su internet:
+### Test engine su AWS (task ECS one-off)
+
+Per eseguire uno degli scenari di test (1-9) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su internet:
 
 ```bash
-./script_aws/run_test_engine_ecs.sh
+./script_aws/run_test_engine_ecs.sh <scenario>      # es. ./script_aws/run_test_engine_ecs.sh 2
+./script_aws/run_test_engine_ecs.sh                 # chiede lo scenario a terminale prima di lanciare il task
 ```
 
-Lo script avvia un task ECS Fargate *one-off* (non un Service persistente) con `--enable-execute-command`, attende che l'agente ECS Exec sia pronto e apre una sessione interattiva equivalente al prompt locale. Richiede il [Session Manager Plugin](#prerequisiti) installato e, a fine sessione, chiede se fermare subito il task (consigliato, per non lasciare costi Fargate attivi inutilmente).
+Lo script registra una task definition dedicata (`rf-test-engine-task`) e lancia un task Fargate *one-off* con lo scenario passato via variabile d'ambiente `SCENARIO` — **non** una sessione interattiva `ecs execute-command`: il test engine gira come comando principale del container, così anche scenari lunghi (training federato, scalabilità) non sono soggetti al timeout di inattività di 20 minuti di ECS Exec. Il task prosegue in background anche se chiudi il terminale; i log finiscono su CloudWatch (`/ecs/rf-test-engine`) e il report finale viene caricato su `s3://<bucket>/test_reports/aws/`.
 
-### Nota — script di deploy manuale alternativo
-
-In `script_aws/` è presente anche `deploy.sh`, uno script bash equivalente che crea le stesse risorse via AWS CLI invece che via Terraform (utile per debug puntuale). Verifica le credenziali in `~/.aws/credentials` (generate con `bash aws_creds.sh`) e legge `TRAINING_MODE`/bucket dal `.env`. Il percorso consigliato per l'uso standard resta comunque Terraform.
+```bash
+aws logs tail /ecs/rf-test-engine --follow --region <REGION>   # segui i log in tempo reale
+```
 
 ---
 
@@ -291,9 +325,10 @@ Il modulo `src/testing/engine.py` espone un menu di scenari, eseguibile sia in l
 5. Guasto improvviso del worker (durante inferenza)
 6. Failover dell'orchestratore (durante addestramento)
 7. Failover dell'orchestratore (durante inferenza)
-8. Generazione grafici a partire dai report salvati
+8. Elezione del leader sotto concorrenza (safety)
+9. Generazione grafici a partire dai report salvati
 
-Per l'esecuzione non interattiva (es. task ECS one-off senza terminale collegato), imposta la variabile d'ambiente `SCENARIO` con il numero desiderato o `all` invece di rispondere al prompt.
+Per l'esecuzione non interattiva (task ECS one-off senza terminale collegato), imposta la variabile d'ambiente `SCENARIO` con il numero desiderato (o `all`) invece di rispondere al prompt — vedi [Test engine su AWS](#test-engine-su-aws-task-ecs-one-off).
 
 Avvio rapido in locale:
 
@@ -307,20 +342,30 @@ Lo script legge `NUM_WORKERS` dal `.env`, avvia lo stack con 2 istanze di orches
 
 ## Pulizia / teardown
 
-**Locale** — svuota storage, modelli salvati, cache worker e report di test (preservando la configurazione base):
+**Locale** — pulizia **selettiva**, non totale: svuota `.local_storage/`, `saved_models/`, `workers_cache/` e `test_reports/local/`, ma preserva esplicitamente due cose attraverso il reset:
 
 ```bash
 ./script_local/clean_local.sh
 ```
 
-**AWS** — vedi [sezione 6 del flusso AWS](#6-fermaredistruggere) (`terraform destroy`).
+- **`.local_storage/metrics/`** non viene toccata (esclusa esplicitamente dal `find` che fa la pulizia) — così non perdi lo storico delle metriche tra una sessione di test e l'altra.
+- **La sezione `baseline_boot`** di `.local_storage/config.json` (dataset_type, tree_type) sopravvive al reset tramite `preserve_baseline_boot.py`, che la estrae prima della pulizia e la reintegra subito dopo — tutto il resto del config (in particolare `last_training_request` e lo storico delle richieste) viene invece azzerato come da comportamento previsto.
+
+Se invece ti serve un reset totale, anche di queste due eccezioni, va fatto a mano (es. cancellando direttamente `.local_storage/metrics/` o l'intero `.local_storage/config.json`).
+
+**AWS** — due livelli, dal meno al più distruttivo:
+
+1. `./script_aws/teardown.sh` — scala i Service a 0 e svuota lo stato applicativo (DynamoDB, SQS, artefatti S3 temporanei), lasciando intatte task definition/cluster/ECR per un riavvio rapido. Supporta `--purge-shards`, `--purge-legacy-mode`, `--purge-models` (vedi commenti in testa allo script).
+2. `terraform destroy` — rimuove tutta l'infrastruttura (vedi [sezione 6 del flusso AWS](#6-fermaredistruggere)).
+
+In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
 
 ---
 
 ## Limitazioni note
 
 - Su AWS/Fargate la simulazione di rete non inietta un delay artificiale ma misura la latenza reale (vedi sopra): non confrontare direttamente i due esperimenti come se fossero equivalenti.
-- L'ambiente Terraform assume un account **AWS Academy Learner Lab**: riusa il ruolo IAM `LabRole` già presente e la VPC di default. Fuori da un Learner Lab, `LabRole` non esiste e va sostituito con un ruolo IAM equivalente creato ad-hoc.
+- L'ambiente Terraform assume un account **AWS Academy Learner Lab**: riusa il ruolo IAM `LabRole` già presente e la VPC di default. Fuori da un Learner Lab, `LabRole` non esiste e va sostituito con un ruolo IAM equivalente creato ad-hoc. La SCP del Learner Lab impone inoltre un tetto di memoria di 8192 MiB per task ECS e un bucket S3/log group CloudWatch creati manualmente (vedi `terraform/README.md`).
 - Le credenziali AWS Academy scadono ogni ~4 ore: se un `terraform apply` o uno script si interrompe con errori di autenticazione, è quasi sempre questo il motivo.
 
 ---
