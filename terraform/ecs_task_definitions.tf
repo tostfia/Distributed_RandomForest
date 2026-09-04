@@ -13,7 +13,7 @@ locals {
     { name = "EC2_ID", value = "Fargate" },
     { name = "RUNNING_IN_DOCKER", value = "true" },
     { name = "AWS_DEFAULT_REGION", value = var.aws_region },
-    { name = "DATASETS_BUCKET_NAME", value = aws_s3_bucket.datasets.bucket },
+    { name = "DATASETS_BUCKET_NAME", value = data.aws_s3_bucket.datasets.bucket },
   ]
 }
 
@@ -143,6 +143,53 @@ resource "aws_ecs_task_definition" "worker_federated" {
           "awslogs-group"         = "/ecs/rf-worker"
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "worker-${count.index + 1}"
+          "awslogs-create-group"  = "true"
+        }
+      }
+    }
+  ])
+
+  depends_on = [null_resource.docker_build_push]
+}
+
+# ---------------------------------------------------------------------
+# TEST ENGINE - task one-off, lanciato con `aws ecs run-task` da
+# run_test_engine_ecs.sh. Qui registriamo solo la Task Definition
+# "template": lo scenario da eseguire (variabile SCENARIO) NON è fissato
+# qui, ma passato a runtime dallo script tramite --overrides in
+# run-task, così un singolo terraform apply basta per tutti gli scenari.
+# ---------------------------------------------------------------------
+resource "aws_ecs_task_definition" "test_engine" {
+  family                   = "rf-test-engine-task"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.test_engine_cpu
+  memory                   = var.test_engine_memory
+  task_role_arn             = data.aws_iam_role.lab_role.arn
+  execution_role_arn        = data.aws_iam_role.lab_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "test-engine"
+      image     = local.image_uri
+      essential = true
+      environment = concat(local.common_env, [
+        { name = "RPC_SYNC_TIMEOUT_SECONDS", value = "${var.rpc_sync_timeout_seconds}s" },
+        { name = "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", value = "${var.rpc_inference_sync_timeout_seconds}s" },
+        # Valore di default; run_test_engine_ecs.sh lo sovrascrive a
+        # runtime con --overrides in base allo scenario scelto.
+        { name = "SCENARIO", value = "all" },
+      ])
+      command = ["sh", "-c", "timeout 7200 python -m src.testing.engine"]
+      linuxParameters = {
+        initProcessEnabled = true
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/rf-test-engine"
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "test-engine"
           "awslogs-create-group"  = "true"
         }
       }

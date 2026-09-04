@@ -62,6 +62,16 @@ variable "orchestrator_memory" {
   default     = "8192"
 }
 
+variable "test_engine_cpu" {
+  type    = string
+  default = "2048"
+}
+
+variable "test_engine_memory" {
+  type    = string
+  default = "16384"
+}
+
 variable "rpc_port" {
   description = "Porta RPC (rpyc) usata da orchestrator per parlare con i worker."
   type        = number

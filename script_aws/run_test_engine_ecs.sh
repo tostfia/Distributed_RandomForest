@@ -23,6 +23,11 @@ set -e
 # Prerequisiti:
 #   - deploy.sh già eseguito con successo (worker-service/orchestrator-service
 #     RUNNING sul cluster 'forest-cluster')
+#   - terraform apply già eseguito: la Task Definition 'rf-test-engine-task'
+#     è gestita in ecs_task_definitions.tf (risorsa aws_ecs_task_definition.
+#     test_engine), NON più registrata a mano da questo script. Qui la
+#     usiamo così com'è e sovrascriviamo solo SCENARIO a runtime via
+#     'run-task --overrides'.
 #   - .env con ENV_MODE=aws e credenziali AWS Academy correnti
 #   - engine.py deve leggere la scelta da os.environ.get("SCENARIO") prima
 #     del prompt interattivo (già presente in src/testing/engine.py)
@@ -64,7 +69,6 @@ REGION="${ENV_REGION:-us-east-1}"
 NUM_WORKERS="${ENV_NUM_WORKERS:-2}"
 BUCKET_NAME="${ENV_BUCKET_NAME:-my-cluster-datasets-bucket-759804778194-us-east-1-an}"
 CLUSTER_NAME="forest-cluster"
-REPO_NAME="rf-distributed"
 SG_NAME="rf-distributed-sg"
 FAMILY="rf-test-engine-task"
 CONTAINER_NAME="test-engine"
@@ -155,9 +159,6 @@ if ! aws sts get-caller-identity --region "$REGION" > /dev/null 2>&1; then
   echo "[ERRORE] Credenziali AWS non valide o scadute. Aggiornale nel .env e riprova."
   exit 1
 fi
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$REGION")
-LABROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 echo "    OK, credenziali valide."
 
 echo "==> [2/5] Verifica che worker-service/orchestrator-service siano stabili..."
@@ -211,68 +212,48 @@ echo "    (Stesso SG dei worker: la regola self-referencing sulla porta 18861"
 echo "     già presente basta, il test-engine sarà raggiungibile dai worker e"
 echo "     viceversa senza aprire nulla verso l'esterno.)"
 
-echo "==> [4/5] Registrazione Task Definition '$FAMILY'..."
-# L'engine è ora il comando PRINCIPALE del container (non più 'sleep
-# infinity' in attesa di una sessione execute-command): legge lo scenario
-# da SCENARIO invece del prompt interattivo (vedi TestEngine.run_scenarios
-# in engine.py), quindi non ha bisogno di nessun terminale collegato.
-# 'timeout 7200' resta come rete di sicurezza contro un eventuale hang
-# imprevisto (stesso valore/spirito della vecchia versione), non più per
-# tenere vivo un container in attesa.
-cat <<EOF > /tmp/test-engine-task-def.json
-{
-  "family": "${FAMILY}",
-  "requiresCompatibilities": ["FARGATE"],
-  "networkMode": "awsvpc",
-  "cpu": "2048",
-  "memory": "16384",
-  "taskRoleArn": "${LABROLE_ARN}",
-  "executionRoleArn": "${LABROLE_ARN}",
-  "containerDefinitions": [
-    {
-      "name": "${CONTAINER_NAME}",
-      "image": "${ECR_REGISTRY}/${REPO_NAME}:latest",
-      "essential": true,
-      "environment": [
-        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
-        {"name": "PYTHONUNBUFFERED", "value": "1"},
-        {"name": "NUM_WORKERS", "value": "${NUM_WORKERS}"},
-        {"name": "ENV_MODE", "value": "aws"},
-        {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
-        {"name": "EC2_ID", "value": "Fargate"},
-        {"name": "RUNNING_IN_DOCKER", "value": "true"},
-        {"name": "AWS_DEFAULT_REGION", "value": "${REGION}"},
-        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"},
-        {"name": "RPC_SYNC_TIMEOUT_SECONDS", "value": "${RPC_SYNC_TIMEOUT_SECONDS}"},
-        {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"},
-        {"name": "SCENARIO", "value": "${SCENARIO_CHOICE}"}
-      ],
-      "command": ["sh", "-c", "timeout 7200 python -m src.testing.engine"],
-      "linuxParameters": {"initProcessEnabled": true},
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/rf-test-engine",
-          "awslogs-region": "${REGION}",
-          "awslogs-stream-prefix": "test-engine",
-          "awslogs-create-group": "true"
-        }
-      }
-    }
-  ]
-}
-EOF
-aws ecs register-task-definition --cli-input-json file:///tmp/test-engine-task-def.json --region "$REGION" > /dev/null
-echo "    Task Definition registrata."
+echo "==> [4/5] Verifica Task Definition '$FAMILY' (gestita da Terraform)..."
+# La Task Definition non viene più registrata a mano da questo script:
+# vive in ecs_task_definitions.tf (risorsa aws_ecs_task_definition.
+# test_engine) ed è creata/aggiornata da 'terraform apply', come le
+# altre (orchestrator, worker). Qui verifichiamo solo che esista già,
+# per dare un errore chiaro invece di un fallimento oscuro in run-task.
+if ! aws ecs describe-task-definition --task-definition "$FAMILY" --region "$REGION" > /dev/null 2>&1; then
+  echo "[ERRORE] Task Definition '$FAMILY' non trovata. Hai lanciato 'terraform apply'?"
+  exit 1
+fi
+echo "    OK, Task Definition trovata."
 
 echo "==> [5/5] Avvio del task (run-task, one-off)..."
 # Niente più '--enable-execute-command': non entriamo più nel container
 # con una sessione interattiva, quindi non serve l'agente ECS Exec.
+# SCENARIO viene sovrascritto qui via --overrides: la Task Definition di
+# base (Terraform) ha un valore di default, ma questo è quello che conta
+# davvero, deciso a runtime da chi lancia lo script.
+CONTAINER_OVERRIDES=$(cat <<EOF
+{
+  "containerOverrides": [
+    {
+      "name": "${CONTAINER_NAME}",
+      "environment": [
+        {"name": "NUM_WORKERS", "value": "${NUM_WORKERS}"},
+        {"name": "TRAINING_MODE", "value": "${TRAINING_MODE}"},
+        {"name": "DATASETS_BUCKET_NAME", "value": "${BUCKET_NAME}"},
+        {"name": "RPC_SYNC_TIMEOUT_SECONDS", "value": "${RPC_SYNC_TIMEOUT_SECONDS}"},
+        {"name": "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", "value": "${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}"},
+        {"name": "SCENARIO", "value": "${SCENARIO_CHOICE}"}
+      ]
+    }
+  ]
+}
+EOF
+)
 TASK_ARN=$(aws ecs run-task \
   --cluster "$CLUSTER_NAME" \
   --task-definition "$FAMILY" \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_1,$SUBNET_2],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+  --overrides "$CONTAINER_OVERRIDES" \
   --region "$REGION" \
   --query "tasks[0].taskArn" --output text)
 

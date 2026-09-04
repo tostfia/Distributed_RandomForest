@@ -10,7 +10,7 @@ output "ecr_repository_url" {
 
 output "datasets_bucket_name" {
   description = "Nome del bucket S3 creato per dataset/shard/modelli/report. Da usare come DATASETS_BUCKET_NAME nel .env locale per run_aws.sh / run_test_engine_ecs.sh."
-  value       = aws_s3_bucket.datasets.bucket
+  value       = data.aws_s3_bucket.datasets.bucket
 }
 
 output "security_group_id" {
@@ -45,7 +45,7 @@ output "next_steps" {
     1. Aggiorna il tuo .env locale con:
          SYS_ENV=aws
          SYS_MODE=${var.training_mode}
-         DATASETS_BUCKET_NAME=${aws_s3_bucket.datasets.bucket}
+         DATASETS_BUCKET_NAME=${data.aws_s3_bucket.datasets.bucket}
          AWS_DEFAULT_REGION=${var.aws_region}
          NUM_WORKERS=${var.num_workers}
          API_GATEWAY_URL=${aws_apigatewayv2_api.mljobs.api_endpoint}
