@@ -23,13 +23,13 @@
     "random_state": 123
   },
   "hyperparameters_regre": {
-     "n_estimators": 120,
     "max_depth": null,
     "min_samples_split": 2,
-    "max_features": 0.3333333333333333,
     "criterion": "squared_error",
     "bootstrap": true,
-    "max_samples": 0.3,
+    "max_samples": null,
+    "max_features": 0.3333333333333333,
+    "n_estimators": 100,
     "tree_type": "regressor",
     "target_column": "Target",
     "random_state": 123
@@ -38,7 +38,7 @@
   
 
   "scalability_test": {
-    "worker_counts_to_test": [2,5,7,10,15]
+    "worker_counts_to_test": [2,5,7,10]
   },
 
   "network_simulation": {

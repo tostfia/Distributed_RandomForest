@@ -8,7 +8,7 @@ set -e
 
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
-BUCKET_NAME="my-cluster-datasets-bucket-759804778194-us-east-1-an"
+DATASETS_BUCKET_NAME="rf-distributed-datasets-378857401407-us-east-1"
 
 # ---------------------------------------------------------------------
 # Rilevamento della modalità corrente dal .env, con la stessa priorità
@@ -48,7 +48,7 @@ fi
 # ---------------------------------------------------------------------
 # Flag opzionali da riga di comando.
 # --purge-shards: elimina anche gli shard federati su S3
-#   (s3://$BUCKET_NAME/federated_shards/). NON attivo di default, perché
+#   (s3://$DATASETS_BUCKET_NAME/federated_shards/). NON attivo di default, perché
 #   generarli richiede ricaricare e ri-splittare il dataset da zero
 #   (RawCSVDataLoader + FederatedDataSplitter): sono pensati per
 #   sopravvivere a più cicli di teardown/deploy. Usa questo flag solo se
@@ -62,7 +62,7 @@ fi
 #   usa questo flag quando invece vuoi ripulirli definitivamente perché
 #   non riprenderai più quella modalità sullo stesso cluster.
 # --purge-models: elimina anche i modelli salvati su S3
-#   (s3://$BUCKET_NAME/saved_models/). NON attivo di default: sono
+#   (s3://$DATASETS_BUCKET_NAME/saved_models/). NON attivo di default: sono
 #   l'output vero e proprio dei training e per scelta vanno cancellati
 #   solo esplicitamente, a mano o con questo flag, mai in automatico.
 # ---------------------------------------------------------------------
@@ -276,30 +276,47 @@ done
 # ---------------------------------------------------------------------
 echo "==> [5/5] Pulizia degli artefatti temporanei di test su S3..."
 for prefix in "distributed_trains/" "distributed_tests/" "tasks/" "checkpoints/"; do
-  aws s3 rm "s3://$BUCKET_NAME/$prefix" --recursive --region "$REGION" > /dev/null 2>&1 \
+  aws s3 rm "s3://$DATASETS_BUCKET_NAME/$prefix" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: $prefix" \
     || echo "    (${prefix}: già vuoto o non presente)"
 done
 
 if [ "$PURGE_SHARDS" -eq 1 ]; then
   echo "    --purge-shards attivo: rimuovo anche federated_shards/ e federated_config/..."
-  aws s3 rm "s3://$BUCKET_NAME/federated_shards/" --recursive --region "$REGION" > /dev/null 2>&1 \
+  aws s3 rm "s3://$DATASETS_BUCKET_NAME/federated_shards/" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: federated_shards/" \
     || echo "    (federated_shards/: già vuoto o non presente)"
-  aws s3 rm "s3://$BUCKET_NAME/federated_config/" --recursive --region "$REGION" > /dev/null 2>&1 \
+  aws s3 rm "s3://$DATASETS_BUCKET_NAME/federated_config/" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: federated_config/" \
     || echo "    (federated_config/: già vuoto o non presente)"
 fi
 
 if [ "$PURGE_MODELS" -eq 1 ]; then
   echo "    --purge-models attivo: rimuovo anche saved_models/..."
-  aws s3 rm "s3://$BUCKET_NAME/saved_models/" --recursive --region "$REGION" > /dev/null 2>&1 \
+  aws s3 rm "s3://$DATASETS_BUCKET_NAME/saved_models/" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: saved_models/" \
     || echo "    (saved_models/: già vuoto o non presente)"
 fi
 
 echo "    Salvaguardati (default): real/, federated_shards/, federated_config/, saved_models/, metrics/, test_reports/."
+echo "==> [6/6] Deregistrazione di tutte le revision delle task definition (rf-*)..."
+FAMILIES=$(aws ecs list-task-definition-families --region "$REGION" --status ACTIVE \
+  --query "families[?starts_with(@, 'rf-')]" --output text 2>/dev/null || echo "")
 
+if [ -z "$FAMILIES" ]; then
+  echo "    Nessuna famiglia 'rf-*' trovata."
+else
+  for family in $FAMILIES; do
+    ARNS=$(aws ecs list-task-definitions --family-prefix "$family" --region "$REGION" \
+      --query "taskDefinitionArns" --output text 2>/dev/null || echo "")
+    count=0
+    for arn in $ARNS; do
+      aws ecs deregister-task-definition --task-definition "$arn" --region "$REGION" > /dev/null 2>&1
+      count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] && echo "    $family: $count revision deregistrate."
+  done
+fi
 echo ""
 echo "========================================================================"
 echo " PULIZIA E RESUBMISSION REALE COMPLETATE"
