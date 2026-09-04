@@ -37,10 +37,6 @@ services:
     ports:
       - "18861-18870:18861"
     cpus: '${WORKER_CPUS:-2.0}'
-    # PRIMA: 2048m letterale, non regolabile da .env senza modificare
-    # questo file. Parametrizzato come WORKER_CPUS sopra (che era già
-    # corretto) -- il default resta 2048m, invariato per chi non tocca
-    # .env.
     mem_limit: '${WORKER_MEM_LIMIT:-2048m}'
     environment:
       - PYTHONDONTWRITEBYTECODE=1
