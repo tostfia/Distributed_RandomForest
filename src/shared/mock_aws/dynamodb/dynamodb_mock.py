@@ -3,6 +3,7 @@ import os
 import fcntl
 from typing import Optional
 import time
+
 class MockDynamoDB:
     def __init__(self):
         base = os.environ.get("LOCAL_STORAGE_PATH", os.path.join(".", ".local_storage"))
@@ -43,6 +44,37 @@ class MockDynamoDB:
                 table, result = modify_fn(table)
                 self._save_table(table_name, table)
                 return result
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    def _locked_read(self, table_name: str) -> dict:
+        """
+        Lettura protetta da lock CONDIVISO (LOCK_SH). _save_table apre il
+        file dati in modalità 'w', che lo TRONCA a zero byte prima di
+        riscriverlo per intero: una lettura non protetta che capita in
+        quella finestra vede un file vuoto/a metà scritto e interpreta
+        (erroneamente) una chiave esistente come assente.
+
+        PRIMA get_item leggeva con _load_table() diretto, senza alcun lock
+        -- unico metodo di questa classe a farlo, mentre tutte le scritture
+        (put_item, delete_item, try_acquire_lock, ...) passano già da
+        _locked_read_modify_write con LOCK_EX. Causa diretta dei warning
+        intermittenti "Heartbeat ignorato: ... non risulta registrato" visti
+        nei log quando più worker si registrano/aggiornano quasi
+        simultaneamente: la lettura del proprio heartbeat capitava,
+        occasionalmente, proprio mentre un ALTRO worker stava scrivendo sullo
+        stesso file di tabella condiviso.
+
+        LOCK_SH invece di LOCK_EX: più letture concorrenti possono procedere
+        insieme (non si bloccano a vicenda), sono bloccate solo da uno
+        scrittore attivo (LOCK_EX) -- semantica reader/writer standard,
+        compatibile con gli scrittori esistenti senza modificarli.
+        """
+        lock_path = self._get_lock_path(table_name)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_SH)
+            try:
+                return self._load_table(table_name)
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
@@ -89,7 +121,7 @@ class MockDynamoDB:
 
     def get_item(self, table_name: str, key: str) -> Optional[dict]:
         str_key = str(key)
-        table = self._load_table(table_name)
+        table = self._locked_read(table_name)
         raw_item = table.get(str_key)
         if raw_item:
             pk_name = self._get_primary_key_name(table_name)
@@ -111,7 +143,13 @@ class MockDynamoDB:
         return result
 
     def scan_table(self, table_name: str) -> dict:
-        table_data = self._load_table(table_name)
+        # Stesso fix di get_item sopra (vedi _locked_read): senza lock
+        # condiviso, uno scan poteva capitare a metà di una scrittura
+        # concorrente su questo stesso file (es. un altro worker che si
+        # registra) e restituire una tabella momentaneamente vuota/troncata
+        # -- rilevante qui perché get_available_workers si basa proprio su
+        # scan_table per decidere quali worker sono disponibili.
+        table_data = self._locked_read(table_name)
         pk_name = self._get_primary_key_name(table_name)
         items_list = [
             {**value, pk_name: key}
@@ -125,7 +163,8 @@ class MockDynamoDB:
         (index_name viene ignorato nel mock, ma serve per mantenere l'interfaccia 
         identica a quella di AWS).
         """
-        table_data = self._load_table(table_name)
+        # Stesso fix di get_item/scan_table sopra (vedi _locked_read).
+        table_data = self._locked_read(table_name)
         pk_name = self._get_primary_key_name(table_name)
         items_list = []
         

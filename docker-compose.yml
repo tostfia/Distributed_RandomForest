@@ -1,7 +1,8 @@
 services:
   orchestrator:
     build: .
-    mem_limit: 2048m
+    cpus: '${ORCHESTRATOR_CPUS:-0.5}'
+    mem_limit: '${ORCHESTRATOR_MEM_LIMIT:-1024m}'
     image: ${IMAGE_NAME:-rf-worker-locale:latest}
     user: "${MY_UID:-1000}:${MY_GID:-1000}"
     stdin_open: true
@@ -36,7 +37,11 @@ services:
     ports:
       - "18861-18870:18861"
     cpus: '${WORKER_CPUS:-2.0}'
-    mem_limit: 2048m
+    # PRIMA: 2048m letterale, non regolabile da .env senza modificare
+    # questo file. Parametrizzato come WORKER_CPUS sopra (che era già
+    # corretto) -- il default resta 2048m, invariato per chi non tocca
+    # .env.
+    mem_limit: '${WORKER_MEM_LIMIT:-2048m}'
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - WORKER_HEARTBEAT_TIMEOUT=120
