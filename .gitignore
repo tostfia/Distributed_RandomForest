@@ -63,4 +63,5 @@ synthetic/*
 
 # === OUTPUT GRAFICI LOCALI ===
 # Ignora la cartella plots/ generata automaticamente dallo script di plottaggio
-plots/terraform/images.json
+plots/
+terraform/images.json
