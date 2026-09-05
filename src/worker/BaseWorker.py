@@ -172,7 +172,7 @@ class BaseWorker(Service, ABC):
         protocol_config = {
             'allow_public_attr': True,
             'allow_pickle': True,
-            'sync_request_timeout': 600,
+            'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
             'keepalive': True
         }
 
