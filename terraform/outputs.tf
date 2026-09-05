@@ -58,9 +58,16 @@ output "next_steps" {
     3. Avvia il client contro l'infrastruttura:
          ./run_aws.sh
 
-    4. Per fermare tutto senza distruggere l'infrastruttura (scala i Service a 0):
-         aws ecs update-service --cluster ${var.cluster_name} --service orchestrator-service --desired-count 0 --region ${var.aws_region}
-         (ripeti per ciascun worker-service)
+    4. Per fermare tutto senza distruggere l'infrastruttura:
+         - Orchestrator (EC2, non più un Service ECS): scala a 0 via Terraform
+           (imposta orchestrator_desired_count = 0 in terraform.tfvars e
+           rilancia 'terraform apply' — le istanze vengono distrutte, non solo
+           messe in pausa), oppure a mano con:
+             aws ec2 stop-instances --instance-ids <id1> <id2> --region ${var.aws_region}
+           (vedi output 'orchestrator_ec2_instance_ids' per gli ID)
+         - Worker (ancora su ECS Fargate):
+             aws ecs update-service --cluster ${var.cluster_name} --service worker-service --desired-count 0 --region ${var.aws_region}
+             (ripeti per ciascun worker-service in modalità federated)
 
     5. Per distruggere TUTTA l'infrastruttura creata da Terraform:
          terraform destroy

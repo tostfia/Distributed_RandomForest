@@ -1081,6 +1081,69 @@ class BaseOrchestrator(ABC):
         return (self.checkpoint_dao.exists(self._trees_checkpoint_part_path(job_id, 0))
                 or self.checkpoint_dao.exists(self._resolve_trees_checkpoint_path(job_id)))
 
+    def _iter_trees_checkpoint_parts(self, job_id: str):
+        """
+        Itera le parti del checkpoint alberi IN STREAMING, una alla volta,
+        invece di ricomporre l'intera foresta in un'unica lista come fa
+        _load_trees_checkpoint. Ogni yield è la lista di alberi di UNA parte
+        (dimensione tipica di un chunk worker, non dell'intera foresta): il
+        chiamante può processarla e lasciarla andare in garbage collection
+        prima che la parte successiva venga caricata, tenendo il picco di
+        RAM legato alla dimensione di una parte, non al totale.
+
+        Ricade sul checkpoint monolitico (formato precedente) se non esistono
+        parti incrementali, restituendolo come unica "parte" — stesso
+        fallback già presente in _load_trees_checkpoint.
+        """
+        index = 0
+        yielded_any = False
+        while True:
+            part_path = self._trees_checkpoint_part_path(job_id, index)
+            if not self.checkpoint_dao.exists(part_path):
+                break
+            yielded_any = True
+            yield self.checkpoint_dao.load(part_path)
+            index += 1
+
+        if not yielded_any:
+            legacy_path = self._resolve_trees_checkpoint_path(job_id)
+            if self.checkpoint_dao.exists(legacy_path):
+                yield list(self.checkpoint_dao.load(legacy_path))
+
+    def _iter_checkpoint_trees(self, job_id: str):
+        """Appiattisce le parti in singoli alberi, sempre in streaming (una
+        parte alla volta in RAM, mai l'intera foresta)."""
+        for part_trees in self._iter_trees_checkpoint_parts(job_id):
+            yield from part_trees
+
+    def _iter_checkpoint_tree_ranges(self, job_id: str, chunk_size: int):
+        """
+        Itera la foresta persistita in blocchi CONTIGUI di 'chunk_size' alberi
+        (l'ultimo blocco può essere più corto), leggendo le parti sottostanti
+        una alla volta e accumulando in un buffer solo il tanto che serve a
+        comporre il prossimo blocco richiesto — mai l'intera foresta in RAM
+        contemporaneamente (al più ~2 parti, quella corrente e la successiva
+        appena letta). Pensato per l'inferenza, che oggi affetta
+        'all_trees[tree_start:tree_end]' da una lista già interamente
+        materializzata: qui lo stesso pattern di slicing sequenziale è
+        soddisfatto senza mai caricare più del necessario.
+
+        Ogni yield è (start_index, end_index, lista_di_alberi_del_blocco).
+        """
+        buffer = []
+        start_index = 0
+        for part_trees in self._iter_trees_checkpoint_parts(job_id):
+            buffer.extend(part_trees)
+            while len(buffer) >= chunk_size:
+                block = buffer[:chunk_size]
+                end_index = start_index + len(block)
+                yield start_index, end_index, block
+                buffer = buffer[chunk_size:]
+                start_index = end_index
+        if buffer:
+            end_index = start_index + len(buffer)
+            yield start_index, end_index, buffer
+
     def _persist_trees_delta(self, job_id: str, snapshot: list, already_persisted: int, part_index: int) -> None:
         """
         Persiste UNA parte. Alla parte 0 scrive l'intero snapshot e rimuove
@@ -1350,7 +1413,7 @@ class BaseOrchestrator(ABC):
 
     def _compute_oob_metrics(
             self,
-            all_trees: list,
+            tree_source,
             X_train: np.ndarray,
             y_train: np.ndarray,
             tree_type: str
@@ -1370,33 +1433,50 @@ class BaseOrchestrator(ABC):
             con bootstrap=False), vengono semplicemente esclusi dal calcolo.
             Restituisce None se non c'è materiale sufficiente per una stima
             (nessun albero con indici OOB, o nessun campione mai lasciato fuori).
+
+            `tree_source` è un CALLABLE senza argomenti che restituisce, ad
+            ogni chiamata, un iterabile FRESCO di alberi (es. una funzione che
+            rilegge le parti persistite su storage una alla volta) — non una
+            lista già materializzata in RAM. Serve perché la stima per la
+            classificazione richiede due passate (una per lo spazio di classi
+            globale, una per l'aggregazione): con una lista in memoria le due
+            passate sono gratis, ma qui l'obiettivo è non tenere mai l'intera
+            foresta viva in RAM contemporaneamente, quindi si rilegge lo
+            storage due volte invece di pagare quel picco.
             """
             n_samples = X_train.shape[0]
-            trees_with_oob = [
-                t for t in all_trees
-                if getattr(t, "oob_sample_indices_", None) is not None and len(t.oob_sample_indices_) > 0
-            ]
-
-            if not trees_with_oob:
-                print(f"[{self.orchestrator_name}] [OOB] Nessun albero con indici OOB disponibili "
-                      f"(bootstrap disattivato o alberi troppo vecchi). Stima OOB saltata.")
-                return None
 
             if tree_type == "classifier":
-                trees_with_classes = [t for t in trees_with_oob if hasattr(t, "classes_")]
-                if not trees_with_classes:
+                classes_seen = []
+                any_with_oob = False
+                for t in tree_source():
+                    has_oob = getattr(t, "oob_sample_indices_", None) is not None and len(t.oob_sample_indices_) > 0
+                    if has_oob:
+                        any_with_oob = True
+                        if hasattr(t, "classes_"):
+                            classes_seen.append(np.asarray(t.classes_))
+
+                if not any_with_oob:
+                    print(f"[{self.orchestrator_name}] [OOB] Nessun albero con indici OOB disponibili "
+                          f"(bootstrap disattivato o alberi troppo vecchi). Stima OOB saltata.")
+                    return None
+                if not classes_seen:
                     print(f"[{self.orchestrator_name}] [OOB] Nessun albero espone 'classes_'. Stima OOB saltata.")
                     return None
-                global_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                global_classes = np.unique(np.concatenate(classes_seen))
                 n_classes = len(global_classes)
 
                 # Media delle probabilità (soft voting) SOLO fra gli alberi per cui
                 # il campione era OOB, coerente con l'aggregazione usata in inferenza.
                 proba_sum = np.zeros((n_samples, n_classes), dtype=np.float64)
                 oob_count = np.zeros(n_samples, dtype=np.int64)
+                trees_used = 0
 
-                for t in trees_with_oob:
-                    oob_idx = t.oob_sample_indices_
+                for t in tree_source():
+                    oob_idx = getattr(t, "oob_sample_indices_", None)
+                    if oob_idx is None or len(oob_idx) == 0:
+                        continue
+                    trees_used += 1
                     raw_proba = t.predict_proba(X_train[oob_idx])
                     tree_classes = np.asarray(t.classes_)
                     col_positions = np.searchsorted(global_classes, tree_classes)
@@ -1423,11 +1503,20 @@ class BaseOrchestrator(ABC):
             else:
                 pred_sum = np.zeros(n_samples, dtype=np.float64)
                 oob_count = np.zeros(n_samples, dtype=np.int64)
+                trees_used = 0
 
-                for t in trees_with_oob:
-                    oob_idx = t.oob_sample_indices_
+                for t in tree_source():
+                    oob_idx = getattr(t, "oob_sample_indices_", None)
+                    if oob_idx is None or len(oob_idx) == 0:
+                        continue
+                    trees_used += 1
                     pred_sum[oob_idx] += t.predict(X_train[oob_idx])
                     oob_count[oob_idx] += 1
+
+                if trees_used == 0:
+                    print(f"[{self.orchestrator_name}] [OOB] Nessun albero con indici OOB disponibili "
+                          f"(bootstrap disattivato o alberi troppo vecchi). Stima OOB saltata.")
+                    return None
 
                 covered = oob_count > 0
                 if not np.any(covered):
@@ -1445,9 +1534,9 @@ class BaseOrchestrator(ABC):
             coverage = float(np.mean(covered))
             metrics["oob_coverage"] = coverage
             metrics["oob_samples_used"] = int(np.sum(covered))
-            metrics["oob_trees_used"] = len(trees_with_oob)
+            metrics["oob_trees_used"] = trees_used
             print(f"[{self.orchestrator_name}] [OOB] Stima calcolata su {int(np.sum(covered))}/{n_samples} "
-                  f"campioni ({coverage * 100:.1f}% di copertura) usando {len(trees_with_oob)} alberi.")
+                  f"campioni ({coverage * 100:.1f}% di copertura) usando {trees_used} alberi.")
             return metrics
 
     def calculate_metrics(

@@ -29,7 +29,7 @@ else
   TRAINING_MODE="centralized"
 fi
 
-echo "==> [0/6] Arresto di eventuali task one-off del test-engine ancora attivi..."
+echo "==> [1/6] Arresto di eventuali task one-off del test-engine ancora attivi..."
 STRAY_ENGINE_TASKS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" \
   --family "rf-test-engine-task" --desired-status RUNNING \
   --query "taskArns[]" --output text --region "$REGION" 2>/dev/null || echo "")
@@ -145,7 +145,7 @@ purge_dynamodb_table() {
   echo "    Tabella '$table' svuotata: $removed elementi rimossi."
 }
 
-echo "==> [1/5] Scoperta dei Service attivi sul cluster (worker-service, worker-service-N, orchestrator-service)..."
+echo "==> [2/6] Scoperta dei Service attivi sul cluster (worker-service, worker-service-N, orchestrator-service)..."
 # Non hardcodiamo i nomi: con TRAINING_MODE=centralized esiste 'worker-service',
 # con TRAINING_MODE=federated esistono 'worker-service-1'..'worker-service-N'.
 # Scopriamo dinamicamente cosa c'è davvero sul cluster, così funziona in entrambi
@@ -200,7 +200,7 @@ else
 
   # Polling esplicito per-service invece del waiter 'services-stable' (che su
   # service già eliminati fallisce sempre, vedi commento di wait_for_service_removal).
-  echo "==> [2/5] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
+  echo "==> [3/6] Attendo lo spegnimento REALE dei container (Sincronizzazione)..."
   for svc in "${TARGET_SERVICES[@]}"; do
     wait_for_service_removal "$svc"
   done
@@ -208,7 +208,7 @@ else
 
   if [ "$PURGE_LEGACY_MODE" -eq 1 ] && [ "${#LEGACY_SERVICES[@]}" -gt 0 ]; then
     echo ""
-    echo "==> [2b/5] --purge-legacy-mode: eliminazione definitiva dei service legacy..."
+    echo "==> [3b/6] --purge-legacy-mode: eliminazione definitiva dei service legacy..."
     for svc in "${LEGACY_SERVICES[@]}"; do
       echo "    Eliminazione service '$svc' (modalità diversa da $TRAINING_MODE)..."
       aws ecs delete-service --cluster "$CLUSTER_NAME" --service "$svc" --force --region "$REGION" > /dev/null 2>&1 \
@@ -218,7 +218,36 @@ else
   fi
 fi
 
-echo "==> [3/5] Svuotamento stato applicativo su DynamoDB..."
+echo "==> [EC2] Terminazione delle istanze EC2 dell'orchestrator..."
+# L'orchestrator non gira più come Service ECS (vedi orchestrator_ec2.tf):
+# NESSUNO step sopra lo tocca, perché lavorano tutti solo su 'ecs list-tasks'/
+# 'ecs list-services'. Senza questo step, le istanze EC2 (r5.large,
+# ~0,252 USD/ora per le due insieme) resterebbero accese indefinitamente
+# anche dopo un teardown "completo" — esattamente il rischio di credito
+# di cui parlavamo. Le terminiamo (non solo stop): coerente con come
+# questo script tratta già i Service ECS qui sopra (eliminazione
+# definitiva, non solo desired-count=0) — per farle ripartire, il modo
+# corretto resta 'terraform apply' (ricrea le istanze da zero, con
+# l'immagine Docker più recente), non un semplice 'start-instances'.
+ORCH_INSTANCE_IDS=$(aws ec2 describe-instances --region "$REGION" \
+  --filters "Name=tag:Project,Values=rf-distributed" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+  --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null || echo "")
+
+if [ -n "$ORCH_INSTANCE_IDS" ]; then
+  echo "    Istanze EC2 trovate: $ORCH_INSTANCE_IDS"
+  aws ec2 terminate-instances --instance-ids $ORCH_INSTANCE_IDS --region "$REGION" > /dev/null 2>&1 \
+    && echo "    Terminazione avviata." \
+    || echo "    [ATTENZIONE] Terminazione fallita, verifica manualmente."
+  echo "    Attendo la terminazione reale..."
+  aws ec2 wait instance-terminated --instance-ids $ORCH_INSTANCE_IDS --region "$REGION" 2>/dev/null \
+    && echo "    Istanze EC2 terminate con successo." \
+    || echo "    [ATTENZIONE] Timeout/errore in attesa della terminazione: verifica manualmente con"
+  echo "                 aws ec2 describe-instances --instance-ids $ORCH_INSTANCE_IDS --region $REGION"
+else
+  echo "    Nessuna istanza EC2 dell'orchestrator trovata (già ferma, o mai creata)."
+fi
+
+echo "==> [4/6] Svuotamento stato applicativo su DynamoDB..."
 echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks, WorkerIndexLocks, JobMetadata"
 echo "    Nota: vengono rimossi solo gli ITEM, le tabelle restano intatte."
 
@@ -240,7 +269,7 @@ for t in "${DYNAMO_TABLES[@]}"; do
   purge_dynamodb_table "$t"
 done
 
-echo "==> [4/5] Svuotamento Code SQS FIFO..."
+echo "==> [5/6] Svuotamento Code SQS FIFO..."
 QUEUES=("centralized_queue.fifo" "federated_queue.fifo")
 for q in "${QUEUES[@]}"; do
   URL=$(aws sqs get-queue-url --queue-name "$q" --query "QueueUrl" --output text --region "$REGION" 2>/dev/null || echo "None")
@@ -274,7 +303,7 @@ done
 #                            cancellazione solo esplicita, a mano o con --purge-models
 #   - metrics/, test_reports/  risultati dei test, servono per i confronti
 # ---------------------------------------------------------------------
-echo "==> [5/5] Pulizia degli artefatti temporanei di test su S3..."
+echo "==> [6/6] Pulizia degli artefatti temporanei di test su S3..."
 for prefix in "distributed_trains/" "distributed_tests/" "tasks/" "checkpoints/"; do
   aws s3 rm "s3://$DATASETS_BUCKET_NAME/$prefix" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: $prefix" \
@@ -328,6 +357,11 @@ echo "I dataset in 'real/' e i modelli in 'saved_models/' sono al sicuro (salvo 
 echo "I servizi restano configurati (task definition, cluster, ECR)"
 echo "ma desired-count=0 significa nessun task Fargate attivo -> nessun costo di compute."
 echo ""
+echo ""
+echo "Per far ripartire l'orchestrator (EC2, terminato sopra): rilancia 'terraform apply'"
+echo "dalla cartella terraform/ (orchestrator_desired_count nel tuo terraform.tfvars"
+echo "decide quante istanze ricreare — di solito 2, per leader election/failover)."
+echo ""
 echo "Per far ripartire tutto senza rifare il deploy da capo:"
 if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
   echo "  (nessun service trovato in fase di teardown: verifica il nome dei service col deploy usato)"
@@ -349,7 +383,7 @@ else
       continue  # eliminato con --purge-legacy-mode: non ha più senso riavviarlo
     fi
     if [ "$svc" == "orchestrator-service" ]; then
-      echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count 2 --region $REGION"
+      continue  # non esiste più: orchestrator è su EC2, vedi nota sotto
     elif [ "$svc" == "worker-service" ]; then
       # centralized: unico service, il desired-count va al NUM_WORKERS originale (non 1)
       echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count \$NUM_WORKERS --region $REGION"

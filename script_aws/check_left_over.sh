@@ -31,7 +31,7 @@ fi
 # 1) TUTTI i cluster ECS (non solo forest-cluster): servizi attivi e task
 # ---------------------------------------------------------------------
 echo ""
-echo "--- [1/4] Cluster ECS: servizi attivi e task in esecuzione ---------"
+echo "--- [1/5] Cluster ECS: servizi attivi e task in esecuzione ---------"
 
 CLUSTER_ARNS=$(aws ecs list-clusters --region "$REGION" --query "clusterArns[]" --output text 2>/dev/null || echo "")
 
@@ -83,7 +83,7 @@ fi
 # 2) NAT Gateway attivi (costo orario fisso indipendente dal traffico)
 # ---------------------------------------------------------------------
 echo ""
-echo "--- [2/4] NAT Gateway attivi ----------------------------------------"
+echo "--- [2/5] NAT Gateway attivi ----------------------------------------"
 
 NAT_INFO=$(aws ec2 describe-nat-gateways --region "$REGION" \
   --filter "Name=state,Values=available" \
@@ -104,7 +104,7 @@ fi
 # 3) Load Balancer attivi (ALB/NLB/CLB: costo orario fisso ciascuno)
 # ---------------------------------------------------------------------
 echo ""
-echo "--- [3/4] Load Balancer attivi --------------------------------------"
+echo "--- [3/5] Load Balancer attivi --------------------------------------"
 
 ALB_NLB_INFO=$(aws elbv2 describe-load-balancers --region "$REGION" \
   --query "LoadBalancers[].[LoadBalancerArn,LoadBalancerName,Type,State.Code]" --output text 2>/dev/null || echo "")
@@ -138,7 +138,7 @@ fi
 #    (entrambi fatturati a ore indipendentemente dall'uso)
 # ---------------------------------------------------------------------
 echo ""
-echo "--- [4/4] Elastic IP non associati e VPC Endpoint Interface --------"
+echo "--- [4/5] Elastic IP non associati e VPC Endpoint Interface --------"
 
 UNUSED_EIP=$(aws ec2 describe-addresses --region "$REGION" \
   --query "Addresses[?AssociationId==null].[AllocationId,PublicIp]" --output text 2>/dev/null || echo "")
@@ -167,6 +167,30 @@ if [ -n "$VPCE_INFO" ]; then
   done
 else
   echo "  Pulito (nessun VPC Endpoint Interface attivo)."
+fi
+
+# ---------------------------------------------------------------------
+# 5) Istanze EC2 attive (orchestrator ora gira qui, non più su ECS:
+#    NON coperto da nessun controllo sopra, che guarda solo cluster ECS)
+# ---------------------------------------------------------------------
+echo ""
+echo "--- [5/5] Istanze EC2 attive -----------------------------------------"
+
+EC2_INFO=$(aws ec2 describe-instances --region "$REGION" \
+  --filters "Name=instance-state-name,Values=running,pending" \
+  --query "Reservations[].Instances[].[InstanceId,InstanceType,Tags[?Key=='Name']|[0].Value,LaunchTime]" \
+  --output text 2>/dev/null || echo "")
+
+if [ -n "$EC2_INFO" ]; then
+  FOUND_ANYTHING=1
+  echo "  [ATTIVO] Istanze EC2 in esecuzione (es. orchestrator-ec2-1/-2, r5.large ~0,126 USD/ora ciascuna):"
+  echo "$EC2_INFO" | while IFS=$'\t' read -r inst_id inst_type inst_name launch_time; do
+    echo "    - $inst_id ($inst_type, nome: ${inst_name:-nessuno}, avviata: $launch_time)"
+    echo "      Per fermarla (pausa, EBS ancora fatturato): aws ec2 stop-instances --instance-ids $inst_id --region $REGION"
+    echo "      Per distruggerla (coerente con Terraform, poi 'terraform apply' la ricrea se serve): aws ec2 terminate-instances --instance-ids $inst_id --region $REGION"
+  done
+else
+  echo "  Pulito (nessuna istanza EC2 in esecuzione)."
 fi
 
 # ---------------------------------------------------------------------

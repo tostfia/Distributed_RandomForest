@@ -17,45 +17,15 @@ locals {
     { name = "DATASETS_BUCKET_NAME", value = local.datasets_bucket_name },
   ]
 }
-# ---------------------------------------------------------------------
-# ORCHESTRATOR 
-# ---------------------------------------------------------------------
-resource "aws_ecs_task_definition" "orchestrator" {
-  family                   = "lab-orchestrator-task"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.orchestrator_cpu
-  memory                   = var.orchestrator_memory
-  task_role_arn             = data.aws_iam_role.lab_role.arn
-  execution_role_arn        = data.aws_iam_role.lab_role.arn
 
-  container_definitions = jsonencode([
-    {
-      name      = "orchestrator"
-      image     = local.image_uri
-      essential = true
-      environment = concat(local.common_env, [
-        { name = "WORKER_HEARTBEAT_TIMEOUT", value = var.worker_heartbeat_timeout },
-        { name = "RPC_SYNC_TIMEOUT_SECONDS", value = "${var.rpc_sync_timeout_seconds}s" },
-        { name = "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", value = "${var.rpc_inference_sync_timeout_seconds}s" },
-      ])
-      command = [
-        "sh", "-c",
-        "export ORCHESTRATOR_INDEX=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4/task\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['TaskARN'].split('/')[-1])\"); echo \"Registrazione con Task ID: $ORCHESTRATOR_INDEX\"; exec python -m src.master.orchestrator.main"
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = "/ecs/lab-orchestrator"
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "orchestrator"
-        }
-      }
-    }
-  ])
-
-  depends_on = [null_resource.docker_build_push]
-}
+# ---------------------------------------------------------------------
+# ORCHESTRATOR: rimosso da qui. Non gira più come task ECS Fargate — la
+# SCP del Learner Lab nega 'ecs:RegisterTaskDefinition' con memoria > 8192
+# MiB (sia FARGATE che EC2-backed), un tetto troppo stretto per gli
+# scenari di scalabilità pesanti (~7 GiB di alberi in RAM con 10 worker).
+# Ora gira su istanze EC2 dedicate (r5.large, 16 GiB), fuori da ECS ma
+# nella stessa VPC/Security Group — vedi orchestrator_ec2.tf.
+# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 # WORKER - modalità CENTRALIZED

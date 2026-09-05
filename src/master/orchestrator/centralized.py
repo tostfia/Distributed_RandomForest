@@ -9,7 +9,6 @@ import threading
 import traceback
 from rpyc.utils.classic import obtain
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
@@ -22,12 +21,9 @@ from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import (
-    load_task_from_shared_storage,
     load_task_trees_from_shared_storage,
     save_bytes_to_shared_storage,
-    load_bytes_from_shared_storage,
 )
-
 
 TEST_SIZE = 0.2
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
@@ -709,15 +705,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     try: conn.close()
                     except Exception: pass
 
-        # 8. Ricomposizione della foresta globale
+        # 8. Costruzione del manifesto del modello globale (streaming: nessun
+        #    assemblaggio scikit-learn completo in RAM)
         if len(all_trained_trees) > 0:
-            print(f"   [{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
+            print(f"   [{self.orchestrator_name}] Costruzione del manifesto del modello globale "
+                  f"(streaming, nessun assemblaggio scikit-learn completo in RAM)...")
             aggregation_start = time.perf_counter()
             try:
                 n_features = all_trained_trees[0].n_features_in_
-                
+                n_estimators = len(all_trained_trees)
+
+                classes_list = None
+                n_classes = None
                 if tree_type == "classifier":
-                    global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
                     # Deriviamo le classi reali dagli alberi già addestrati (ogni DecisionTree
                     # fittato conserva il proprio attributo classes_), invece di assumere
                     # staticamente un problema binario con etichette {0, 1}. Con classi diverse
@@ -729,28 +729,50 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     else:
                         print(f"   [{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
                         detected_classes = np.array([0, 1])
-                    global_model.classes_ = detected_classes.astype(np.int64)
-                    global_model.n_classes_ = len(detected_classes)
-                else:
-                    global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
-                
-                global_model.estimators_ = all_trained_trees
-                global_model.n_features_in_ = n_features
-                global_model.n_outputs_ = 1
-                
-                
-                model_path = self._resolve_model_path(self.current_job_id)
-                self.checkpoint_dao.save(model_path, global_model)
-                
-                print(f"   [{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
+                    classes_list = detected_classes.astype(np.int64).tolist()
+                    n_classes = len(classes_list)
 
-                # La ricomposizione e il salvataggio finiscono qui: la stima OOB
-                # che segue è una diagnostica separata (ricarica il training set
-                # e ricalcola le predizioni), quindi va cronometrata a parte per
-                # non gonfiare il costo attribuito all'addestramento.
+                # Manifesto leggero invece del modello scikit-learn intero: gli
+                # alberi restano dove sono già (le parti scritte incrementalmente
+                # da _persist_trees_delta durante il dispatch, poco sopra) —
+                # evita di pickle-are ~7 GiB di alberi già vivi in RAM (che
+                # raddoppierebbero temporaneamente il picco: causa dell'OOM
+                # osservato empiricamente proprio a questo punto, con 10
+                # worker/100 alberi). L'inferenza e la stima OOB rileggono le
+                # parti in streaming (_iter_checkpoint_trees/
+                # _iter_checkpoint_tree_ranges in BaseOrchestrator.py) invece
+                # di ricostruire l'oggetto RandomForest completo.
+                manifest = {
+                    "n_estimators": n_estimators,
+                    "n_features_in_": int(n_features),
+                    "n_outputs_": 1,
+                    "tree_type": tree_type,
+                    "classes_": classes_list,
+                    "n_classes_": n_classes,
+                    "job_id": self.current_job_id,
+                }
+
+                model_path = self._resolve_model_path(self.current_job_id)
+                self.checkpoint_dao.save(model_path, manifest)
+
+                print(f"   [{self.orchestrator_name}] Manifesto del modello salvato con successo in "
+                      f"'{model_path}' ({n_estimators} alberi, referenziati dalle parti già persistite).")
+
                 self.last_aggregation_seconds = time.perf_counter() - aggregation_start
-                print(f"[DEBUG TIMING] Ricomposizione e salvataggio del modello: "
+                print(f"[DEBUG TIMING] Costruzione manifesto e salvataggio: "
                       f"{self.last_aggregation_seconds:.2f}s.")
+
+                # Libera esplicitamente la foresta materializzata dalla RAM: da
+                # qui in poi (stima OOB) si rilegge in streaming dallo storage,
+                # non serve più tenerla viva. Include anche la cache cross-round
+                # (self._trees_cache), che altrimenti manterrebbe un riferimento
+                # vivo indipendentemente da questa variabile locale — sicuro da
+                # rimuovere qui perché il training di QUESTO job è concluso,
+                # nessun round futuro potrà mai più averne bisogno.
+                self._trees_cache.pop(self.current_job_id, None)
+                n_trees_for_report = len(all_trained_trees)
+                del all_trained_trees
+                gc.collect()
 
                 # ─── STIMA OOB (Breiman, 2001), "gratis" e non bloccante ───
                 # Se fallisce per qualunque motivo, non deve invalidare un training
@@ -759,7 +781,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 try:
                     X_train_oob, y_train_oob = self._load_training_matrix_for_oob(tree_type)
                     oob_metrics = self._compute_oob_metrics(
-                        all_trees=all_trained_trees,
+                        tree_source=lambda: self._iter_checkpoint_trees(self.current_job_id),
                         X_train=X_train_oob,
                         y_train=y_train_oob,
                         tree_type=tree_type
@@ -767,7 +789,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     if oob_metrics is not None:
                         self._save_metrics(self.current_job_id, "training_oob", {
                             "job_id": self.current_job_id, "mode": "centralized", "phase": "training_oob",
-                            "tree_type": tree_type, "n_estimators": len(all_trained_trees),
+                            "tree_type": tree_type, "n_estimators": n_trees_for_report,
                             "metrics": oob_metrics
                         })
                 except Exception as e_oob:
@@ -786,10 +808,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                       f"{self.last_aggregation_seconds:.2f}s | OOB {self.last_oob_seconds:.2f}s")
 
                 # ─── MODIFICA 3: Restituiamo la dimensione REALE degli alberi salvati ───
-                return len(all_trained_trees)
+                return n_trees_for_report
                 
             except Exception as e:
-                print(f"   [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
+                print(f"   [ERRORE AGGREGAZIONE] Fallimento durante la costruzione del manifesto: {e}")
                 traceback.print_exc()
                 return len(all_trained_trees)
 
@@ -820,20 +842,23 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         print(f"[{self.orchestrator_name}] [AUTO-RESOLVE] Modello: {model_path} | Test Data: {self.test_data_path}")
 
-        # 2. CARICAMENTO DELLA FORESTA (MODELLO GLOBALE AGGREGATO)
+        # 2. CARICAMENTO DEL MANIFESTO DEL MODELLO (non più l'oggetto scikit-learn
+        #    completo: gli alberi restano sulle parti già persistite durante il
+        #    training, letti in streaming più sotto — evita di deserializzare
+        #    l'intera foresta (~7 GiB in questo scenario) in un colpo solo,
+        #    prima ancora di iniziare a smistare i chunk ai worker)
         if not self.checkpoint_dao.exists(model_path):
             raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
-        print(f"[{self.orchestrator_name}] Caricamento della foresta globale da {model_path}...")
-        global_model = self.checkpoint_dao.load(model_path)
-        all_trees = global_model.estimators_
-        total_trees = len(all_trees)
-        print(f"[{self.orchestrator_name}] Foresta caricata. Numero totale di alberi: {total_trees}")
+        print(f"[{self.orchestrator_name}] Caricamento del manifesto del modello da {model_path}...")
+        manifest = self.checkpoint_dao.load(model_path)
+        total_trees = manifest["n_estimators"]
+        print(f"[{self.orchestrator_name}] Manifesto caricato. Numero totale di alberi: {total_trees}")
 
-        # Spazio di classi GLOBALE (calcolato in fase di training su TUTTI gli alberi):
-        # serve ai worker per allineare le colonne di predict_proba di ogni singolo
-        # albero, anche quando un albero non ha visto tutte le classi nel proprio
-        # campione bootstrap.
-        global_classes = global_model.classes_.tolist() if tree_type == "classifier" else None
+        # Spazio di classi GLOBALE (calcolato in fase di training su TUTTI gli
+        # alberi, salvato nel manifesto): serve ai worker per allineare le
+        # colonne di predict_proba di ogni singolo albero, anche quando un
+        # albero non ha visto tutte le classi nel proprio campione bootstrap.
+        global_classes = manifest.get("classes_") if tree_type == "classifier" else None
 
         # 3. CARICAMENTO E PREPARAZIONE DEL DATASET DI TEST TRAMITE DAO
         print(f"[{self.orchestrator_name}] Caricamento Testing Set persistito via DAO: {self.test_data_path}")
@@ -864,9 +889,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
         CHUNK_SIZE = int(np.ceil(total_trees /num_workers))
         print(f"[{self.orchestrator_name}] CHUNK_SIZE di inferenza impostata a {CHUNK_SIZE} alberi per task.")
 
-        # Popolamento della coda thread-safe dei sotto-task di inferenza
+        # Popolamento della coda thread-safe dei sotto-task di inferenza. I
+        # blocchi vengono letti IN STREAMING dalle parti già persistite
+        # durante il training (_iter_checkpoint_tree_ranges in
+        # BaseOrchestrator.py), non affettati da una lista 'all_trees' già
+        # interamente materializzata: al più ~2 parti vive in RAM per volta,
+        # mai l'intera foresta.
         task_queue = queue.Queue()
-        tree_start = 0
         task_id_counter = 0
         predictions_chunks = self._load_inference_checkpoint(job_id)  # Tentativo di ripristino da checkpoint
         already_done_ranges = {start for start, _ in predictions_chunks}
@@ -874,10 +903,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
        
         active_worker_names = list(worker_names)
         self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
-        while tree_start < total_trees:
-            tree_end = min(tree_start + CHUNK_SIZE, total_trees)
+        for tree_start, tree_end, chunk_estimators in self._iter_checkpoint_tree_ranges(job_id, CHUNK_SIZE):
             if tree_start not in already_done_ranges:
-                chunk_estimators = all_trees[tree_start:tree_end]
                 serialized_chunk_trees = pickle.dumps(chunk_estimators)
                 # Il chunk di alberi NON viaggia più come argomento della RPC
                 # (fino a 1+ GB con pochi worker attivi, stesso problema già
@@ -890,7 +917,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 task_id_counter += 1
             else: 
                 print(f"[SHORT-CIRCUIT] Chunk {tree_start}-{tree_end} già completato. Skip.")
-            tree_start = tree_end
+
 
         # Strutture dati condivise protette da Lock per i thread consumatori
         MAX_RETRIES_PER_TASK = 3  # Numero massimo di tentativi per ogni sotto-task prima di considerarlo fallito

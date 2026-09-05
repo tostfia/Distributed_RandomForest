@@ -317,6 +317,44 @@ def _resolve_ecs_task_arn_by_ip(ecs_client, cluster, service_name, ip_dashed):
     return None
 
 
+def _resolve_ec2_instance_by_ip(ec2_client, ip_dashed):
+    """
+    Equivalente EC2 di _resolve_ecs_task_arn_by_ip qui sopra — vedi il
+    commento gemello in orchestrator_fault.py per il dettaglio: le istanze
+    EC2 condividono lo stesso formato di hostname interno AWS delle ENI
+    Fargate, quindi l'estrazione dell'IP dal nome del leader resta identica.
+    """
+    reservations = ec2_client.describe_instances(
+        Filters=[
+            {"Name": "tag:Project", "Values": ["rf-distributed"]},
+            {"Name": "instance-state-name", "Values": ["running"]},
+        ]
+    ).get("Reservations", [])
+    for r in reservations:
+        for inst in r.get("Instances", []):
+            ip = inst.get("PrivateIpAddress", "")
+            if ip and ip.replace(".", "-") == ip_dashed:
+                return inst.get("InstanceId")
+    return None
+
+
+def _kill_orchestrator_container_via_ssm(ssm_client, instance_id, hard_kill=True):
+    """
+    Vedi il commento gemello in orchestrator_fault.py per il dettaglio
+    completo. hard_kill=True esegue 'docker kill' (SIGKILL diretto,
+    nessuna finestra di grazia) via SSM Run Command — il caso peggiore,
+    non testabile su Fargate ma raggiungibile qui perché l'host è una vera
+    istanza EC2, non un container ECS.
+    """
+    command = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    send_resp = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+    )
+    return send_resp["Command"]["CommandId"]
+
+
 class InferenceOrchestratorFaultScenario(BaseTestScenario):
     """
     Copre lo Scenario: Failover dell'Orchestratore durante la fase di inferenza.
@@ -835,19 +873,21 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             # sul formato atteso per il confronto con l'IP letto da ECS.
             ip_dashed = ip_match.group(1)
             try:
-                ecs = boto3.client("ecs", region_name=region)
-                target_arn = _resolve_ecs_task_arn_by_ip(ecs, cluster, service_name, ip_dashed)
-                if target_arn:
-                    print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO: fermo il task ECS del leader "
-                          f"'{killed_leader_name}' ({target_arn.split('/')[-1]}) !!!")
-                    ecs.stop_task(cluster=cluster, task=target_arn,
-                                  reason="[TEST] Simulazione crash orchestratore leader durante inferenza (failover scenario)")
+                ec2 = boto3.client("ec2", region_name=region)
+                ssm = boto3.client("ssm", region_name=region)
+                target_instance_id = _resolve_ec2_instance_by_ip(ec2, ip_dashed)
+                if target_instance_id:
+                    print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO: uccido il container "
+                          f"'orchestrator' sull'istanza EC2 del leader '{killed_leader_name}' "
+                          f"({target_instance_id}) via SSM durante l'inferenza (docker kill, "
+                          f"nessuna finestra di grazia) !!!")
+                    _kill_orchestrator_container_via_ssm(ssm, target_instance_id, hard_kill=True)
                     stopped = True
                 else:
-                    print(f"[TEST ERRORE] Nessun task ECS di '{service_name}' corrisponde all'IP del leader "
-                          f"'{killed_leader_name}': impossibile fermarlo.")
+                    print(f"[TEST ERRORE] Nessuna istanza EC2 dell'orchestrator corrisponde all'IP "
+                          f"del leader '{killed_leader_name}': impossibile fermarlo.")
             except Exception as e:
-                print(f"[TEST ERRORE] Impossibile fermare il task ECS del leader: {e}")
+                print(f"[TEST ERRORE] Impossibile fermare l'istanza EC2 del leader via SSM: {e}")
         else:
             print(f"[TEST ERRORE] Formato nome leader inatteso ('{killed_leader_name}'): impossibile estrarne l'IP.")
 

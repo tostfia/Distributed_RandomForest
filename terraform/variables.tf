@@ -33,7 +33,7 @@ variable "num_workers" {
 }
 
 variable "orchestrator_desired_count" {
-  description = "Numero di istanze orchestrator (>=2 per testare la leader election / failover)."
+  description = "Numero di istanze EC2 dell'orchestrator (>=2 per testare la leader election / failover). Non più un desired-count ECS: l'orchestrator gira su istanze EC2 dedicate, vedi orchestrator_ec2.tf (la SCP del Learner Lab nega task definition ECS con memoria > 8192 MiB, insufficiente per gli scenari di scalabilità pesanti)."
   type        = number
   default     = 2
 }
@@ -48,18 +48,6 @@ variable "worker_memory" {
   description = "Memoria (MiB) allocata per worker. Deve essere un valore compatibile con worker_cpu secondo le combinazioni Fargate."
   type        = string
   default     = "8192"
-}
-
-variable "orchestrator_cpu" {
-  description = "vCPU allocate per orchestrator in unità Fargate."
-  type        = string
-  default     = "2048"
-}
-
-variable "orchestrator_memory" {
-  description = "Memoria (MiB) allocata per orchestrator."
-  type        = string
-  default     = "16384"
 }
 
 variable "test_engine_cpu" {

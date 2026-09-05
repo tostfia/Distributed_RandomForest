@@ -230,6 +230,63 @@ def _resolve_ecs_task_arn_by_ip(ecs_client, cluster, service_name, ip_dashed):
     return None
 
 
+def _resolve_ec2_instance_by_ip(ec2_client, ip_dashed):
+    """
+    Equivalente EC2 di _resolve_ecs_task_arn_by_ip qui sopra: trova, tra le
+    istanze EC2 dell'orchestrator (tag Project=rf-distributed, in stato
+    'running'), quella il cui IP privato corrisponde al frammento estratto
+    dal nome del leader. Le istanze EC2 hanno lo STESSO formato di hostname
+    interno AWS ('ip-x-x-x-x.ec2.internal') delle ENI Fargate — è una
+    convenzione generale AWS, non specifica di ECS — quindi l'estrazione
+    dell'IP dal nome del leader (vedi ip_match più sotto) resta identica:
+    cambia solo COME si arriva dall'IP all'oggetto infrastrutturale target.
+    """
+    reservations = ec2_client.describe_instances(
+        Filters=[
+            {"Name": "tag:Project", "Values": ["rf-distributed"]},
+            {"Name": "instance-state-name", "Values": ["running"]},
+        ]
+    ).get("Reservations", [])
+    for r in reservations:
+        for inst in r.get("Instances", []):
+            ip = inst.get("PrivateIpAddress", "")
+            if ip and ip.replace(".", "-") == ip_dashed:
+                return inst.get("InstanceId")
+    return None
+
+
+def _kill_orchestrator_container_via_ssm(ssm_client, instance_id, hard_kill=True):
+    """
+    Ferma il container 'orchestrator' sull'istanza EC2 target via SSM Run
+    Command (documento AWS-RunShellScript) — non serve SSH: LabRole ha già
+    il trust per ssm.amazonaws.com (verificare i permessi con
+    'aws ssm describe-instance-information' prima del primo uso).
+
+    hard_kill=True esegue 'docker kill' (SIGKILL diretto al container,
+    NESSUNA finestra di grazia): a differenza di ecs:StopTask, che concede
+    sempre ~30s e permette all'orchestratore di fare cleanup/rilasciare la
+    lease, questo simula un crash VERO — il caso peggiore che su Fargate
+    era raggiungibile SOLO nel ramo Docker locale di questo scenario (vedi
+    docstring di _run_aws_real_failover: 'kill -9 1' non ha effetto dentro
+    un container ECS, ma qui non siamo dentro un container ECS, siamo
+    sull'host EC2, quindi 'docker kill' funziona esattamente come in locale).
+
+    hard_kill=False usa invece 'docker stop' (SIGTERM + grace period,
+    equivalente al comportamento di ecs:StopTask) per chi in futuro
+    volesse confrontare i due regimi anche su questa infrastruttura.
+
+    Ritorna il CommandId SSM (non ne aspetta il completamento: il chiamante
+    misura il subentro osservando DynamoDB, non l'esito del comando SSM).
+    """
+    command = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    send_resp = ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [command]},
+    )
+    return send_resp["Command"]["CommandId"]
+
+
 class OrchestratorFailoverScenario(BaseTestScenario):
     """
     Copre lo Scenario: Failover dell'Orchestratore.
@@ -687,13 +744,14 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             # sul formato atteso per il confronto con l'IP letto da ECS.
             ip_dashed = ip_match.group(1)
             try:
-                ecs = boto3.client("ecs", region_name=region)
-                target_arn = _resolve_ecs_task_arn_by_ip(ecs, cluster, service_name, ip_dashed)
-                if target_arn:
-                    print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO: fermo il task ECS del leader "
-                          f"'{killed_leader_name}' ({target_arn.split('/')[-1]}) !!!")
-                    ecs.stop_task(cluster=cluster, task=target_arn,
-                                  reason="[TEST] Simulazione crash orchestratore leader (failover scenario)")
+                ec2 = boto3.client("ec2", region_name=region)
+                ssm = boto3.client("ssm", region_name=region)
+                target_instance_id = _resolve_ec2_instance_by_ip(ec2, ip_dashed)
+                if target_instance_id:
+                    print(f"\n[TEST TRIGGER] !!! SIMULAZIONE CRASH IMPREVISTO: uccido il container "
+                          f"'orchestrator' sull'istanza EC2 del leader '{killed_leader_name}' "
+                          f"({target_instance_id}) via SSM (docker kill, nessuna finestra di grazia) !!!")
+                    _kill_orchestrator_container_via_ssm(ssm, target_instance_id, hard_kill=True)
                     # Istante di riferimento per 'takeover_seconds': tutto ciò
                     # che serve a distinguere una terminazione controllata da un
                     # crash vero è quanto tempo passa da qui alla comparsa di un
@@ -701,10 +759,10 @@ class OrchestratorFailoverScenario(BaseTestScenario):
                     stop_requested_at = time.perf_counter()
                     stopped = True
                 else:
-                    print(f"[TEST ERRORE] Nessun task ECS di '{service_name}' corrisponde all'IP del leader "
-                          f"'{killed_leader_name}': impossibile fermarlo.")
+                    print(f"[TEST ERRORE] Nessuna istanza EC2 dell'orchestrator corrisponde all'IP "
+                          f"del leader '{killed_leader_name}': impossibile fermarlo.")
             except Exception as e:
-                print(f"[TEST ERRORE] Impossibile fermare il task ECS del leader: {e}")
+                print(f"[TEST ERRORE] Impossibile fermare l'istanza EC2 del leader via SSM: {e}")
         else:
             print(f"[TEST ERRORE] Formato nome leader inatteso ('{killed_leader_name}'): impossibile estrarne l'IP.")
 

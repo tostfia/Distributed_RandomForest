@@ -42,8 +42,8 @@ if ! aws sts get-caller-identity --region "$REGION" > /dev/null 2>&1; then
 fi
 echo "    OK, credenziali valide."
 
-echo "==> [2/3] Attendo che i Service ECS (worker + orchestrator) siano stabili..."
-echo "    (deploy.sh è asincrono: create/update-service ritorna subito, non quando i"
+echo "==> [2/3] Attendo che worker-service sia stabile e verifico che l'orchestrator (EC2) sia pronto..."
+echo "    (deploy asincrono: create/update-service ritorna subito, non quando i"
 echo "     task sono RUNNING e i worker si sono registrati. Aspettiamo qui per evitare"
 echo "     di sottomettere il job mentre l'infrastruttura sta ancora avviandosi.)"
 
@@ -53,23 +53,41 @@ ALL_SERVICE_ARNS=$(aws ecs list-services --cluster "$CLUSTER_NAME" --region "$RE
 TARGET_SERVICES=()
 for arn in $ALL_SERVICE_ARNS; do
   svc_name="${arn##*/}"
-  if [[ "$svc_name" == worker-service* || "$svc_name" == "orchestrator-service" ]]; then
+  if [[ "$svc_name" == worker-service* ]]; then
     TARGET_SERVICES+=("$svc_name")
   fi
 done
 
 if [ "${#TARGET_SERVICES[@]}" -eq 0 ]; then
-  echo "[ERRORE] Nessun Service worker/orchestrator trovato sul cluster '$CLUSTER_NAME'."
-  echo "         Hai lanciato deploy.sh prima di questo script?"
+  echo "[ERRORE] Nessun worker-service trovato sul cluster '$CLUSTER_NAME'."
+  echo "         Hai lanciato 'terraform apply' prima di questo script?"
   exit 1
 fi
 
-echo "    Service trovati: ${TARGET_SERVICES[*]}"
+echo "    Service worker trovati: ${TARGET_SERVICES[*]}"
 aws ecs wait services-stable \
   --cluster "$CLUSTER_NAME" \
   --services "${TARGET_SERVICES[@]}" \
   --region "$REGION"
-echo "    OK, infrastruttura pronta (tutti i Service sono stabili)."
+
+# L'orchestrator non è più un Service ECS (vedi orchestrator_ec2.tf): senza
+# questo controllo, un job inviato qui sotto resterebbe silenziosamente in
+# coda SQS finché nessuna istanza EC2 dell'orchestrator lo reclama — a
+# differenza del vecchio 'services-stable' su ECS, qui il controllo è
+# BLOCCANTE (exit 1), perché sottomettere un job senza orchestratore pronto
+# non è un'attesa normale, è un errore d'uso.
+ORCH_RUNNING=$(aws ec2 describe-instances --region "$REGION" \
+  --filters "Name=tag:Project,Values=rf-distributed" "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null || echo "")
+ORCH_COUNT=$(echo "$ORCH_RUNNING" | wc -w)
+if [ "$ORCH_COUNT" -eq 0 ]; then
+  echo "[ERRORE] Nessuna istanza EC2 dell'orchestrator RUNNING: il job resterebbe in coda"
+  echo "         SQS senza che nessuno lo reclami. Verifica con 'terraform apply' o"
+  echo "         'aws ec2 describe-instances --filters Name=tag:Project,Values=rf-distributed --region $REGION'."
+  exit 1
+fi
+echo "    Istanze EC2 orchestrator RUNNING: $ORCH_COUNT ($ORCH_RUNNING)"
+echo "    OK, infrastruttura pronta."
 
 echo "==> [3/3] Avvio Client (modalità dal .env: TRAINING_MODE=$ENV_TRAINING_MODE)..."
 echo "    (Il client parla con l'infrastruttura solo via SQS/DynamoDB:"
