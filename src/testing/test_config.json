@@ -29,7 +29,7 @@
     "bootstrap": true,
     "max_samples": null,
     "max_features": 0.3333333333333333,
-    "n_estimators": 25,
+    "n_estimators": 100,
     "tree_type": "regressor",
     "target_column": "Target",
     "random_state": 123
