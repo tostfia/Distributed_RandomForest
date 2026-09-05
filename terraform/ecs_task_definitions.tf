@@ -63,10 +63,14 @@ resource "aws_ecs_task_definition" "orchestrator" {
 resource "aws_ecs_task_definition" "worker_centralized" {
   count = var.training_mode == "centralized" ? 1 : 0
 
-  # Stessa family dell'orchestrator: è l'unica autorizzata dalla SCP.
-  # Terraform la tratta comunque come risorsa distinta (ARN/revisione
-  # propria); cambia solo la stringa family sottostante.
-  family                   = "lab-orchestrator-task"
+  # Family distinta da quella dell'orchestrator: evita la race condition
+  # "Too many concurrent attempts to create a new revision of the specified
+  # family" quando Terraform registra entrambe le task definition in
+  # parallelo (nessuna dipendenza tra le due risorse). Verificato che la
+  # SCP del Learner Lab NON restringe la family a un valore fisso (test
+  # empirico del 5/9/2026: registrazione di una family arbitraria riuscita
+  # con 'aws ecs register-task-definition --family lab-worker-task-test').
+  family                   = "lab-worker-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.worker_cpu
@@ -107,8 +111,10 @@ resource "aws_ecs_task_definition" "worker_centralized" {
 resource "aws_ecs_task_definition" "worker_federated" {
   count = var.training_mode == "federated" ? var.num_workers : 0
 
-  # Stessa family per ogni indice: è l'unica autorizzata dalla SCP.
-  family                   = "lab-orchestrator-task"
+  # Stessa family per ogni indice, distinta da quella dell'orchestrator
+  # (coerente col worker centralized sopra): vedi la nota lì per il motivo
+  # del cambio rispetto alla versione precedente.
+  family                   = "lab-worker-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.worker_cpu
