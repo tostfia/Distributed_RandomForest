@@ -4,16 +4,9 @@
   "dataset_path": "synthetic",
   "n_samples": 1000000,
   "n_features": 100,
-  "target_column": "Label",
+  "target_column": "Target",
   "random_seed": 123,
-  "n_informative": 35,
-  "n_redundant": 5,
-  "n_clusters_per_class": 2,
-  "flip_y": 0.01,
-  "weight": [
-    0.9,
-    0.1
-  ],
+  "noise": 2.5,
   "feature_eliminata": [],
   "feature_selezionate": [
     "Feature_0",
@@ -118,16 +111,15 @@
     "Feature_99"
   ],
   "hyperparameters": {
-    "n_estimators": 200,
     "max_depth": null,
     "min_samples_split": 2,
-    "max_features": "sqrt",
-    "criterion": "entropy",
-    "class_weight": null,
+    "criterion": "squared_error",
     "bootstrap": true,
-    "max_samples": 0.3,
-    "tree_type": "classifier",
-    "target_column": "Label",
+    "max_samples": null,
+    "max_features": 0.3333333333333333,
+    "n_estimators": 25,
+    "tree_type": "regressor",
+    "target_column": "Target",
     "random_state": 123
   }
 }

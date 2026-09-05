@@ -6,7 +6,7 @@
   "n_features": 100,
   "target_column": "Target",
   "random_seed": 123,
-  "noise": 5,
+  "noise": 2.5,
   "feature_eliminata": [],
   "feature_selezionate": [
     "Feature_0",
@@ -117,7 +117,7 @@
     "bootstrap": true,
     "max_samples": null,
     "max_features": 0.3333333333333333,
-    "n_estimators": 100,
+    "n_estimators": 25,
     "tree_type": "regressor",
     "target_column": "Target",
     "random_state": 123

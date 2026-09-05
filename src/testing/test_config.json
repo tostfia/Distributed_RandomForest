@@ -29,7 +29,7 @@
     "bootstrap": true,
     "max_samples": null,
     "max_features": 0.3333333333333333,
-    "n_estimators": 100,
+    "n_estimators": 25,
     "tree_type": "regressor",
     "target_column": "Target",
     "random_state": 123
@@ -38,7 +38,7 @@
   
 
   "scalability_test": {
-    "worker_counts_to_test": [2,5,7,10]
+    "worker_counts_to_test": [3,5,7,10]
   },
 
   "network_simulation": {
