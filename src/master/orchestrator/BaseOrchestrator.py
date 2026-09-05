@@ -178,6 +178,20 @@ class BaseOrchestrator(ABC):
         self.queue_name = queue_name
         self.connessioni_attive = []
         self.connessioni_lock = threading.Lock()
+        # Serializza la fase di RICOMPOSIZIONE degli alberi (download +
+        # deserializzazione da storage condiviso), NON il training: i worker
+        # continuano a costruire gli alberi in parallelo come oggi, ma solo
+        # UN thread orchestratore alla volta può trasformare un task in
+        # oggetti Python in memoria. Senza questo lock, thread diversi
+        # possono trovarsi a ricomporre task diversi nello stesso istante,
+        # sommando temporaneamente in RAM più chunk di alberi appena
+        # deserializzati oltre alla foresta già accumulata -- causa
+        # dell'OOM osservato sull'Orchestratore anche dopo l'aumento di
+        # memoria (vedi worker_thread_consumer in CentralizedOrchestrator/
+        # FederatedOrchestrator). Costo: i download S3 dei task, che prima
+        # giravano in parallelo tra i worker thread, ora sono serializzati
+        # -- un trade-off esplicito tempo/memoria, non gratuito.
+        self.tree_reconstruction_lock = threading.Lock()
         
         try:
             self.sqs_queue, self.state_manager = get_aws_services(self.environment)

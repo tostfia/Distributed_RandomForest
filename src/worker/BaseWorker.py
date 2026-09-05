@@ -14,7 +14,12 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from src.shared.config import SystemConfig
 from src.shared.binding.serviceregistry import ServiceRegistry
-from src.shared.utilities.task_storage import load_bytes_from_shared_storage
+from src.shared.utilities.task_storage import (
+    load_bytes_from_shared_storage,
+    load_task_from_shared_storage,
+    save_task_part_to_shared_storage,
+    save_task_manifest,
+)
 
 # Timeout (in secondi) per il completamento di un singolo batch di alberi nel
 # ThreadPool. Stesso pattern/nome di FederatedWorker.RPC_SYNC_TIMEOUT_SECONDS,
@@ -172,7 +177,7 @@ class BaseWorker(Service, ABC):
         protocol_config = {
             'allow_public_attr': True,
             'allow_pickle': True,
-            'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
+            'sync_request_timeout': 600,
             'keepalive': True
         }
 
@@ -268,7 +273,9 @@ class BaseWorker(Service, ABC):
         print(f"[{self.worker_name}] Campionamento: bootstrap={effective_bootstrap}, "
               f"max_samples={effective_max_samples} "
               f"({'da richiesta' if bootstrap is not None else 'da configurazione di boot'}).")
-        cached_task_bytes = self._load_task_from_shared_storage(source_info, base_seed, num_trees)
+        cached_task_bytes = load_task_from_shared_storage(
+            source_info, base_seed, num_trees, self.environment, self.worker_name
+        )
         if cached_task_bytes is not None:
             print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Invio solo ack "
                   f"(l'Orchestratore rilegge il blob direttamente dallo storage condiviso).")
@@ -345,18 +352,53 @@ class BaseWorker(Service, ABC):
             worker_tasks.append((seed, max_depth, effective_max_samples, effective_bootstrap, tree_class, max_features,
                                   min_samples_split, class_weight, criterion))
 
+        # PERSISTENZA INCREMENTALE PER BATCH (invece di accumulo in RAM fino
+        # alla fine del task): ogni batch di alberi viene serializzato e
+        # scritto sullo storage condiviso APPENA PRONTO, poi liberato dalla
+        # memoria del worker prima di passare al batch successivo. Prima di
+        # questa modifica, 'local_trees' cresceva monotonicamente fino a
+        # contenere l'INTERO chunk (es. 34 alberi con max_depth=None su
+        # dataset da 1M righe), e il pickle.dumps() finale duplicava
+        # temporaneamente quella stessa memoria in forma serializzata: è
+        # il picco di RAM più verosimilmente responsabile degli OOM kill
+        # osservati sui worker Fargate durante lo scenario di scalabilità.
+        #
+        # Con lo streaming per batch, il picco di memoria per gli alberi
+        # scende da "num_trees alberi" a "~pool_size*4 alberi" (la dimensione
+        # di un batch), indipendentemente da quanto è grande il chunk totale
+        # assegnato dall'Orchestratore.
+        parts_num_trees = []
+
+        def _persist_batch(batch_trees: list, part_idx: int):
+            serialized_part = pickle.dumps(batch_trees)
+            try:
+                save_task_part_to_shared_storage(
+                    source_info, base_seed, num_trees, part_idx,
+                    serialized_part, self.environment, self.worker_name
+                )
+            except Exception as e:
+                # Stesso principio di prima: se la persistenza fallisce, il task
+                # NON deve risultare completato. Propaghiamo l'eccezione così
+                # RPyC la inoltra all'Orchestratore, che marca il task FAILED
+                # e lo riaccoda (vedi _prepare_data -> worker_thread_consumer).
+                print(f"[!] [{self.worker_name}] ERRORE CRITICO: batch {part_idx} calcolato "
+                      f"ma il salvataggio della parte nello storage condiviso è fallito. "
+                      f"Dettaglio: {e}")
+                raise
+            parts_num_trees.append(len(batch_trees))
+
         if num_trees == 1:
             print("[WORKER] Ottimizzazione: 1 solo albero richiesto. Calcolo diretto senza ThreadPool.")
-            local_trees = [_train_single_tree_thread(worker_tasks[0])]
+            single_tree = _train_single_tree_thread(worker_tasks[0])
+            _persist_batch([single_tree], 0)
         else:
             pool_size = min(num_trees, allocated_cores)
             print(f"[WORKER] Istanziazione ThreadPool locale con {pool_size} thread "
                   f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
 
             BATCH_SIZE = max(1, min(pool_size * 4, num_trees))
-            local_trees = []
             with ThreadPoolExecutor(max_workers=pool_size) as executor:
-                for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
+                for part_idx, batch_start in enumerate(range(0, len(worker_tasks), BATCH_SIZE)):
                     batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
                     print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start + len(batch)} "
                           f"di {num_trees}...")
@@ -368,25 +410,31 @@ class BaseWorker(Service, ABC):
                             f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
                             f"training parallelo (ThreadPool)."
                         )
-                    local_trees.extend(batch_trees)
+                    print(f"[{self.worker_name}] Batch {part_idx} completato "
+                          f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
+                    _persist_batch(batch_trees, part_idx)
+                    # A questo punto 'batch_trees' esce di scope alla prossima
+                    # iterazione: gli alberi già scritti su storage non restano
+                    # più referenziati da nessuna struttura dati del worker.
                     del batch_trees
 
-        print(f"[+] Calcolo di {num_trees} alberi completato. Salvataggio su storage condiviso...")
-        serialized_task = pickle.dumps(local_trees)
+        # Il manifest viene scritto per ULTIMO, dopo che TUTTE le parti sono
+        # sul disco/S3: la sua presenza è ciò che segnala all'Orchestratore
+        # (o a un futuro short-circuit di questo stesso worker) che il task è
+        # completo e ricomponibile. Contiene solo interi, quindi il suo
+        # costo di memoria è trascurabile.
         try:
-            self._save_task_to_shared_storage(source_info, base_seed, num_trees, serialized_task)
+            save_task_manifest(
+                source_info, base_seed, num_trees, parts_num_trees,
+                self.environment, self.worker_name
+            )
         except Exception as e:
-            # Il task NON deve risultare "completato con successo" se non è stato
-            # persistito nello storage condiviso: rilanciamo l'eccezione così RPyC
-            # la propaga all'Orchestratore, che potrà marcare il task come fallito
-            # e decidere se ritentarlo, invece di credere erroneamente che sia andato
-            # tutto bene (comportamento precedente, silenziosamente errato).
-            print(f"[!] [{self.worker_name}] ERRORE CRITICO: gli alberi sono stati calcolati "
-                  f"ma il salvataggio nello storage condiviso è fallito. Il task viene "
+            print(f"[!] [{self.worker_name}] ERRORE CRITICO: tutte le {len(parts_num_trees)} parti "
+                  f"sono state salvate ma la scrittura del manifest è fallita. Il task viene "
                   f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
             raise
-        print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio ack "
-              f"(niente più blob via RPC).")
+        print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
+              f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
         # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
         # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
         # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
@@ -500,6 +548,14 @@ class BaseWorker(Service, ABC):
         return pickle.dumps(sub_predictions)
 
 
+    # NOTA: da questa modifica in poi, exposed_train_subset_forest non chiama
+    # più _get_task_storage_paths/_load_task_from_shared_storage/
+    # _save_task_to_shared_storage: usa le funzioni equivalenti (e lo schema
+    # a parti) importate da src.shared.utilities.task_storage. I tre metodi
+    # sotto restano SOLO per compatibilità con eventuali altri chiamanti
+    # (es. FederatedWorker, non incluso in questa revisione) che potrebbero
+    # ancora dipendere dal formato monolitico. Se nessun altro li usa, sono
+    # candidati alla rimozione in un secondo passaggio di pulizia.
     def _get_task_storage_paths(self, source_info: str, base_seed: int, num_trees: int):
         """
         Genera i percorsi per lo storage condiviso basandosi sul TASK.

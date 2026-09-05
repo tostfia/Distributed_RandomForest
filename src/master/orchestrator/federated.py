@@ -14,7 +14,7 @@ import re
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
-from src.shared.utilities.task_storage import load_task_from_shared_storage
+from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
 from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
@@ -562,20 +562,31 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # dataset per il training locale (ogni worker ha già il
                         # proprio shard in cache), quindi costruiamo la stessa
                         # stringa 'shared_train_<job_id>.csv' usata lato worker
-                        # per derivare la medesima chiave di storage — riusa
-                        # load_task_from_shared_storage/get_task_storage_paths
-                        # senza modificarle.
+                        # per derivare la medesima chiave di storage.
+                        #
+                        # 'load_task_trees_from_shared_storage' ritorna gli alberi
+                        # già deserializzati, evitando il giro superfluo
+                        # oggetti->bytes->oggetti che load_task_from_shared_storage
+                        # avrebbe richiesto qui (stesso fix applicato al path
+                        # centralizzato dopo l'OOM osservato sull'Orchestratore).
+                        #
+                        # 'tree_reconstruction_lock' (definito in BaseOrchestrator,
+                        # condiviso con il path centralizzato) serializza QUESTA fase
+                        # tra i thread worker, per evitare che più task vengano
+                        # ricomposti in RAM nello stesso istante -- stesso fix
+                        # applicato a centralized.py dopo l'OOM osservato anche con
+                        # 16GB di memoria sull'Orchestratore.
                         synthetic_source_info = f"shared_train_{self.current_job_id}.csv"
-                        result_trees_bytes = load_task_from_shared_storage(
-                            synthetic_source_info, effective_seed, quota_chunk,
-                            self.environment, self.orchestrator_name
-                        )
-                        if result_trees_bytes is None:
+                        with self.tree_reconstruction_lock:
+                            result_trees = load_task_trees_from_shared_storage(
+                                synthetic_source_info, effective_seed, quota_chunk,
+                                self.environment, self.orchestrator_name
+                            )
+                        if result_trees is None:
                             raise RuntimeError(
                                 f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
                                 f"non è stato trovato nello storage condiviso."
                             )
-                        result_trees = pickle.loads(result_trees_bytes)
                         # SEZIONE CRITICA MINIMA: solo l'aggiornamento della lista
                         # condivisa e uno snapshot immutabile. Upload su S3 e
                         # scrittura su DynamoDB sono spostati fuori (vedi sotto).

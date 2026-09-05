@@ -1,5 +1,6 @@
 import pickle
 import os
+import gc
 import socket
 import time
 import rpyc
@@ -22,6 +23,7 @@ from src.shared.utilities.undersampling import undersample_majority_class
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import (
     load_task_from_shared_storage,
+    load_task_trees_from_shared_storage,
     save_bytes_to_shared_storage,
     load_bytes_from_shared_storage,
 )
@@ -173,6 +175,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 train_df, test_df = train_test_split(df_full, test_size=TEST_SIZE, random_state=base_seed)
             else:
                 train_df, test_df = splitter.split(df_full)
+            # Stessa pulizia già applicata al ramo 'real' (vedi 'del df_raw' /
+            # 'del df_binarized' sotto): 'df_full' qui è 1.000.000 x 101 colonne
+            # (~800MB+), e train_test_split/splitter.split restituiscono COPIE
+            # (train_df/test_df), non view -- quindi df_full è ridondante subito
+            # dopo lo split, ma prima di questa modifica restava referenziato
+            # per tutta la durata di _prepare_data (upload S3 incluso, alcuni
+            # minuti). Essendo un DataFrame pandas, può contenere riferimenti
+            # interni ciclici che il reference counting di CPython non libera
+            # immediatamente: 'del' esplicito + gc.collect() forzano il rilascio
+            # prima che il dispatch del training (subito dopo, vedi
+            # _execute_training_step) inizi ad accumulare memoria per gli
+            # alberi -- riduce il fabbisogno di picco sull'Orchestratore.
+            del df_full
+            gc.collect()
         else:
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
@@ -285,6 +301,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
             self.last_etl_seconds = time.perf_counter() - t0
             print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
             print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
+            # Stessa motivazione di 'del df_full' sopra: train_df/test_df sono
+            # copie potenzialmente grandi (fino a ~800MB combinate per lo
+            # scenario sintetico) che altrimenti resterebbero vive fino al
+            # ritorno della funzione, a ridosso dell'inizio del dispatch di
+            # training (vedi _execute_training_step, chiamato subito dopo).
+            del train_df, test_df
+            gc.collect()
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
         self.current_job_id = job_id
@@ -539,16 +562,32 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                     f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                                 )
 
-                            result_trees_bytes = load_task_from_shared_storage(
-                                source_info, chunk_seed, quota_chunk,
-                                self.environment, self.orchestrator_name
-                            )
-                            if result_trees_bytes is None:
+                            # 'load_task_trees_from_shared_storage' ritorna gli alberi
+                            # già deserializzati (List[DecisionTree...]), invece del
+                            # blob pickled + un pickle.loads separato qui: quel giro
+                            # extra oggetti->bytes->oggetti duplicava temporaneamente
+                            # in RAM l'intero chunk (una volta come oggetti nel modulo
+                            # di storage, una volta come bytes, una volta come oggetti
+                            # qui) — causa del primo OOM osservato sull'Orchestratore.
+                            #
+                            # 'tree_reconstruction_lock' serializza QUESTA fase tra i
+                            # thread worker: senza di esso, due o tre thread possono
+                            # ricomporre task diversi nello stesso istante, sommando
+                            # temporaneamente in RAM più chunk appena deserializzati
+                            # oltre alla foresta già accumulata -- causa del secondo
+                            # OOM, osservato anche dopo aver alzato la memoria
+                            # dell'Orchestratore a 16GB. Non blocca il training (che
+                            # resta parallelo sui worker), solo questo scaricamento.
+                            with self.tree_reconstruction_lock:
+                                result_trees = load_task_trees_from_shared_storage(
+                                    source_info, chunk_seed, quota_chunk,
+                                    self.environment, self.orchestrator_name
+                                )
+                            if result_trees is None:
                                 raise RuntimeError(
                                     f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
                                     f"non è stato trovato nello storage condiviso."
                                 )
-                            result_trees = pickle.loads(result_trees_bytes)
                             
                             # SEZIONE CRITICA MINIMA: solo l'aggiornamento della
                             # lista condivisa e uno snapshot immutabile. L'upload

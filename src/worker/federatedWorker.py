@@ -16,6 +16,7 @@ from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.worker.BaseWorker import BaseWorker
 from src.shared.factory import DatasetDAOFactory
+from src.shared.utilities.task_storage import save_task_part_to_shared_storage, save_task_manifest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from multiprocessing import shared_memory
@@ -356,12 +357,37 @@ class FederatedWorker(BaseWorker):
             worker_tasks.append((seed, max_depth, max_samples, self.bootstrap, tree_class, class_weight, max_features,
                                 min_samples_split, criterion))
 
+        # PERSISTENZA INCREMENTALE PER BATCH (stessa modifica applicata a
+        # BaseWorker.exposed_train_subset_forest): ogni batch di alberi viene
+        # serializzato e scritto sullo storage condiviso APPENA PRONTO, invece
+        # di restare accumulato in 'local_trees' fino alla fine dell'intero
+        # task. Il picco di RAM scende da "n_estimators_local alberi" a
+        # "~pool_size*4 alberi" (dimensione di un batch), indipendentemente
+        # da quanto è grande la quota assegnata a questo worker federato.
+        synthetic_source_info = f"shared_train_{job_id}.csv"
+        parts_num_trees = []
+
+        def _persist_fed_batch(batch_trees: list, part_idx: int):
+            serialized_part = pickle.dumps(batch_trees)
+            try:
+                save_task_part_to_shared_storage(
+                    synthetic_source_info, base_seed, n_estimators_local, part_idx,
+                    serialized_part, self.environment, self.worker_name
+                )
+            except Exception as e:
+                print(f"[!] [{self.worker_name}] ERRORE CRITICO: batch {part_idx} calcolato "
+                      f"ma il salvataggio della parte nello storage condiviso è fallito. "
+                      f"Dettaglio: {e}")
+                raise
+            parts_num_trees.append(len(batch_trees))
+
         if n_estimators_local == 1:
             print(f"[{self.worker_name}] Ottimizzazione: 1 solo albero. Calcolo diretto senza Pool.")
             global _fed_child_X, _fed_child_y
             _fed_child_X = self._cached_X_train
             _fed_child_y = self._cached_y_train
-            local_trees = [_train_single_fed_tree(worker_tasks[0])]
+            single_tree = _train_single_fed_tree(worker_tasks[0])
+            _persist_fed_batch([single_tree], 0)
         else:
             pool_size = min(n_estimators_local, allocated_cores)
             print(f"[{self.worker_name}] Istanziazione ThreadPool locale con {pool_size} thread "
@@ -375,9 +401,8 @@ class FederatedWorker(BaseWorker):
             _fed_child_y = self._cached_y_train
 
             BATCH_SIZE = max(1, min(pool_size * 4, n_estimators_local))
-            local_trees = []
             with ThreadPoolExecutor(max_workers=pool_size) as executor:
-                for batch_start in range(0, len(worker_tasks), BATCH_SIZE):
+                for part_idx, batch_start in enumerate(range(0, len(worker_tasks), BATCH_SIZE)):
                     batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
                     print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start+len(batch)} "
                         f"di {n_estimators_local}...")
@@ -389,34 +414,25 @@ class FederatedWorker(BaseWorker):
                             f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
                             f"training parallelo (ThreadPool)."
                         )
-                    local_trees.extend(batch_trees)
+                    print(f"[{self.worker_name}] Batch {part_idx} completato "
+                          f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
+                    _persist_fed_batch(batch_trees, part_idx)
                     del batch_trees
 
-        print(f"[+] [{self.worker_name}] Addestramento completato. Salvataggio su storage condiviso...")
-        serialized_task = pickle.dumps(local_trees)
-        # Riusiamo lo stesso schema di storage del path centralizzato (vedi
-        # BaseWorker._save_task_to_shared_storage / _get_task_storage_paths,
-        # ereditati da questa classe): quelle funzioni derivano il job_id da un
-        # 'source_info' del tipo 'shared_train_<job_id>.csv'. Il federato non usa
-        # un path di dataset per il training locale (ogni worker ha già il
-        # proprio shard in cache), quindi costruiamo una stringa sintetica solo
-        # per ottenere la STESSA chiave che l'Orchestratore userà in lettura
-        # (vedi federated.py, worker_thread_consumer).
-        synthetic_source_info = f"shared_train_{job_id}.csv"
+        # Manifest scritto per ultimo, dopo tutte le parti: stesso principio
+        # di BaseWorker.exposed_train_subset_forest (vedi lì per i dettagli).
         try:
-            self._save_task_to_shared_storage(synthetic_source_info, base_seed, n_estimators_local, serialized_task)
+            save_task_manifest(
+                synthetic_source_info, base_seed, n_estimators_local, parts_num_trees,
+                self.environment, self.worker_name
+            )
         except Exception as e:
-            # Il task NON deve risultare "completato con successo" se non è stato
-            # persistito nello storage condiviso: rilanciamo l'eccezione così RPyC
-            # la propaga all'Orchestratore, che potrà marcare il task come fallito
-            # e decidere se ritentarlo, invece di credere erroneamente che sia
-            # andato tutto bene.
-            print(f"[!] [{self.worker_name}] ERRORE CRITICO: gli alberi sono stati calcolati "
-                  f"ma il salvataggio nello storage condiviso è fallito. Il task viene "
+            print(f"[!] [{self.worker_name}] ERRORE CRITICO: tutte le {len(parts_num_trees)} parti "
+                  f"sono state salvate ma la scrittura del manifest è fallita. Il task viene "
                   f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
             raise
-        print(f"[+] [{self.worker_name}] Task salvato nello storage condiviso. Invio ack "
-              f"(niente più blob via RPC).")
+        print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
+              f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
         # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore li
         # rilegge dallo storage condiviso con lo stesso 'source_info' sintetico
         # (vedi federated.py). Stesso fix già applicato al path centralizzato per

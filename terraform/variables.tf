@@ -59,7 +59,7 @@ variable "orchestrator_cpu" {
 variable "orchestrator_memory" {
   description = "Memoria (MiB) allocata per orchestrator."
   type        = string
-  default     = "8192"
+  default     = "16384"
 }
 
 variable "test_engine_cpu" {
