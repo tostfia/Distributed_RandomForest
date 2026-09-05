@@ -1,4 +1,5 @@
 import os
+import boto3
 from dotenv import load_dotenv
 
 class SystemConfig:
@@ -19,7 +20,7 @@ class SystemConfig:
             if cls._instance.mode not in ["centralized", "federated"]:
                 raise ValueError(f"TRAINING_MODE non valido nel file .env: {cls._instance.mode}")
             
-            cls._instance.aws_region = os.getenv("AWS_REGION", "us-east-1")
+            cls._instance.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
             queue_prefix = os.getenv("SQS_QUEUE_PREFIX", "")
             queue_suffix = ".fifo" if cls._instance.env == "aws" else ""
