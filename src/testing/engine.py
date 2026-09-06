@@ -5,8 +5,8 @@ import time
 
 import boto3
 
-from src.master.orchestrator.centralized import CentralizedOrchestrator
-from src.master.orchestrator.federated import FederatedOrchestrator
+from Distributed_RandomForest.src.orchestrator.centralized import CentralizedOrchestrator
+from Distributed_RandomForest.src.orchestrator.federated import FederatedOrchestrator
 from src.testing.scenarios.fault import FaultToleranceScenario
 from src.testing.scenarios.network import NetworkSimulationScenario
 from src.testing.scenarios.performance import PerformanceAndMetricsScenario

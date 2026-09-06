@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 import src.shared.utilities.datasplitter
 from src.shared.config import SystemConfig
 from src.shared.factory import DatasetDAOFactory
-from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
+from Distributed_RandomForest.src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader

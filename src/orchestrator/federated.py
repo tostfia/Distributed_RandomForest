@@ -15,7 +15,7 @@ from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
-from src.master.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
+from Distributed_RandomForest.src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
