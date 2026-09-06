@@ -179,7 +179,7 @@ echo "[START] Avvio di $NUM_ORCHESTRATORS Orchestratore/i Master..."
 for ((i=1; i<=NUM_ORCHESTRATORS; i++)); do
     echo "[START] Avvio Istanza Orchestratore #$i..."
     # Modificato: include anche la cartella /src nel PYTHONPATH
-    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; export ORCHESTRATOR_INDEX=$i; python -m src.master.orchestrator.main; exec bash"
+    $TERM_CMD bash -c "export PYTHONPATH=\"${ROOT_DIR}:${ROOT_DIR}/src\"; export ORCHESTRATOR_INDEX=$i; python -m src.orchestrator.main; exec bash"
     sleep 1
 done
 

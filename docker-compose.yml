@@ -27,7 +27,7 @@ services:
       - NET_ADMIN
     command: >
       sh -c "ORCHESTRATOR_ID=Orchestrator-${EC2_ID:-Locale}-${TRAINING_MODE:-federated}-$$(hostname)
-        python -m src.master.orchestrator.main"
+        python -m src.orchestrator.main"
     restart: on-failure
 
   worker:
