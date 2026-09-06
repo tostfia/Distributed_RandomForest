@@ -69,9 +69,10 @@ class LocalFileSystemDAO(DatasetDAO):
         return pd.read_csv(path)
 
     def save_dataset(self, path: str, df: pd.DataFrame) -> None:
-        print(f"[DAO-LOCAL] Salvataggio del dataset in locale su: {path}")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        df.to_csv(path, index=False)
+        tmp_path = f"{path}.tmp-{os.getpid()}"
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
 
     def save_binary(self, path: str, data: bytes) -> None:
         print(f"[DAO-LOCAL] Salvataggio file binario su: {path}")
