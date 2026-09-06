@@ -495,6 +495,18 @@ class FederatedWorker(BaseWorker):
         df_train_raw = pd.read_csv(local_train_path, low_memory=False)
         df_test_raw = pd.read_csv(local_test_path, low_memory=False)
 
+        # Se lo shard è stato generato con partition_strategy='by_day', contiene
+        # la colonna '_capture_day' (usata SOLO in fase di provisioning per
+        # raggruppare le righe per giorno di origine — vedi
+        # FederatedDataSplitter._shard_by_day). Non è una feature del traffico
+        # e va scartata QUI, PRIMA di binarize_target/process: CICIDSPreprocessor
+        # non la protegge (non è nei suoi metadata_keywords), quindi
+        # _convert_feature_columns_to_numeric la forzerebbe a numerico (NaN su
+        # ogni riga, essendo una stringa tipo 'Wednesday-28-02-2018') e
+        # _drop_invalid_rows cancellerebbe l'intero shard riga per riga.
+        df_train_raw = df_train_raw.drop(columns=["_capture_day"], errors="ignore")
+        df_test_raw = df_test_raw.drop(columns=["_capture_day"], errors="ignore")
+
         preprocessor = CICIDSPreprocessor(target_column=self.target_column)
         
         df_train_bin = preprocessor.binarize_target(df_train_raw)
