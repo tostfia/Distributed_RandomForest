@@ -41,9 +41,10 @@ Per il dataset 'synthetic' non serve provisioning: ogni worker genera
 autonomamente il proprio shard sintetico al boot (come già avviene a runtime).
 """
 import argparse
+import json
 import os
 
-from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader, SOURCE_DAY_COLUMN
 from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 
 # Parametri di generazione: IDENTICI a quelli usati storicamente da
@@ -161,10 +162,25 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
         return
 
     print("[PROVISIONING] Generazione degli shard in corso...")
+    # tag_source_day: passato al loader SOLO con partition_strategy='by_day' —
+    # è l'unica strategia che ha bisogno della colonna del giorno di cattura
+    # per raggruppare le righe. Senza questo, il DataFrame non conterrebbe mai
+    # la colonna, e FederatedDataSplitter.split_and_shard (ramo 'by_day')
+    # fallirebbe subito con "day_column valido richiesto".
+    #
+    # day_column: se non specificato esplicitamente da CLI/env, ricade sul
+    # nome colonna che il loader stesso usa quando tag_source_day=True
+    # (SOURCE_DAY_COLUMN = '_capture_day', vedi raw_csvdataloader.py) — così
+    # 'by_day' funziona "out of the box" senza dover conoscere quel dettaglio
+    # interno del loader per usarlo.
+    needs_day_tagging = partition_strategy == "by_day"
+    resolved_day_column = day_column or (SOURCE_DAY_COLUMN if needs_day_tagging else None)
+
     data_loader = RawCSVDataLoader(
         data_url=resolved_folder,
         dataset_seed=DATASET_SEED,
         target_rows_per_day=TARGET_ROWS_PER_DAY,
+        tag_source_day=needs_day_tagging,
     )
     splitter = FederatedDataSplitter(
         target_column=TARGET_COLUMN,
@@ -177,10 +193,31 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
         environment="local",
         partition_strategy=partition_strategy,
         alpha=alpha,
-        day_column=day_column,
+        day_column=resolved_day_column,
     )
     print(f"\n[PROVISIONING OK] Shard reali distribuiti nelle cartelle locali dei worker "
           f"sotto '{BASE_CACHE_DIR}'. Il cluster locale è pronto per l'avvio.")
+
+    # Manifesto della strategia REALMENTE usata per generare questi shard —
+    # unica fonte di verità, letta dal client (main.py) invece di far
+    # dichiarare a mano la stessa informazione all'utente (che può
+    # disallinearsi dal provisioning reale senza alcun avviso, esattamente
+    # il bug osservato il 6/9/2026 con by_day). Scritto SOLO qui, nel ramo
+    # che genera davvero gli shard — mai nel ramo "già presenti, salto": se
+    # il provisioning viene saltato, il manifesto esistente descrive ancora
+    # correttamente cosa c'è realmente su disco, riscriverlo lì sarebbe
+    # un'assunzione non verificata.
+    manifest = {
+        "partition_strategy": partition_strategy,
+        "alpha": alpha if partition_strategy == "dirichlet" else None,
+        "day_column": resolved_day_column if partition_strategy == "by_day" else None,
+        "num_workers": num_workers,
+    }
+    manifest_path = os.path.join(BASE_CACHE_DIR, ".provisioning_manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"[PROVISIONING] Manifesto scritto in '{manifest_path}' (letto dal client per popolare "
+          f"automaticamente partition_strategy/alpha nella richiesta di training).")
 
 
 def main() -> None:

@@ -13,8 +13,17 @@
 # sia nei container), non via RPC diretta -- nessun problema di rete lì.
 
 cleanup() {
-    echo -e "\n[CLEANUP] Arresto e rimozione dei container (docker-compose down)..."
-    docker-compose down
+    echo -e "\n[CLEANUP] Arresto e rimozione dei container ($DC down)..."
+    # BUG CORRETTO (6/9/2026): questa riga chiamava 'docker-compose down'
+    # (comando standalone, con trattino) hardcoded, invece di usare $DC --
+    # la variabile che lo script stesso determina più sotto, preferendo
+    # 'docker compose' (plugin, senza trattino) quando disponibile. Su un
+    # sistema dove SOLO il plugin è installato (come osservato: 'docker-
+    # compose: comando non trovato'), il cleanup falliva silenziosamente --
+    # lo script stampava comunque "[CLEANUP] Fatto." lasciando però tutti
+    # i container ATTIVI (osservato: orchestrator in stato Restarting dopo
+    # un crash, mai fermato dal cleanup fallito).
+    $DC down
     echo "[CLEANUP] Fatto."
     exit
 }
@@ -100,15 +109,48 @@ export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/src"
 # container, senza bisogno di rifare il provisioning containerizzato.
 # ---------------------------------------------------------------------
 if [ "${TRAINING_MODE:-centralized}" = "federated" ]; then
-    echo "[PROVISIONING] TRAINING_MODE=federated rilevato: verifico/preparo gli shard federati..."
-    python -m script_local.provision_local_shards
+    echo "[PROVISIONING] TRAINING_MODE=federated rilevato: preparo gli shard federati..."
+
+    # BUG CORRETTO (6/9/2026): questa chiamata non passava MAI la strategia
+    # di partizionamento, quindi usava sempre il default 'iid' -- e senza
+    # '--force', il controllo di presenza degli shard (_shards_already_present)
+    # verifica SOLO che i file esistano, non con QUALE strategia sono stati
+    # generati. Risultato osservato: cambiando strategia (es. iid -> by_day)
+    # senza riprovisionare a mano, lo script trovava gli shard vecchi "già
+    # presenti" e li teneva così com'erano, SENZA alcun avviso -- un intero
+    # training federato eseguito silenziosamente sulla strategia sbagliata.
+    #
+    # Fix: passiamo sempre --force (rigenerazione garantita ad ogni avvio,
+    # mai shard stantii di una strategia precedente) e la strategia esplicita
+    # letta da .env (PARTITION_STRATEGY/ALPHA/DAY_COLUMN, le stesse variabili
+    # già lette in autonomo da provision_local_shards.py se presenti
+    # nell'ambiente -- qui le rendiamo esplicite e le stampiamo, così non
+    # dipendono più da un default silenzioso). Costo: qualche minuto in più
+    # ad ogni avvio (il dataset reale viene riletto/ripartizionato sempre),
+    # accettabile per la correttezza -- l'alternativa (fidarsi della cache)
+    # è esattamente il bug appena descritto.
+    RESOLVED_PARTITION_STRATEGY="${PARTITION_STRATEGY:-iid}"
+    echo "[PROVISIONING] Strategia di partizionamento: ${RESOLVED_PARTITION_STRATEGY}"" (da PARTITION_STRATEGY in .env, default 'iid' se assente)"
+
+    PROVISION_ARGS=(--force --partition-strategy "$RESOLVED_PARTITION_STRATEGY")
+    if [ "$RESOLVED_PARTITION_STRATEGY" = "dirichlet" ]; then
+        RESOLVED_ALPHA="${ALPHA:-0.5}"
+        echo "[PROVISIONING] Alpha: ${RESOLVED_ALPHA} (da ALPHA in .env, default 0.5 se assente)"
+        PROVISION_ARGS+=(--alpha "$RESOLVED_ALPHA")
+    fi
+    if [ "$RESOLVED_PARTITION_STRATEGY" = "by_day" ] && [ -n "$DAY_COLUMN" ]; then
+        echo "[PROVISIONING] Day column: ${DAY_COLUMN} (esplicito da .env)"
+        PROVISION_ARGS+=(--day-column "$DAY_COLUMN")
+    fi
+
+    python -m script_local.provision_local_shards "${PROVISION_ARGS[@]}"
     PROVISION_EXIT=$?
     if [ $PROVISION_EXIT -ne 0 ]; then
         echo "[ERRORE] Provisioning degli shard federati fallito (exit $PROVISION_EXIT)."
         echo "         Correggi l'errore sopra e rilancia -- il cluster NON viene avviato."
         exit 1
     fi
-    echo "[PROVISIONING OK] Shard federati pronti."
+    echo "[PROVISIONING OK] Shard federati pronti (strategia: ${RESOLVED_PARTITION_STRATEGY}, rigenerati da zero)."
 fi
 
 # ---------------------------------------------------------------------

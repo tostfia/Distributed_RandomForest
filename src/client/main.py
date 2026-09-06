@@ -10,6 +10,7 @@ from src.shared.config import SystemConfig
 from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
+from src.dataset.metrics_dao import MetricsDAOFactory
 import shutil
 
 cfg = SystemConfig()
@@ -237,19 +238,23 @@ def append_history_entry(entry: dict) -> None:
 def handle_inference():
     print(f"\n=== NUOVO PROCESSO DI INFERENZA ({cfg.mode.upper()}) ===")
     
-    # 1. Acquisizione del Job ID e del path dei dati
+    # 1. Acquisizione del Job ID
     job_id = get_input("Inserisci il Job ID del modello addestrato da usare: ").strip()
     if not job_id:
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
-        
+
+    # BUG RIMOSSO (6/9/2026): questo prompt chiedeva un path/URL dei dati per
+    # l'inferenza, ma _execute_inference_step (sia centralized.py sia
+    # federated.py) risolve SEMPRE il test set da 'job_id' — mai da questo
+    # campo, che veniva raccolto e mai realmente consumato lato server.
+    # Manteniamo un valore placeholder solo per compatibilità con lo schema
+    # InferenceRequest, mai mostrato/chiesto all'utente.
     if cfg.env == "aws":
         bucket_name = cfg.s3_bucket_name
-        default_data_url = f"s3://{bucket_name}/real/"
+        data_url = f"s3://{bucket_name}/real/"
     else:
-        default_data_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
-
-    data_url = get_input(f"Inserisci il path/URL dei dati per l'inferenza [Default: {default_data_url}]: ", default_data_url).strip()
+        data_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
 
     # 2. Recupero degli iperparametri. Ordine di priorità:
     #    a) server (state_manager.get_job_details) — fonte condivisa e sempre corretta,
@@ -535,6 +540,42 @@ def handle_model_request():
     return
 
 
+def _read_partitioning_manifest(environment: str):
+    """
+    Legge il manifesto scritto dal provisioning (provision_local_shards.py /
+    provision_federated_shards.py) con la strategia REALMENTE usata per
+    generare gli shard su disco/S3 -- unica fonte di verità, non più
+    dichiarata a mano dall'utente. Prima di questo fix, il client chiedeva
+    interattivamente la strategia di partizionamento, ma quel valore non
+    controllava nulla di reale (lo sharding era già avvenuto offline): era
+    solo un'etichetta che DOVEVA coincidere col provisioning, senza alcuna
+    verifica -- disallineabile in silenzio (bug osservato il 6/9/2026 con
+    by_day: shard IID residui su disco, job etichettato 'by_day' lo stesso).
+
+    Ritorna un dict con partition_strategy/alpha/day_column/num_workers, o
+    None se il manifesto non è ancora stato scritto (provisioning non
+    ancora eseguito, o dataset sintetico che non ne produce uno).
+    """
+    try:
+        if environment == "local":
+            manifest_path = os.path.join("./workers_cache", ".provisioning_manifest.json")
+            if not os.path.exists(manifest_path):
+                return None
+            with open(manifest_path, "r") as f:
+                return json.load(f)
+        else:
+            bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+            s3_client = boto3.client("s3", region_name=cfg.aws_region)
+            try:
+                resp = s3_client.get_object(Bucket=bucket_name, Key="federated_shards/_manifest.json")
+            except ClientError:
+                return None
+            return json.loads(resp["Body"].read())
+    except Exception as e:
+        print(f"  [ATTENZIONE] Impossibile leggere il manifesto di provisioning: {e}")
+        return None
+
+
 def handle_training():
     """Gestisce la procedura di richiesta di addestramento basandosi sulla config di boot."""
     print(f"\n=== CONFIGURAZIONE PROCESSO DI ADDESTRAMENTO ({cfg.mode.upper()}) ===")
@@ -558,17 +599,21 @@ def handle_training():
     else:
         dataset_type = "real"
         bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
-        default_s3_url = f"s3://{bucket_name}/real/"
-        
+
+        # BUG RIMOSSO (6/9/2026): questo prompt chiedeva un path/URL, ma per il
+        # dataset reale viene sempre usato il default (confermato dall'utente) —
+        # e per il modo FEDERATED il valore non ha comunque alcun effetto: i
+        # worker leggono i propri shard già pre-provisionati (vedi
+        # provision_local_shards.py/provision_federated_shards.py), mai questo
+        # path. Per CENTRALIZED sì che conta (letto da _prepare_data), ma
+        # essendo sempre il default resta comunque silenzioso qui — usa
+        # DATASET_LOCAL_PATH nel .env se serve davvero cambiarlo.
         if environment.lower() == "aws":
-            prompt_message = f"    Inserisci l'URL S3.\n [Default: {default_s3_url}]: \n    --> "
+            dataset_path = f"s3://{bucket_name}/real/"
         else:
-            default_s3_url = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"  
-            prompt_message = f"     Inserisci il path locale del dataset reale.\n (Premi INVIO per il default): \n    --> "
-        
-        print("  • Configurazione percorso sorgente dati:")
-        dataset_path = get_input(prompt_message, default_s3_url).strip()
-        print(f"  [INFO] Configurato Dataset REALE: {dataset_path}")
+            dataset_path = "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
+        print(f"  [INFO] Configurato Dataset REALE (default): {dataset_path}")
+
 
     # 4. Configurazione Iperparametri
     print(f"\n[4] Configurazione Iperparametri:")
@@ -606,32 +651,24 @@ def handle_training():
         return
 
     if mode == "federated" and dataset_type == "real":
-        print("\n  Strategia di partizionamento tra i worker per il training FEDERATO:")
-        print("    [1] IID (comportamento storico, shard casuali equilibrati)")
-        print("    [2] Dirichlet (eterogeneità sintetica controllata da alpha)")
-        print("    [3] By day (partizionamento naturale per file/giorno di origine)")
-        partition_choice = get_input("  Scelta [Default: 1]: ", "1")
-        partition_strategy = {"1": "iid", "2": "dirichlet", "3": "by_day"}.get(partition_choice, "iid")
-
-        partition_alpha = None
-        if partition_strategy == "dirichlet":
-            alpha_raw = get_input(
-                "  alpha (piccolo = eterogeneità estrema, es. 0.1; grande = quasi-IID, es. 10) [Default: 0.5]: ",
-                "0.5",
-            )
-            try:
-                partition_alpha = float(alpha_raw)
-            except ValueError:
-                print(f"  [ATTENZIONE] Valore non valido ('{alpha_raw}'), uso il default 0.5.")
-                partition_alpha = 0.5
-
-        print(f"  [INFO] Partizionamento federato: {partition_strategy.upper()}"
-              + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else ""))
-        print("  [ATTENZIONE] Questa scelta va replicata ANCHE nello script di provisioning degli shard "
-              "(script_local/provision_local_shards.py o script_aws/provision_federated_shards.py), "
-              "che è uno script separato e non legge questa configurazione automaticamente. "
-              "Usa gli stessi valori: --partition-strategy e --alpha (o le variabili d'ambiente "
-              "PARTITION_STRATEGY/ALPHA), con --force se stai cambiando strategia rispetto a un run precedente.")
+        manifest = _read_partitioning_manifest(environment)
+        if manifest:
+            partition_strategy = manifest.get("partition_strategy", "iid")
+            partition_alpha = manifest.get("alpha")
+            print(f"\n  [INFO] Partizionamento federato rilevato dal provisioning: "
+                  f"{partition_strategy.upper()}"
+                  + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else "")
+                  + f" — {manifest.get('num_workers', '?')} worker. "
+                  f"(Letto automaticamente: non è più richiesto dichiararlo a mano, "
+                  f"evita disallineamenti col provisioning reale.)")
+        else:
+            print("\n  [ATTENZIONE] Nessun manifesto di provisioning trovato: uso il default IID. "
+                  "Esegui il provisioning (script_local/provision_local_shards.py o "
+                  "script_aws/provision_federated_shards.py) prima di avviare un training "
+                  "federato su dataset reale, per un risultato affidabile e tracciato "
+                  "correttamente.")
+            partition_strategy = "iid"
+            partition_alpha = None
 
         print("\n  Allocazione del budget di alberi tra i worker federati:")
         print("    [1] Proporzionale alla dimensione dello shard (default, formula FedAvg n_k/n)")
@@ -704,6 +741,59 @@ def handle_training():
     except Exception as e:
         print(f"\n [ERRORE INVIO/CODA]: {e}")
         return
+
+
+def handle_inference_result_request():
+    """
+    Recupera e mostra le metriche/risultati di un'inferenza già completata.
+
+    Colma una lacuna reale rispetto alla traccia (6/9/2026): handle_inference()
+    invia la richiesta e basta -- fino a questo fix, nessun punto del client
+    permetteva di recuperare i risultati (accuracy/predizioni aggregate) dopo
+    l'invio, nonostante il sistema li calcoli e salvi correttamente
+    (_save_metrics(job_id, "inference", ...) in BaseOrchestrator.py).
+    """
+    print("\n=== RECUPERO RISULTATO INFERENZA ===")
+    job_id = get_input("Inserisci il Job ID del modello usato per l'inferenza: ").strip()
+    if not job_id:
+        print("[ERRORE] Il Job ID è obbligatorio.")
+        return
+
+    # Il path delle metriche (vedi BaseOrchestrator._resolve_metrics_path)
+    # dipende dalla modalità (centralized/federated) tramite il nome della
+    # classe dell'orchestratore. La recuperiamo dallo storico locale del job
+    # di training corrispondente, se disponibile; altrimenti ricadiamo sulla
+    # modalità corrente del cluster (cfg.mode) come ultima risorsa.
+    mode = cfg.mode
+    for entry in load_history():
+        if entry.get("type") == "training" and entry.get("id") == job_id:
+            mode = entry.get("mode", mode)
+            break
+
+    orchestrator_class_name = "centralizedorchestrator" if mode == "centralized" else "federatedorchestrator"
+    fname = f"inference_{job_id}.json"
+    if cfg.env == "aws":
+        bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+        path = f"s3://{bucket_name}/metrics/{orchestrator_class_name}/{fname}"
+    else:
+        path = os.path.join("./.local_storage/metrics", fname)
+
+    try:
+        dao = MetricsDAOFactory.get_dao(cfg.env)
+        payload = dao.load(path)
+    except FileNotFoundError:
+        print(f"\n[ATTENZIONE] Nessun risultato trovato per il Job '{job_id}' in '{path}'.")
+        print("[INFO] L'inferenza potrebbe non essere ancora completata, o non è mai stata avviata "
+              "per questo Job ID. Riprova tra qualche istante se l'hai appena sottomessa.")
+        return
+    except Exception as e:
+        print(f"\n[ERRORE] Impossibile recuperare il risultato: {e}")
+        return
+
+    metrics = payload.get("metrics", payload)
+    print(f"\n[RISULTATO] Inferenza per il Job '{job_id}' (modalità {mode.upper()}):")
+    for key, value in metrics.items():
+        print(f"    {key}: {value}")
 
 
 def handle_baseline_selection():
@@ -803,9 +893,10 @@ def main():
         print("[1] Avvia processo di addestramento distribuito")
         print("[2] Avvia processo di inferenza distribuito")
         print("[3] Verifica stato modello e download (Pickle)")
-        print("[4] Esegui Baseline Locale")
-        print("[5] Visualizza storico delle richieste")
-        print("[6] Torna al menù precedente")
+        print("[4] Verifica risultato di un'inferenza")
+        print("[5] Esegui Baseline Locale")
+        print("[6] Visualizza storico delle richieste")
+        print("[7] Torna al menù precedente")
         operation_choice = get_input("Inserisci il numero corrispondente all'operazione: ", "1")         
         
         if operation_choice == "1":
@@ -815,10 +906,12 @@ def main():
         elif operation_choice == "3":
             handle_model_request()
         elif operation_choice == "4":
-            handle_baseline_selection()
+            handle_inference_result_request()
         elif operation_choice == "5":
-            handle_history_view()
+            handle_baseline_selection()
         elif operation_choice == "6":
+            handle_history_view()
+        elif operation_choice == "7":
             continue
         else:
             print("\n[ERRORE] Scelta non valida.")

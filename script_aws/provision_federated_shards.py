@@ -27,10 +27,11 @@ tuo filesystem prima del provisioning. Non rilancia la baseline da solo.
 """
 import argparse
 import os
+import json
 import boto3
 from botocore.exceptions import ClientError
 
-from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
+from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader, SOURCE_DAY_COLUMN
 from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 
 DEFAULT_BUCKET = os.environ.get("DATASETS_BUCKET_NAME")
@@ -108,17 +109,48 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
         )
     else:
         print("[PROVISIONING] Generazione e upload degli shard in corso...")
+        # Vedi la nota gemella in provision_local_shards.py: tag_source_day va
+        # attivato SOLO per 'by_day' (unica strategia che ne ha bisogno), e
+        # day_column ricade sul nome colonna del loader (_capture_day) se non
+        # specificato esplicitamente — altrimenti 'by_day' fallirebbe subito
+        # con "day_column valido richiesto".
+        needs_day_tagging = partition_strategy == "by_day"
+        resolved_day_column = day_column or (SOURCE_DAY_COLUMN if needs_day_tagging else None)
+
         data_loader = RawCSVDataLoader(
             data_url=data_folder,
             dataset_seed=123,
             target_rows_per_day=TARGET_ROWS_PER_DAY,
+            tag_source_day=needs_day_tagging,
         )
         splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
         splitter.split_and_shard(
             data_loader, num_workers=num_workers, environment="aws", bucket_name=bucket,
-            partition_strategy=partition_strategy, alpha=alpha, day_column=day_column,
+            partition_strategy=partition_strategy, alpha=alpha, day_column=resolved_day_column,
         )
         print("[PROVISIONING] Shard caricati su S3 con successo.")
+
+        # Manifesto della strategia REALMENTE usata per generare questi shard —
+        # unica fonte di verità, letta dal client (main.py) invece di far
+        # dichiarare a mano la stessa informazione all'utente. Vedi la nota
+        # gemella in provision_local_shards.py per il motivo (bug osservato
+        # il 6/9/2026 con by_day, disallineamento silenzioso). Scritto SOLO
+        # in questo ramo (generazione reale), mai in quello "già presenti,
+        # salto": lì il manifesto esistente descrive ancora correttamente
+        # cosa c'è realmente su S3.
+        manifest = {
+            "partition_strategy": partition_strategy,
+            "alpha": alpha if partition_strategy == "dirichlet" else None,
+            "day_column": resolved_day_column if partition_strategy == "by_day" else None,
+            "num_workers": num_workers,
+        }
+        s3_client.put_object(
+            Bucket=bucket, Key="federated_shards/_manifest.json",
+            Body=json.dumps(manifest, indent=2),
+        )
+        print(f"[PROVISIONING] Manifesto caricato su s3://{bucket}/federated_shards/_manifest.json "
+              f"(letto dal client per popolare automaticamente partition_strategy/alpha "
+              f"nella richiesta di training).")
 
     _upload_feature_config_manifests(s3_client, bucket)
 
