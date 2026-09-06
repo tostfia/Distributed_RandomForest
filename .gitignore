@@ -65,3 +65,5 @@ synthetic/*
 # Ignora la cartella plots/ generata automaticamente dallo script di plottaggio
 plots/
 terraform/images.json
+workers_cache/
+*.csv
