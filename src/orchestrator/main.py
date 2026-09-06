@@ -5,8 +5,8 @@ import signal as os_signal
 
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
-from Distributed_RandomForest.src.orchestrator.centralized import CentralizedOrchestrator
-from Distributed_RandomForest.src.orchestrator.federated import FederatedOrchestrator
+from src.orchestrator.centralized import CentralizedOrchestrator
+from src.orchestrator.federated import FederatedOrchestrator
 
 def main(): 
     cfg = SystemConfig()

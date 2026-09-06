@@ -4,8 +4,8 @@ import os
 import re
 import json
 from src.testing.scenarios.base import BaseTestScenario
-from Distributed_RandomForest.src.orchestrator.centralized import CentralizedOrchestrator
-from Distributed_RandomForest.src.orchestrator.federated import FederatedOrchestrator
+from src.orchestrator.centralized import CentralizedOrchestrator
+from src.orchestrator.federated import FederatedOrchestrator
 import docker
 
 # ---------------------------------------------------------------------
