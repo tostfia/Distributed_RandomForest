@@ -11,8 +11,9 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 
 | Ambiente | Come si avvia | Quando usarlo |
 |---|---|---|
-| **Locale / Docker Compose** | `docker compose up` | Sviluppo, test rapidi, simulazione di rete con `tc netem` |
-| **AWS (ECS Fargate)** | `terraform apply` | Esecuzione "reale" su infrastruttura cloud, per gli esperimenti di scalabilità richiesti dal progetto |
+| **Locale** | `run_local.sh` | Sviluppo rapido, debugging diretto sul sistema host e simulazione di condizioni di rete con `tc netem`  |
+| **Docker Compose** | `run_docker.sh` | Test in ambiente containerizzato e isolato, verifica dell'interazione multi-nodo e validazione delle configurazioni prima del deploy cloud. |
+| **AWS** | `run_aws.sh` | Esecuzione "reale" su infrastruttura cloud, per gli esperimenti di scalabilità richiesti dal progetto |
 
 ---
 
@@ -36,7 +37,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 .
 ├── src/
 │   ├── client/            # entry point utente (sottomissione job, inferenza)
-│   ├── master/orchestrator/  # coordinatore centrale (distribuzione, aggregazione, stato)
+│   ├── orchestrator/  # coordinatore centrale (distribuzione, aggregazione, stato)
 │   ├── worker/             # nodo di calcolo (addestramento locale dei singoli alberi)
 │   ├── baseline/           # addestramento locale non distribuito, usato come riferimento
 │   ├── shared/config.py    # caricamento configurazione da .env
@@ -51,7 +52,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   └── preserve_baseline_boot.py # helper di clean_local.sh: preserva la config baseline attraverso il reset
 ├── script_aws/               # script operativi contro l'infrastruttura AWS già deployata da Terraform
 │   ├── run_aws.sh                    # avvio client contro l'infrastruttura AWS
-│   ├── run_test_engine_ecs.sh        # test engine come task ECS one-off (scenari 1-9, non interattivo)
+│   ├── run_test_engine.sh        # test engine su EC2 on demand
 │   ├── provision_federated_shards.py # provisioning offline degli shard federati su S3
 │   ├── teardown.sh                   # scala i Service a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
 │   └── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
@@ -127,7 +128,7 @@ export MY_GID=$(id -g)
 
 ### 5. Build e avvio
 
-**Consigliato: `run_docker.sh`.** A differenza di un `docker compose up` manuale, questo script:
+**Consigliato: `run_docker.sh` questo script:
 - esegue automaticamente il **provisioning degli shard federati** se `TRAINING_MODE=federated` (senza, l'orchestrator si aspetta shard già presenti e non li genera più a runtime — vedi [provision_local_shards.py](#modalità-di-training-centralizzata-vs-federata));
 - **azzera il delay di rete di default**: `docker-compose.yml` applica `50ms` di latenza artificiale su ogni worker se la variabile `NET_SCENARIO` non è impostata — `run_docker.sh puro` la neutralizza esplicitamente (`delay 0ms`), `run_docker.sh delay` la usa apertura per introdurre latenza voluta. Un `docker compose up` manuale **non fa questo azzeramento**: i worker partirebbero con 50ms di ritardo artificiale non richiesto;
 - applica i limiti di CPU/RAM da `.env` (`WORKER_CPUS`, `WORKER_MEM_LIMIT`, ecc.), utile per non saturare la macchina di sviluppo con `NUM_WORKERS` alto.
@@ -140,40 +141,6 @@ chmod +x script_local/run_docker.sh
 
 Lo script chiede il numero di orchestratori (1-2), legge `NUM_WORKERS`/`TRAINING_MODE` dal `.env`, builda l'immagine se necessario e avvia il cluster in background; il client resta sull'host e parte automaticamente al termine.
 
-**Alternativa manuale** (`docker compose` diretto) — utile per debug puntuale o per uno `--scale` diverso da quanto gestito dallo script, ma **senza** provisioning automatico né azzeramento del delay di rete: se la usi in `TRAINING_MODE=federated` esegui prima a mano `python -m script_local.provision_local_shards`, e se ti serve zero latenza artificiale esporta `NET_SCENARIO="delay 0ms"` prima di `up`.
-
-```bash
-docker compose build
-docker compose up --scale worker=3      # numero di worker a scelta, da 1 a 7
-```
-
-Per eseguirlo in background:
-
-```bash
-docker compose up --build --force-recreate -d
-```
-
-### 6. Avvia un job di training/inferenza dal client
-
-In un altro terminale, con lo stack già in esecuzione:
-
-```bash
-docker compose exec orchestrator python -m src.client.main
-```
-
-Segui il prompt interattivo per scegliere dataset, iperparametri e modalità (vedi [sezione dedicata](#modalità-di-training-centralizzata-vs-federata)).
-
-### 7. Fermare tutto
-
-```bash
-docker compose down
-```
-
-Per terminare eventuali processi rimasti attivi fuori da Compose (es. worker locali avviati senza Docker durante i test):
-
-```bash
-pkill -f "Distributed_RandomForest"     # oppure pkill -9 -f "Distributed_RandomForest" se non risponde
-```
 
 ### Alternativa: esecuzione bare-metal senza Docker
 
@@ -189,9 +156,9 @@ Lo script chiede quanti orchestratori avviare (1 o 2), legge `NUM_WORKERS` dal `
 
 ---
 
-## Esecuzione su AWS (Terraform + ECS Fargate)
+## Esecuzione su AWS (Terraform)
 
-Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per orchestrator/worker, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**. Per i dettagli completi (incluse le restrizioni SCP del Learner Lab e come aggirarle) vedi **[`terraform/README.md`](terraform/README.md)**; qui il riassunto operativo.
+Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per worker, EC2 per orchestrator, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**. Per i dettagli completi (incluse le restrizioni SCP del Learner Lab e come aggirarle) vedi **[`terraform/README.md`](terraform/README.md)**; qui il riassunto operativo.
 
 ### 1. Credenziali AWS
 
@@ -275,21 +242,19 @@ terraform destroy
 
 > Il bucket S3 e i log group CloudWatch, creati manualmente per aggirare le restrizioni SCP del Learner Lab (vedi `terraform/README.md`), **non** vengono rimossi da `terraform destroy` — richiedono pulizia manuale separata se vuoi eliminarli del tutto.
 
-### Test engine su AWS (task ECS one-off)
+### Test engine su AWS (istanza EC2 usa e getta)
 
-Per eseguire uno degli scenari di test (1-9) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su internet:
-
-```bash
-./script_aws/run_test_engine_ecs.sh <scenario>      # es. ./script_aws/run_test_engine_ecs.sh 2
-./script_aws/run_test_engine_ecs.sh                 # chiede lo scenario a terminale prima di lanciare il task
-```
-
-Lo script registra una task definition dedicata (`rf-test-engine-task`) e lancia un task Fargate *one-off* con lo scenario passato via variabile d'ambiente `SCENARIO` — **non** una sessione interattiva `ecs execute-command`: il test engine gira come comando principale del container, così anche scenari lunghi (training federato, scalabilità) non sono soggetti al timeout di inattività di 20 minuti di ECS Exec. Il task prosegue in background anche se chiudi il terminale; i log finiscono su CloudWatch (`/ecs/rf-test-engine`) e il report finale viene caricato su `s3://<bucket>/test_reports/aws/`.
+Per eseguire uno degli scenari di test (1-9 o `all`) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su Internet:
 
 ```bash
-aws logs tail /ecs/rf-test-engine --follow --region <REGION>   # segui i log in tempo reale
+./run_test_engine.sh <scenario>      # es. ./run_test_engine.sh 2
+./run_test_engine.sh                 # chiede lo scenario a terminale prima di lanciare l'istanza
 ```
+Lo script avvia un'istanza EC2 usa-e-getta ed esegue il container Docker con lo scenario passato via variabile d'ambiente `SCENARIO`. L'istanza prosegue in background anche se chiudi il terminale e si autodistrugge automaticamente (`shutdown -h now`) al termine del test; i log finiscono su CloudWatch (`/ec2/rf-test-engine`) e il report finale viene caricato su `s3://<bucket>/test_reports/aws/`.
 
+```bash
+aws logs tail /ec2/rf-test-engine --follow --region <REGION>   # segui i log in tempo reale
+```
 ---
 
 ## Modalità di training: centralizzata vs federata
@@ -314,10 +279,11 @@ Il comportamento cambia in base all'ambiente:
 
 ---
 
-## Test di sistema (performance, scalabilità, fault tolerance)
+## Test di sistema 
 
-Il modulo `src/testing/engine.py` espone un menu di scenari, eseguibile sia in locale (via `docker compose run --rm test-engine`, orchestrato da `script_local/run_test.sh`) sia su AWS (`script_aws/run_test_engine_ecs.sh`):
+La validazione e la verifica dell'architettura distribuita sono affidate ad un **Test Engine** automatizzato (`src/testing/engine.py`). L'engine permette di eseguire una suite completa di scenari sia in **ambiente locale** (tramite gli script dedicati) sia su **AWS** (`./run_test_engine.sh`), raccogliendo metriche e salvando i report finali.
 
+I test disponibili coprono le seguenti aree operative:
 1. Performance e metriche
 2. Scalabilità (al crescere del numero di nodi)
 3. Simulazione di rete (vedi sezione precedente)
@@ -328,17 +294,6 @@ Il modulo `src/testing/engine.py` espone un menu di scenari, eseguibile sia in l
 8. Elezione del leader sotto concorrenza (safety)
 9. Generazione grafici a partire dai report salvati
 
-Per l'esecuzione non interattiva (task ECS one-off senza terminale collegato), imposta la variabile d'ambiente `SCENARIO` con il numero desiderato (o `all`) invece di rispondere al prompt — vedi [Test engine su AWS](#test-engine-su-aws-task-ecs-one-off).
-
-Avvio rapido in locale:
-
-```bash
-./script_local/run_test.sh
-```
-
-Lo script legge `NUM_WORKERS` dal `.env`, avvia lo stack con 2 istanze di orchestrator (per testare il failover) e il numero di worker configurato, esegue il test engine e poi ferma tutto.
-
----
 
 ## Pulizia / teardown
 
