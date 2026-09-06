@@ -27,7 +27,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 6. [Simulazione/misura della latenza di rete](#simulazione-misura-della-latenza-di-rete)
 7. [Test di sistema (performance, scalabilità, fault tolerance)](#test-di-sistema-performance-scalabilità-fault-tolerance)
 8. [Pulizia / teardown](#pulizia--teardown)
-9. [Limitazioni note](#limitazioni-note)
+
 
 ---
 
@@ -317,13 +317,8 @@ In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_a
 
 ---
 
-## Limitazioni note
 
-- Su AWS/Fargate la simulazione di rete non inietta un delay artificiale ma misura la latenza reale (vedi sopra): non confrontare direttamente i due esperimenti come se fossero equivalenti.
-- L'ambiente Terraform assume un account **AWS Academy Learner Lab**: riusa il ruolo IAM `LabRole` già presente e la VPC di default. Fuori da un Learner Lab, `LabRole` non esiste e va sostituito con un ruolo IAM equivalente creato ad-hoc. La SCP del Learner Lab impone inoltre un tetto di memoria di 8192 MiB per task ECS e un bucket S3/log group CloudWatch creati manualmente (vedi `terraform/README.md`).
-- Le credenziali AWS Academy scadono ogni ~4 ore: se un `terraform apply` o uno script si interrompe con errori di autenticazione, è quasi sempre questo il motivo.
 
----
 
 ## Autori
 
