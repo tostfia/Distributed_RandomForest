@@ -275,10 +275,26 @@ def _kill_orchestrator_container_via_ssm(ssm_client, instance_id, hard_kill=True
     equivalente al comportamento di ecs:StopTask) per chi in futuro
     volesse confrontare i due regimi anche su questa infrastruttura.
 
+    BUG CORRETTO (7/9/2026): il container orchestrator è lanciato in
+    orchestrator_ec2.tf con '--restart unless-stopped'. Un 'docker kill'
+    (SIGKILL) NON equivale a un 'docker stop' esplicito ai fini della
+    restart policy di Docker: senza disattivarla prima, il container
+    ucciso risorgerebbe da solo, SULLA STESSA istanza, in pochi secondi —
+    prima ancora che il vero subentro dell'istanza standby possa avvenire,
+    vanificando il test (o peggio, mascherandolo con un "recovery" locale
+    che non ha nulla a che fare col failover cross-istanza che lo scenario
+    vuole verificare). Stesso principio già applicato nel ramo locale/Docker
+    Compose di questo scenario ("Disattivo la restart policy per evitare
+    che risorga da solo") — qui replicato per l'istanza EC2 remota, in un
+    solo comando SSM composito (disattivazione + kill), per evitare una
+    finestra temporale tra i due comandi in cui il container potrebbe
+    comunque risorgere prima della disattivazione.
+
     Ritorna il CommandId SSM (non ne aspetta il completamento: il chiamante
     misura il subentro osservando DynamoDB, non l'esito del comando SSM).
     """
-    command = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    kill_cmd = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    command = f"docker update --restart=no orchestrator && {kill_cmd}"
     send_resp = ssm_client.send_command(
         InstanceIds=[instance_id],
         DocumentName="AWS-RunShellScript",

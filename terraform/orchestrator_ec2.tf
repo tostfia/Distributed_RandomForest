@@ -105,7 +105,7 @@ locals {
       -e RPC_SYNC_TIMEOUT_SECONDS=${var.rpc_sync_timeout_seconds}s \
       -e RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=${var.rpc_inference_sync_timeout_seconds}s \
       ${local.image_uri} \
-      python -m src.master.orchestrator.main
+      python -m src.orchestrator.main
   EOF
 }
 
