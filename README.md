@@ -103,15 +103,21 @@ pip install -r requirements.txt
 
 ### 3. Configura il file `.env`
 
-Crea un file `.env` nella root del progetto (non è versionato: contiene configurazione locale). Valori minimi per l'esecuzione locale:
+Il sistema viene configurato tramite il file `.env` presente nella root del progetto. È possibile crearlo partendo dal modello `.env.example`:
 
 ```bash
-ENV_MODE=local
-TRAINING_MODE=federated        # oppure: centralized
-NUM_WORKERS=3                  # da 1 a 10
+cp .env.example .env
 ```
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione è in esecuzione dentro un container Docker. |
+| **TRAINING_MODE** | `centralized/federated` | Obbligatoria. Seleziona la modalità di addestramento (dataset unico condivisibile o partizionato per-nodo). |
+| **ENV_MODE** | `local/aws` | Obbligatoria. Ambiente di esecuzione (local per Docker/host, aws per Fargate/EC2/S3). |
+| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. |
+| **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se DATASET_TYPE=synthetic. |
 
-`src/shared/config.py` legge queste variabili tramite `python-dotenv`; `TRAINING_MODE` deve essere esattamente `centralized` o `federated`, altrimenti il sistema si rifiuta di partire.
+
+
 
 ### 4. Prepara i permessi delle cartelle dati locali
 
@@ -262,7 +268,13 @@ aws logs tail /ec2/rf-test-engine --follow --region <REGION>   # segui i log in 
 Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tfvars` per AWS):
 
 - **`centralized`**: dataset unico su S3 (o storage locale), il coordinatore distribuisce la costruzione dei singoli alberi tra i worker, che leggono tutti gli stessi dati.
-- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi.
+- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **PARTITION_STRATEGY** | `by_day/dirichlet/iid` | Strategia di partizionamento dello shard federato. |
+| **ALPHA** | float | Iperparametro di eterogeneità per la strategia dirichlet (valori piccoli = Non-IID, valori grandi = IID). |
+
 
 La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
 
