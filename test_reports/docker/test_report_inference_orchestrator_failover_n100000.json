@@ -1,9 +1,7 @@
 {
   "inference_orchestrator_failover": {
-    "scenario_description": "Test di Failover dell'Orchestratore con transizione della leadership dello stato su crash del Master.",
     "status": "FAILED",
-    "original_leader": "orchestrator-federato-testing",
-    "recovered_by": "None",
-    "duration_seconds": 552.7907609
+    "duration_seconds": 0,
+    "error": "Training di preparazione non completato entro il timeout."
   }
 }

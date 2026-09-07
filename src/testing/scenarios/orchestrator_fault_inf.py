@@ -81,6 +81,37 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
         waited += interval
     return False
 
+def _wait_for_job_completed(state_manager, job_id, timeout=400, interval=0.5) -> bool:
+    """
+    Attende (con timeout) che il job risulti COMPLETED sullo stato condiviso.
+
+    Introdotta per il fix del 7/9/2026 (vedi run()): la preparazione del
+    modello prima dell'inferenza deve ora passare dalla coda reale, gestita
+    dai container Docker/ECS effettivi, invece di una chiamata diretta e
+    sincrona a _execute_training_step() sull'istanza interna del test-engine
+    -- quella scorciatoia scriveva un 'orchestrator_id' mai realmente in
+    competizione per il lock di leadership, impedendo ai container reali di
+    reclamare pulitamente il successivo job di inferenza per lo stesso
+    job_id (il test falliva sempre, indipendentemente dal meccanismo di
+    failover). Simmetrica a _wait_for_inference_in_progress qui sotto, ma
+    per lo stato terminale del training invece che per il progresso
+    intermedio dell'inferenza.
+    """
+    waited = 0.0
+    while waited < timeout:
+        try:
+            state = state_manager.obtain_request(job_id)
+            if state:
+                item_data = state.get("Item", state)
+                if item_data.get("status") == "COMPLETED":
+                    return True
+        except Exception:
+            pass
+        time.sleep(interval)
+        waited += interval
+    return False
+
+
 def _count_checkpoint_workers(checkpoint_path: str) -> int:
     """
     Conta quanti worker/chunk sono già salvati nel checkpoint di inferenza,
@@ -482,11 +513,46 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
             try:
                 self._reuse_dataset_if_available(payload, seed=123)
-                orch_leader._execute_training_step(payload, 0, target_trees, 123)
-
             except Exception as e:
-                print(f"[TEST ERRORE] Setup fallito: {e}")
+                print(f"[TEST ERRORE] Preparazione del dataset fallita: {e}")
                 return {"status": "FAILED", "duration_seconds": 0}
+
+            # BUG CORRETTO (7/9/2026): la preparazione del modello avveniva con
+            # una chiamata diretta e sincrona a orch_leader._execute_training_step(),
+            # sull'istanza interna del test-engine (self.orchestrator) --
+            # bypassando completamente la coda e i container reali. A differenza
+            # dello scenario di failover in training (orchestrator_fault.py, che
+            # invia SEMPRE tutto sulla coda e lascia l'intero ciclo di vita del
+            # job ai container Docker/ECS reali), questa scorciatoia scriveva nel
+            # record di stato del job un 'orchestrator_id' appartenente a
+            # un'istanza mai realmente avviata (.start()) né in competizione per
+            # il lock di leadership in modalità Docker. I container reali non
+            # riuscivano quindi a reclamare in modo pulito il job di inferenza
+            # successivo per lo STESSO job_id: il test falliva sempre
+            # ("job non arrivato a COMPLETED entro il timeout"), indipendentemente
+            # dal meccanismo di failover in sé -- osservato empiricamente il
+            # 7/9/2026, con 'Gestore Attuale' mai aggiornato dal valore lasciato
+            # da questa chiamata diretta.
+            #
+            # Fix: anche la preparazione del modello passa ora dalla coda reale,
+            # gestita dagli stessi container che gestiranno poi l'inferenza --
+            # stesso principio già corretto di orchestrator_fault.py.
+            print(f"[TEST] Invio del Job di TRAINING {job_id[:8]} alla coda '{orch_leader.queue_name}' "
+                  f"(preparazione del modello, gestita dai container reali)...")
+            try:
+                orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name, message_dict=payload)
+            except Exception as e_inner:
+                print(f"[TEST ERRORE CRITICO] Impossibile inviare il messaggio di training: {e_inner}")
+                return {"status": "FAILED", "duration_seconds": 0}
+
+            training_wait_timeout = ft_cfg.get("max_wait_for_training_start_seconds", 400)
+            print(f"[TEST] Attendo il completamento del training di preparazione (timeout: {training_wait_timeout}s)...")
+            if not _wait_for_job_completed(orch_leader.state_manager, job_id, timeout=training_wait_timeout):
+                print(f"[TEST ERRORE] Il job di training {job_id[:8]} non è arrivato a COMPLETED entro "
+                      f"{training_wait_timeout}s: impossibile procedere con l'inferenza.")
+                return {"status": "FAILED", "duration_seconds": 0,
+                        "error": "Training di preparazione non completato entro il timeout."}
+            print(f"[TEST] Job di training {job_id[:8]} completato dai container reali. Procedo con l'inferenza...")
 
             payload_inference = {
                 "request_type": "INFERENCE",

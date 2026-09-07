@@ -63,6 +63,7 @@
   },
 
   "inference_orchestrator_failover": {
+    "max_wait_for_training_start_seconds": 1200,
     "_NOTE": "Scenario 7 - failover dell'orchestratore durante l'inferenza. È la chiave letta da orchestrator_fault_inf.py; il vecchio blocco 'inference_orchestrator_fault' era un doppione che nessuno leggeva ed è stato rimosso.",
     "kill_orchestrator_after_seconds": 5,
     "max_wait_for_inference_start_seconds": 60,
@@ -100,6 +101,7 @@
         "max_monitor_timeout_seconds": 920
       },
       "inference_orchestrator_failover": {
+    "max_wait_for_training_start_seconds": 1200,
         "kill_orchestrator_after_seconds": 10,
         "docker_kill_delay_seconds": 5,
         "failover_detection_margin_seconds": 120,

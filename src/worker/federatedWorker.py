@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import gc
 import time as time_module
 from botocore.exceptions import ClientError
 import boto3
@@ -418,6 +419,23 @@ class FederatedWorker(BaseWorker):
                           f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
                     _persist_fed_batch(batch_trees, part_idx)
                     del batch_trees
+                    # BUG SOSPETTATO E CORRETTO (7/9/2026): 'del' rimuove solo il
+                    # riferimento -- non garantisce che il garbage collector
+                    # ciclico di Python liberi SUBITO la memoria sottostante
+                    # (gli alberi scikit-learn, con le loro strutture interne,
+                    # possono creare riferimenti ciclici che il refcounting da
+                    # solo non risolve, rimandando la liberazione reale al
+                    # prossimo giro schedulato del GC). Osservato empiricamente:
+                    # un primo round di training completava correttamente su
+                    # worker vicini al proprio tetto di memoria, ma un secondo
+                    # round identico, subito dopo, faceva sforare 3 worker su 3
+                    # simultaneamente -- compatibile con memoria del batch
+                    # precedente non ancora riclamata quando il secondo round
+                    # iniziava. Forziamo qui una collezione esplicita e
+                    # immediata, stesso principio già applicato al percorso
+                    # centralizzato (vedi CentralizedOrchestrator, salvataggio
+                    # manifesto leggero).
+                    gc.collect()
 
         # Manifest scritto per ultimo, dopo tutte le parti: stesso principio
         # di BaseWorker.exposed_train_subset_forest (vedi lì per i dettagli).
@@ -433,6 +451,13 @@ class FederatedWorker(BaseWorker):
             raise
         print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
               f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
+        # Pulizia esplicita di fine task, in aggiunta a quella per-batch sopra:
+        # il worker resta vivo tra un round e l'altro dello stesso job (mai
+        # riavviato), quindi qualunque oggetto temporaneo di QUESTO task
+        # (worker_tasks, futures già consumati, ecc.) va liberato ora, prima
+        # che il prossimo round arrivi via RPC e trovi meno margine del
+        # previsto.
+        gc.collect()
         # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore li
         # rilegge dallo storage condiviso con lo stesso 'source_info' sintetico
         # (vedi federated.py). Stesso fix già applicato al path centralizzato per

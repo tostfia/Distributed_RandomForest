@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import os
+import gc
 import signal
 import socket
 import numpy as np
@@ -417,6 +418,15 @@ class BaseWorker(Service, ABC):
                     # iterazione: gli alberi già scritti su storage non restano
                     # più referenziati da nessuna struttura dati del worker.
                     del batch_trees
+                    # BUG SOSPETTATO E CORRETTO (7/9/2026): 'del' rimuove solo il
+                    # riferimento, non garantisce la liberazione immediata da
+                    # parte del garbage collector ciclico (gli alberi
+                    # scikit-learn possono avere riferimenti ciclici interni).
+                    # Stesso fix applicato al percorso federato (vedi
+                    # FederatedWorker.exposed_train_local_federated_forest per
+                    # il pattern di crash osservato empiricamente che ha
+                    # motivato questa correzione).
+                    gc.collect()
 
         # Il manifest viene scritto per ULTIMO, dopo che TUTTE le parti sono
         # sul disco/S3: la sua presenza è ciò che segnala all'Orchestratore
@@ -435,6 +445,7 @@ class BaseWorker(Service, ABC):
             raise
         print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
               f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
+        gc.collect()
         # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
         # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
         # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
