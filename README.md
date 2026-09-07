@@ -108,7 +108,7 @@ Crea un file `.env` nella root del progetto (non è versionato: contiene configu
 ```bash
 ENV_MODE=local
 TRAINING_MODE=federated        # oppure: centralized
-NUM_WORKERS=3                  # da 1 a 7
+NUM_WORKERS=3                  # da 1 a 10
 ```
 
 `src/shared/config.py` legge queste variabili tramite `python-dotenv`; `TRAINING_MODE` deve essere esattamente `centralized` o `federated`, altrimenti il sistema si rifiuta di partire.
@@ -314,16 +314,6 @@ Se invece ti serve un reset totale, anche di queste due eccezioni, va fatto a ma
 2. `terraform destroy` — rimuove tutta l'infrastruttura (vedi [sezione 6 del flusso AWS](#6-fermaredistruggere)).
 
 In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
-
----
-
-## Limitazioni note
-
-- Su AWS/Fargate la simulazione di rete non inietta un delay artificiale ma misura la latenza reale (vedi sopra): non confrontare direttamente i due esperimenti come se fossero equivalenti.
-- L'ambiente Terraform assume un account **AWS Academy Learner Lab**: riusa il ruolo IAM `LabRole` già presente e la VPC di default. Fuori da un Learner Lab, `LabRole` non esiste e va sostituito con un ruolo IAM equivalente creato ad-hoc. La SCP del Learner Lab impone inoltre un tetto di memoria di 8192 MiB per task ECS e un bucket S3/log group CloudWatch creati manualmente (vedi `terraform/README.md`).
-- Le credenziali AWS Academy scadono ogni ~4 ore: se un `terraform apply` o uno script si interrompe con errori di autenticazione, è quasi sempre questo il motivo.
-
----
 
 ## Autori
 
