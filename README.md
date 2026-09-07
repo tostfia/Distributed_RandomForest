@@ -27,7 +27,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 6. [Simulazione/misura della latenza di rete](#simulazione-misura-della-latenza-di-rete)
 7. [Test di sistema (performance, scalabilità, fault tolerance)](#test-di-sistema-performance-scalabilità-fault-tolerance)
 8. [Pulizia / teardown](#pulizia--teardown)
-9. [Limitazioni note](#limitazioni-note)
+
 
 ---
 
@@ -314,6 +314,11 @@ Se invece ti serve un reset totale, anche di queste due eccezioni, va fatto a ma
 2. `terraform destroy` — rimuove tutta l'infrastruttura (vedi [sezione 6 del flusso AWS](#6-fermaredistruggere)).
 
 In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
+
+---
+
+
+
 
 ## Autori
 
