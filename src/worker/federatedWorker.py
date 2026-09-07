@@ -546,27 +546,50 @@ class FederatedWorker(BaseWorker):
                 # userebbe, non ancora usato per calibrare una soglia in questo
                 # percorso federato (vedi VALIDATION_SIZE_FOR_THRESHOLD).
                 # Scartato subito dopo lo split.
-                validation_splitter = StratifiedDataSplitter(
-                    target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
-                    random_state=random_state,
-                )
-                df_train_clean, _ = validation_splitter.split(df_train_clean)
+                #
+                # BUG CORRETTO (7/9/2026): n_minority > 0 non garantisce che lo
+                # split stratificato riesca -- con partizionamento Dirichlet
+                # molto eterogeneo (es. alpha=0.1) uno shard può avere 1-2
+                # righe di classe minoritaria: troppo poche perché
+                # StratifiedDataSplitter possa mettere almeno un esempio in
+                # entrambi i lati dello split (solleva ValueError "resta al
+                # massimo 1 classe stratificabile"), ma comunque troppe per
+                # far scattare la guardia n_minority==0 sopra. Prima di questo
+                # fix il ValueError risaliva non gestito fino al chiamante RPC,
+                # mandando il worker in errore e bloccando l'intero round
+                # (nessun riassegnamento automatico del task con
+                # FED_SUPERVISOR_MAX_RESTARTS=0). Stesso fallback già usato per
+                # n_minority==0: split/undersampling saltati, training sullo
+                # shard così com'è, invece di far fallire l'intero job per un
+                # singolo worker con dati troppo esigui.
+                try:
+                    validation_splitter = StratifiedDataSplitter(
+                        target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
+                        random_state=random_state,
+                    )
+                    df_train_clean, _ = validation_splitter.split(df_train_clean)
 
-                # Under-sampling della classe maggioritaria, SOLO sul train shard
-                # di QUESTO worker (mai sul test, stesso principio della baseline
-                # centrale): applicato per-shard, non globalmente, perché in un
-                # sistema federato i dati restano decentralizzati per design --
-                # ogni worker bilancia i propri dati locali. Rilevante soprattutto
-                # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
-                # Benign/Attacco di un singolo shard può discostarsi parecchio da
-                # quello del dataset globale.
-                print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
-                      f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
-                df_train_clean = undersample_majority_class(
-                    df_train_clean, target_column=self.target_column,
-                    majority_class=0, minority_class=1,
-                    ratio=UNDERSAMPLING_RATIO, random_state=random_state,
-                )
+                    # Under-sampling della classe maggioritaria, SOLO sul train shard
+                    # di QUESTO worker (mai sul test, stesso principio della baseline
+                    # centrale): applicato per-shard, non globalmente, perché in un
+                    # sistema federato i dati restano decentralizzati per design --
+                    # ogni worker bilancia i propri dati locali. Rilevante soprattutto
+                    # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
+                    # Benign/Attacco di un singolo shard può discostarsi parecchio da
+                    # quello del dataset globale.
+                    print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
+                          f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
+                    df_train_clean = undersample_majority_class(
+                        df_train_clean, target_column=self.target_column,
+                        majority_class=0, minority_class=1,
+                        ratio=UNDERSAMPLING_RATIO, random_state=random_state,
+                    )
+                except ValueError as e:
+                    print(f"[{self.worker_name}] [ATTENZIONE] Classe minoritaria presente ma troppo "
+                          f"esigua ({n_minority} righe) per uno split di validation stratificato "
+                          f"({e}). Split di validation e undersampling SALTATI (stesso fallback del "
+                          f"caso 'zero righe minoritarie'). Addestramento su questo shard così "
+                          f"com'è (probabile scarsa informatività degli alberi risultanti).")
 
         selected_features = self._resolve_selected_features(dataset_type, hyperparameters)
         
