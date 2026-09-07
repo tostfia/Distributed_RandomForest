@@ -1133,15 +1133,31 @@ class CentralizedOrchestrator(BaseOrchestrator):
     def _clean_checkpoint(self, job_id: str):
         """
         Override del metodo di pulizia per rimuovere il file pickle parziale.
+
+        BUG CORRETTO (7/9/2026): questo metodo cancellava SEMPRE le parti del
+        checkpoint alberi (_purge_trees_checkpoint) subito dopo il
+        completamento di un job riuscito -- corretto PRIMA dell'introduzione
+        del manifesto leggero (vedi _execute_training_step), quando il
+        modello finale era un pickle scikit-learn autosufficiente e quelle
+        parti erano davvero solo stato temporaneo di resume tra i round.
+
+        Dopo il manifesto leggero, il modello NON contiene più gli alberi:
+        salva solo metadati e RIFERISCE le parti già persistite su storage
+        (vedi il commento "referenziati dalle parti già persistite" al
+        momento del salvataggio). Cancellarle qui distrugge l'unica copia
+        reale del modello subito dopo averlo "salvato" -- bug osservato
+        empiricamente il 7/9/2026: ogni inferenza su un job addestrato con
+        questo formato falliva con "ricevuta shape (0,)", perché tutte le
+        parti erano già state rimosse nello stesso istante in cui il
+        training terminava.
+
+        Le parti ora sopravvivono al completamento del job, esattamente come
+        saved_models/model_{job_id}.pkl -- la pulizia esplicita di un modello
+        non più necessario resta una scelta dell'utente (es. teardown.sh
+        --purge-models), mai automatica a fine training.
         """
         super()._clean_checkpoint(job_id)
         self._trees_cache.pop(job_id, None)
-        # Rimuove tutte le parti incrementali oltre all'eventuale monolitico.
-        try:
-            self._purge_trees_checkpoint(job_id)
-            print(f"[{self.orchestrator_name}] [CLEAN OK] Rimosso checkpoint degli alberi parziali.")
-        except Exception as e:
-            print(f"[{self.orchestrator_name}] [CLEAN WARN] Impossibile cancellare il checkpoint alberi: {e}")
  
         inference_cp = self._get_inference_checkpoint_path(job_id)
         try:

@@ -43,6 +43,19 @@ class ScalabilityScenario(BaseTestScenario):
         # T_seq è confrontabile.
         target_trees = self._resolve_target_trees()
 
+        # T_seq/T_1node REALI dalla baseline locale (Breiman single-machine),
+        # non più solo il tempo della configurazione di worker più piccola
+        # testata: 'baseline_w = min(workers_to_test)' risponde a "quanto è
+        # più veloce N worker rispetto a 2?", non alla domanda che conta per
+        # la relazione ("conviene distribuire rispetto a non farlo affatto?").
+        # Letti dal pickle della baseline (run_baseline.py li salva SOLO lì,
+        # in metadata_pipeline['baseline_tempi_locali'], mai in un JSON) --
+        # se il pickle manca o non è quello atteso per questo dataset_type/
+        # task_type, ricadiamo su None: il confronto extra viene omesso dal
+        # report invece di far fallire l'intero scenario per un dato opzionale.
+        dataset_type_cfg = self.config.get("dataset_type", "synthetic")
+        t_seq_true, t_1node_true = self._load_true_sequential_baseline(dataset_type_cfg, task_type)
+
         rng = random.Random(123)
         worker_ids = list(all_active_workers.keys())
         for worker_count in workers_to_test:
@@ -166,6 +179,17 @@ class ScalabilityScenario(BaseTestScenario):
             train_only_efficiency = train_only_speedup / worker_count if worker_count > 0 else 0.0
             infer_speedup = base_infer_time / m["infer_duration"] if m["infer_duration"] > 0 else 1.0
 
+            # Speedup contro il VERO tempo sequenziale/multicore a singola
+            # macchina (T_seq/T_1node dalla baseline) -- confronto aggiuntivo,
+            # non sostitutivo di quello sopra: risponde a "conviene distribuire
+            # rispetto a non farlo affatto?", non a "quanto scala rispetto alla
+            # configurazione minima testata?". Omesso (None) se il pickle della
+            # baseline non è disponibile per questo dataset/task.
+            speedup_vs_t_seq = (t_seq_true / m["train_only_duration"]
+                                 if t_seq_true and m["train_only_duration"] > 0 else None)
+            speedup_vs_t_1node = (t_1node_true / m["train_only_duration"]
+                                   if t_1node_true and m["train_only_duration"] > 0 else None)
+
             # Stampa a schermo strutturata
             print(f"\n[Configurazione: {worker_count} Worker]")
             print(f"    ADDESTRAMENTO ({m['num_trees']} alberi complessivi):")
@@ -180,6 +204,9 @@ class ScalabilityScenario(BaseTestScenario):
             print(f"     • Speedup soli alberi:  {train_only_speedup:.2f}x  "
                   f"(efficienza parallela {train_only_efficiency:.2f})"
                   + ("" if m["train_only_instrumented"] else "  [NON VALIDO: vedi placeholder sopra]"))
+            if speedup_vs_t_seq is not None:
+                print(f"     • Speedup vs T_seq (baseline monocore, {t_seq_true:.2f}s):    {speedup_vs_t_seq:.2f}x")
+                print(f"     • Speedup vs T_1node (baseline multicore, {t_1node_true:.2f}s): {speedup_vs_t_1node:.2f}x")
 
             print(f"   INFERENZA :")
             print(f"     • Durata:     {m['infer_duration']:.2f} secondi")
@@ -202,7 +229,13 @@ class ScalabilityScenario(BaseTestScenario):
                     "throughput_trees_per_s_training_only": round(m['train_only_throughput'], 2),
                     "speedup": round(train_speedup, 2),
                     "speedup_training_only": round(train_only_speedup, 2),
-                    "parallel_efficiency_training_only": round(train_only_efficiency, 3)
+                    "parallel_efficiency_training_only": round(train_only_efficiency, 3),
+                    "speedup_vs_true_sequential_baseline": (
+                        round(speedup_vs_t_seq, 2) if speedup_vs_t_seq is not None else None
+                    ),
+                    "speedup_vs_true_1node_multicore_baseline": (
+                        round(speedup_vs_t_1node, 2) if speedup_vs_t_1node is not None else None
+                    ),
                 },
                 "inference": {
                     "duration_seconds": round(m["infer_duration"], 2),
@@ -293,3 +326,61 @@ class ScalabilityScenario(BaseTestScenario):
                 accuracy_metrics = {"mean_squared_error": 0.0}
 
         return accuracy_metrics
+
+    def _load_true_sequential_baseline(self, dataset_type: str, task_type: str):
+        """
+        Legge T_seq (monocore, n_jobs=1) e T_1node_parallel (multicore, sulla
+        stessa macchina) dal pickle prodotto da run_baseline.py -- l'unico
+        posto in cui questi due valori vengono persistiti (in
+        metadata_pipeline['baseline_tempi_locali'], mai in un JSON leggero:
+        vedi run_baseline.py righe ~1325-1349).
+
+        Introdotto per rispondere alla domanda "conviene distribuire rispetto
+        a non farlo affatto?", che 'baseline_w = min(workers_to_test)' (lo
+        speedup storico calcolato sopra) non copre: quello risponde solo a
+        "quanto scala rispetto alla configurazione di worker più piccola
+        testata", un confronto interno al cluster, non contro l'alternativa
+        non distribuita.
+
+        Carica l'intero pickle (include anche il modello addestrato, non solo
+        i tempi) UNA VOLTA SOLA a inizio scenario, non ad ogni configurazione
+        di worker: costo accettabile pagato una tantum, mai per round.
+
+        Ritorna (t_seq, t_1node_parallel), o (None, None) se il pickle non
+        esiste ancora per questo dataset_type/task_type (es. baseline mai
+        eseguita) o ha un formato inatteso -- il chiamante tratta l'assenza
+        come "confronto extra non disponibile", MAI come un errore bloccante:
+        lo scenario di scalabilità deve poter girare anche senza una baseline
+        locale già pronta.
+        """
+        import pickle as _pickle
+
+        output_dir = "./outputs_baseline"
+        if dataset_type == "synthetic":
+            pickle_path = os.path.join(output_dir, f"baseline_random_forest_{task_type}.pkl")
+        else:
+            pickle_path = os.path.join(output_dir, "baseline_random_forest_completa.pkl")
+
+        if not os.path.exists(pickle_path):
+            print(f"[SCALABILITY] [INFO] Nessuna baseline locale trovata in '{pickle_path}': "
+                  f"lo speedup vs T_seq/T_1node reali non sarà disponibile in questo report "
+                  f"(esegui run_baseline.py prima, se ti serve questo confronto).")
+            return None, None
+
+        try:
+            with open(pickle_path, "rb") as f:
+                metadata_pipeline = _pickle.load(f)
+            tempi = metadata_pipeline.get("baseline_tempi_locali", {})
+            t_seq = tempi.get("t_seq")
+            t_1node = tempi.get("t_1node_parallel")
+            if t_seq is None or t_1node is None:
+                print(f"[SCALABILITY] [WARN] '{pickle_path}' trovato ma privo di "
+                      f"'baseline_tempi_locali'/t_seq/t_1node_parallel: confronto extra omesso.")
+                return None, None
+            print(f"[SCALABILITY] Baseline locale caricata da '{pickle_path}': "
+                  f"T_seq={t_seq:.2f}s, T_1node={t_1node:.2f}s.")
+            return t_seq, t_1node
+        except Exception as e:
+            print(f"[SCALABILITY] [WARN] Impossibile leggere '{pickle_path}' ({e}): "
+                  f"confronto extra vs T_seq/T_1node omesso.")
+            return None, None
