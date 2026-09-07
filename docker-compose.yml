@@ -55,6 +55,8 @@ services:
       - ./.local_storage:/app/.local_storage:z
       - ./saved_models:/app/saved_models:z
       - ./workers_cache:/app/workers_cache:z
+    cap_add:
+      - NET_ADMIN
     command: >
       sh -c "
       if command -v tc >/dev/null 2>&1; then
