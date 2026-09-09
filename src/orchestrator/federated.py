@@ -13,6 +13,7 @@ import re
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import precision_recall_curve
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
 from src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
@@ -380,32 +381,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                     start_alberi = 0
 
-        # Provenienza per-albero (worker_index stabile che lo ha addestrato):
-        # lista PARALLELA ad all_trained_trees, stessa lunghezza/ordine. Serve
-        # per poter pesare/analizzare l'ensemble per worker/giorno in fase di
-        # aggregazione (vedi _reconstruct_and_save_global_model), invece di
-        # trattare tutti gli alberi come intercambiabili -- indispensabile con
-        # partition_strategy='by_day', dove ogni worker è di fatto uno
-        # specialista implicito del giorno/tipo di traffico che gli è
-        # capitato. Gli alberi già presenti in all_trained_trees a questo
-        # punto (da cache di processo o da checkpoint fisico ripristinato)
-        # NON hanno provenienza nota qui: None è un placeholder esplicito
-        # ("proveniente da un round precedente/non tracciato"), non un
-        # worker_index valido. L'aggregazione dovrà trattarlo come
-        # "affidabilità sconosciuta -> peso neutro/di default".
-        tree_worker_ids = [None] * len(all_trained_trees)
-
-        # Ultima affidabilità locale riportata da ciascun worker (worker_index
-        # -> float in [0,1] o None), calcolata dal worker stesso sul proprio
-        # validation set (vedi federatedWorker.py, campo "reliability"
-        # dell'ack). Aggiornata ad ogni round: se un job richiede più round di
-        # dispatch, questo dizionario riflette SOLO l'ultimo round completato
-        # per ciascun worker, non una media storica -- scelta semplice per
-        # ora, sufficiente perché la composizione dello shard di un worker non
-        # cambia round dopo round (stesso giorno), quindi la sua affidabilità
-        # è stabile; un affinamento futuro potrebbe farne una media mobile.
-        worker_reliability = {}
-
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
 
@@ -618,20 +593,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # scrittura su DynamoDB sono spostati fuori (vedi sotto).
                         with results_lock:
                             all_trained_trees.extend(result_trees)
-                            # 'idx' è lo stable_idx di QUESTO worker (vedi
-                            # _infer_worker_index più sotto, dove il thread è
-                            # stato creato): ogni albero di result_trees viene
-                            # da questo stesso worker/task, quindi la stessa
-                            # provenienza si ripete len(result_trees) volte.
-                            tree_worker_ids.extend([idx] * len(result_trees))
-                            # None esplicito (giorno senza classe minoritaria
-                            # utile, o regressione) è diverso da "chiave
-                            # assente" (worker mai arrivato in questo round):
-                            # entrambi i casi dovranno essere trattati come
-                            # "affidabilità sconosciuta" in fase di pesatura
-                            # (Passo 3), ma è bene che restino distinguibili nei
-                            # log/metadati.
-                            worker_reliability[idx] = ack.get("reliability")
                             current_total = len(all_trained_trees)
                             # Copia: la serializzazione fuori dal lock non deve
                             # poter vedere la lista mutare sotto i piedi.
@@ -713,25 +674,32 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             if len(all_trained_trees) > target_alberi:
                 print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
-                # Campioniamo gli INDICI, non gli alberi direttamente: dobbiamo
-                # scartare la stessa posizione da entrambe le liste parallele
-                # (albero e relativa provenienza), altrimenti dopo lo scarto
-                # tree_worker_ids[i] non corrisponderebbe più a collected_trees[i].
-                sample_idx = random.sample(range(len(all_trained_trees)), target_alberi)
-                collected_trees = [all_trained_trees[i] for i in sample_idx]
-                collected_worker_ids = [tree_worker_ids[i] for i in sample_idx]
+                collected_trees = random.sample(all_trained_trees, target_alberi)
             else:
                 print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
                 collected_trees = all_trained_trees
-                collected_worker_ids = tree_worker_ids
 
             aggregation_start = time.perf_counter()
-            final_count = self._reconstruct_and_save_global_model(
-                collected_trees, tree_type,
-                tree_worker_ids=collected_worker_ids,
-                worker_reliability=worker_reliability,
-            )
+            final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
             self.last_aggregation_seconds = time.perf_counter() - aggregation_start
+
+            if tree_type == "classifier":
+                try:
+                    trees_with_classes = [t for t in collected_trees if hasattr(t, "classes_")]
+                    if trees_with_classes:
+                        global_classes = np.unique(np.concatenate(
+                            [np.asarray(t.classes_) for t in trees_with_classes]
+                        ))
+                        # Ri-query fresca (invece di riusare 'available_workers' catturato
+                        # prima del dispatch di training): un worker può aver cambiato
+                        # host/porta nel frattempo, e la calibrazione non è così urgente
+                        # da giustificare il rischio di contattare un endpoint stantio.
+                        calibration_workers = ServiceRegistry.get_available_workers(self.environment)
+                        self._calibrate_federated_threshold(self.current_job_id, global_classes, calibration_workers)
+                except Exception as e_thr:
+                    print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia federata fallita "
+                          f"(non bloccante, l'inferenza ricadrà sulla soglia della baseline): {e_thr}")
+
             self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
             return final_count
 
@@ -811,17 +779,41 @@ class FederatedOrchestrator(BaseOrchestrator):
             None if self.environment == "aws"
             else self.select_from_config(self._resolve_dataset_type(payload))
         )
-        # Soglia di decisione calibrata dalla baseline (vedi
-        # VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py):
-        # stesso pattern di feature_selezionate sopra, incluso il guard su AWS
-        # (il file locale config_<dataset_type>.json non esiste sul container
-        # dell'orchestratore in quell'ambiente). None -> ogni worker ricade sul
-        # comportamento di default (argmax/soglia implicita 0.50), vedi
-        # FederatedWorker.exposed_predict_subset_forest.
-        decision_threshold = (
-            None if self.environment == "aws"
-            else self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
-        )
+        # Soglia di decisione: proviamo PRIMA quella calibrata specificamente sul
+        # modello federato (vedi _calibrate_federated_threshold, eseguita a fine
+        # training se tree_type='classifier') -- calcolata sul validation set
+        # federato con la STESSA funzione di scoring (voto pesato per foglia)
+        # usata qui in inferenza, quindi più rappresentativa di quella della
+        # baseline centralizzata. Se assente (calibrazione fallita, job
+        # addestrato prima di questa modifica, o modello non-classificatore),
+        # ricadiamo sulla soglia della baseline (comportamento storico, invariato).
+        decision_threshold = None
+        threshold_path = self._resolve_threshold_path(job_id)
+        if self.checkpoint_dao.exists(threshold_path):
+            try:
+                thr_data = self.checkpoint_dao.load(threshold_path)
+                decision_threshold = thr_data.get("decision_threshold")
+                print(f"[{self.orchestrator_name}] Soglia FEDERATA calibrata trovata per questo job: "
+                      f"{decision_threshold:.4f} (calcolata su {thr_data.get('n_val_samples')} "
+                      f"campioni di validation, F1={thr_data.get('f1_score')}).")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Soglia federata presente ma illeggibile "
+                      f"({e}): ricado sulla soglia della baseline.")
+
+        if decision_threshold is None:
+            # Vedi VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py:
+            # stesso pattern di feature_selezionate sopra, incluso il guard su AWS
+            # (il file locale config_<dataset_type>.json non esiste sul container
+            # dell'orchestratore in quell'ambiente). None -> ogni worker ricade sul
+            # comportamento di default (argmax/soglia implicita 0.50), vedi
+            # FederatedWorker.exposed_predict_subset_forest.
+            decision_threshold = (
+                None if self.environment == "aws"
+                else self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
+            )
+            if decision_threshold is not None:
+                print(f"[{self.orchestrator_name}] [FALLBACK] Nessuna soglia federata calibrata "
+                      f"disponibile per questo job: uso quella della baseline ({decision_threshold}).")
 
         # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
         # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
@@ -1097,120 +1089,20 @@ class FederatedOrchestrator(BaseOrchestrator):
         }
 
 
-    # --- Pesatura dell'ensemble per affidabilità locale (Passo 3) ---
-    # RELIABILITY_MIN_WEIGHT: peso minimo garantito ad OGNI worker tracciato,
-    # indipendentemente dalla sua affidabilità -- mai azzerato, stesso
-    # principio già seguito da tree_allocation_strategy='equal' in
-    # _allocate_tree_quotas: anche uno specialista poco affidabile sul
-    # complesso può detenere un pattern raro ma prezioso, e va sempre lasciato
-    # "in ballo" nel voto finale.
-    # RELIABILITY_MAX_MULTIPLIER: peso massimo (numero di repliche dei propri
-    # alberi nell'ensemble finale) per un worker con affidabilità perfetta
-    # (balanced accuracy 1.0) sul proprio validation set locale.
-    RELIABILITY_MIN_WEIGHT = 1
-    RELIABILITY_MAX_MULTIPLIER = 3
-
-    def _build_weighted_estimators(self, trees: list, tree_worker_ids: list, worker_reliability: dict) -> list:
-        """
-        Replica gli alberi dei worker più affidabili invece di limitarsi a un
-        bagging uniforme -- bagging "pesato per duplicazione", compatibile al
-        100% con RandomForestClassifier di sklearn (nessuna sovrascrittura di
-        predict_proba: ogni copia vota semplicemente come le altre).
-
-        Alberi con provenienza sconosciuta (worker_index=None, tipico di un
-        checkpoint ripristinato dopo un failover, dove non sappiamo più quale
-        worker li abbia prodotti) o senza un'affidabilità riportata restano a
-        peso neutro (1x) -- stesso comportamento del bagging uniforme di
-        prima di questo fix, per non penalizzare dati per cui semplicemente
-        non abbiamo informazione.
-
-        La conversione da balanced accuracy a "skill" trasla la soglia del
-        caso puramente casuale (0.5, un worker che ci azzecca come una
-        moneta) a 0: un'affidabilità di 0.5 riceve lo stesso peso minimo di
-        un'affidabilità sconosciuta, mentre un'affidabilità di 1.0 riceve il
-        peso massimo. Affidabilità sotto 0.5 (peggio del caso) sono clampate
-        a 0: non penalizziamo sotto il peso minimo, replicare "al contrario"
-        (pesare meno di 1x, cioè scartare alberi) non è nello scopo di questo
-        step -- l'obiettivo è dare più voce agli specialisti buoni, non
-        zittire quelli scarsi.
-        """
-        if not tree_worker_ids or len(tree_worker_ids) != len(trees) or not worker_reliability:
-            return list(trees)
-
-        from collections import defaultdict
-        positions_by_worker = defaultdict(list)
-        for position, w_idx in enumerate(tree_worker_ids):
-            positions_by_worker[w_idx].append(position)
-
-        weighted_estimators = []
-        for w_idx, positions in positions_by_worker.items():
-            group_trees = [trees[p] for p in positions]
-            reliability = worker_reliability.get(w_idx) if w_idx is not None else None
-
-            if reliability is None:
-                multiplier = 1
-            else:
-                skill = max(0.0, min(1.0, 2 * reliability - 1))
-                weight = self.RELIABILITY_MIN_WEIGHT + skill * (self.RELIABILITY_MAX_MULTIPLIER - self.RELIABILITY_MIN_WEIGHT)
-                multiplier = max(1, round(weight))
-
-            weighted_estimators.extend(group_trees * multiplier)
-            if multiplier != 1:
-                print(f"[{self.orchestrator_name}] [PESATURA] Worker {w_idx}: affidabilità="
-                      f"{reliability:.3f} -> {len(group_trees)} alberi replicati x{multiplier} "
-                      f"({len(group_trees) * multiplier} voti nell'ensemble finale).")
-
-        return weighted_estimators
-
-    def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str,
-                                            tree_worker_ids: list = None,
-                                            worker_reliability: dict = None) -> int:
+    def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:
             print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
             return 0
-
-        # 'tree_worker_ids[i]' = worker_index (o None se non tracciato) che ha
-        # addestrato 'all_trained_trees[i]'. 'worker_reliability[worker_index]'
-        # = affidabilità locale (balanced accuracy sul validation set del
-        # worker, o None) riportata dallo stesso worker per l'ultimo round
-        # completato. Usate ORA (Passo 3) per pesare l'ensemble finale -- vedi
-        # _build_weighted_estimators. Solo per la classificazione: per la
-        # regressione non esiste un'affidabilità comparabile (vedi worker,
-        # val_available richiede tree_type == 'classifier'), quindi il ramo
-        # regressore resta bagging uniforme come sempre.
-        if tree_worker_ids is not None and len(tree_worker_ids) == len(all_trained_trees):
-            from collections import Counter
-            composizione = Counter(tree_worker_ids)
-            print(f"[{self.orchestrator_name}] Composizione ensemble per worker (worker_index -> "
-                  f"n_alberi): {dict(sorted(composizione.items(), key=lambda kv: (kv[0] is None, kv[0])))}")
-        else:
-            print(f"[{self.orchestrator_name}] [WARN] Provenienza degli alberi non disponibile o "
-                  f"disallineata: composizione ensemble per worker non tracciabile per questo round.")
-
-        if worker_reliability:
-            print(f"[{self.orchestrator_name}] Affidabilità locale riportata per worker (worker_index "
-                  f"-> balanced accuracy sul validation set locale): "
-                  f"{dict(sorted(worker_reliability.items(), key=lambda kv: (kv[0] is None, kv[0])))}")
 
         print(f"[{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
         try:
             n_features = all_trained_trees[0].n_features_in_
 
             if tree_type == "classifier":
-                # Pesatura per affidabilità SOLO qui: la lista può crescere
-                # (repliche) rispetto ad all_trained_trees, ma quella
-                # variabile resta la fonte di verità per il conteggio
-                # "alberi realmente addestrati" (vedi return sotto e
-                # _save_checkpoint nel chiamante) -- separare le due cose
-                # evita che le repliche falsino la contabilità di
-                # target_alberi/start_alberi round dopo round.
-                weighted_estimators = self._build_weighted_estimators(
-                    all_trained_trees, tree_worker_ids, worker_reliability
-                )
-                global_model = RandomForestClassifier(n_estimators=len(weighted_estimators))
+                global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
                 # Stesso fix applicato in centralized.py: classi derivate dagli alberi reali
                 # invece di un'assunzione binaria fissa {0, 1}.
-                trees_with_classes = [t for t in weighted_estimators if hasattr(t, "classes_")]
+                trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
                 if trees_with_classes:
                     detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
                 else:
@@ -1219,22 +1111,16 @@ class FederatedOrchestrator(BaseOrchestrator):
                 global_model.classes_ = detected_classes.astype(np.int64)
                 global_model.n_classes_ = len(detected_classes)
             else:
-                # Nessuna pesatura per la regressione: non esiste
-                # un'affidabilità comparabile calcolata dal worker per questo
-                # caso (vedi val_available in federatedWorker.py).
-                weighted_estimators = all_trained_trees
-                global_model = RandomForestRegressor(n_estimators=len(weighted_estimators))
+                global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
 
-            global_model.estimators_ = weighted_estimators
+            global_model.estimators_ = all_trained_trees
             global_model.n_features_in_ = n_features
             global_model.n_outputs_ = 1
 
             model_path = self._resolve_model_path(self.current_job_id)
             self.checkpoint_dao.save(model_path, global_model)
 
-            print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}' "
-                  f"({len(all_trained_trees)} alberi realmente addestrati, "
-                  f"{len(weighted_estimators)} voti nell'ensemble dopo la pesatura per affidabilità).")
+            print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
 
             # Metadati leggeri accanto al blob pesante: _execute_inference_step
             # li legge al posto del modello intero quando deve solo sapere
@@ -1243,21 +1129,9 @@ class FederatedOrchestrator(BaseOrchestrator):
             # completo (comportamento precedente a questo fix).
             try:
                 meta = {
-                    # "num_trees" riflette ORA la dimensione EFFETTIVA
-                    # dell'ensemble salvato (con repliche) -- coerente con
-                    # len(global_model.estimators_), che è ciò che
-                    # _execute_inference_step deve conoscere per ricostruire
-                    # correttamente il modello senza il blob completo.
-                    "num_trees": len(weighted_estimators),
-                    "num_trees_raw": len(all_trained_trees),
+                    "num_trees": len(all_trained_trees),
                     "tree_type": tree_type,
                     "classes": global_model.classes_.tolist() if hasattr(global_model, "classes_") else None,
-                    # Composizione per worker_index: quanti alberi del modello globale
-                    # vengono da ciascun worker/giorno. Non ancora usata a runtime,
-                    # ma preziosa per analizzare a posteriori quanto ogni "specialista"
-                    # ha effettivamente contribuito alla foresta finale.
-                    "tree_worker_ids": list(tree_worker_ids) if tree_worker_ids is not None else None,
-                    "worker_reliability": dict(worker_reliability) if worker_reliability else None,
                 }
                 meta_path = self._resolve_model_meta_path(self.current_job_id)
                 self.checkpoint_dao.save(meta_path, meta)
@@ -1266,12 +1140,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                       f"fallito (non bloccante, l'inferenza ricadrà sul caricamento completo): {e_meta}")
 
 
-            # Il conteggio restituito al chiamante (usato per il checkpoint e
-            # per calcolare quanti alberi mancano ancora al target) resta
-            # quello degli alberi REALMENTE addestrati, non delle repliche:
-            # la pesatura è un dettaglio di come l'ensemble finale viene
-            # composto per l'inferenza, non deve alterare la contabilità del
-            # progresso del training.
             return len(all_trained_trees)
 
         except Exception as e:
@@ -1279,6 +1147,109 @@ class FederatedOrchestrator(BaseOrchestrator):
             traceback.print_exc()
             return len(all_trained_trees)
 
+    def _resolve_threshold_path(self, job_id: str) -> str:
+        """Path della soglia di decisione calibrata specificamente sul modello
+        federato (vedi _calibrate_federated_threshold), in una sotto-cartella
+        dedicata come model_path/model_meta_path. Assente per i job su cui la
+        calibrazione non è stata eseguita o è fallita: in quel caso
+        _execute_inference_step ricade sulla soglia della baseline centralizzata
+        (comportamento storico, invariato)."""
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/threshold_{job_id}.pkl"
+        return os.path.join("./saved_models", f"threshold_{job_id}.pkl")
+
+    def _calibrate_federated_threshold(self, job_id: str, global_classes, available_workers: dict) -> float:
+        """
+        Calibra la soglia di decisione sul validation set FEDERATO (pool dei
+        fold locali di ciascun worker -- self._cached_X_val/_y_val lato
+        worker, mai visti in training né nel test finale), invece di riusare
+        la soglia calibrata sul modello baseline centralizzato: non è detto
+        sia più valida qui, specie dopo aver introdotto il voto pesato per
+        foglia (vedi _weighted_forest_predict_proba in federatedWorker.py),
+        che cambia la calibrazione delle probabilità restituite dal modello.
+
+        Chiamata subito dopo l'aggregazione di un round di training (vedi
+        _execute_training_step), quando il modello globale è già stato
+        salvato su storage condiviso e i worker sono ancora raggiungibili.
+        Non bloccante: in caso di fallimento (validation set insufficiente,
+        RPC fallite, più di 2 classi globali) ritorna None e
+        _execute_inference_step ricadrà sulla soglia della baseline, come
+        avveniva prima di questa modifica.
+        """
+        if len(global_classes) != 2:
+            print(f"[{self.orchestrator_name}] [CALIBRAZIONE SOGLIA] {len(global_classes)} classi globali "
+                  f"rilevate: la calibrazione della soglia è supportata solo per il caso binario. "
+                  f"Nessuna soglia federata calcolata.")
+            return None
+
+        model_path = self._resolve_model_path(job_id)
+        all_y_true, all_y_probs = [], []
+        results_lock = threading.Lock()
+
+        def _probe(w_name, w_info):
+            conn = None
+            try:
+                conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={"allow_pickle": True, "sync_request_timeout": 120}
+                )
+                raw = conn.root.exposed_get_validation_predictions(pickle.dumps({
+                    "model_path": model_path,
+                    "global_classes": np.asarray(global_classes).tolist(),
+                }))
+                result = pickle.loads(obtain(raw))
+                if result.get("y_true"):
+                    with results_lock:
+                        all_y_true.extend(result["y_true"])
+                        all_y_probs.extend(result["y_probs"])
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia: worker '{w_name}' "
+                      f"non ha fornito il validation set ({e}). Escluso dal pool.")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        threads = [threading.Thread(target=_probe, args=(w, info)) for w, info in available_workers.items()]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=90)
+
+        MIN_VAL_SAMPLES = 30  # da tarare, stesso ordine di grandezza di MIN_SAMPLES_PER_CLASS in _execute_inference_step
+        if len(all_y_true) < MIN_VAL_SAMPLES or len(set(all_y_true)) < 2:
+            print(f"[{self.orchestrator_name}] [WARN] Validation set federato insufficiente per la "
+                  f"calibrazione ({len(all_y_true)} campioni, classi presenti: {set(all_y_true)}). "
+                  f"Nessuna soglia federata calcolata: l'inferenza ricadrà sulla soglia della baseline.")
+            return None
+
+        precisions, recalls, thresholds = precision_recall_curve(all_y_true, all_y_probs)
+        denom = precisions + recalls
+        f1_scores = np.where(denom == 0, 0.0, 2 * precisions * recalls / np.where(denom == 0, 1, denom))
+        best_idx = int(np.nanargmax(f1_scores[:-1]))  # l'ultimo punto della curva non ha una soglia associata
+        best_threshold = float(thresholds[best_idx])
+
+        print(f"[{self.orchestrator_name}] [CALIBRAZIONE SOGLIA] Soglia federata calibrata su "
+              f"{len(all_y_true)} campioni di validation (pool cross-worker): {best_threshold:.4f} "
+              f"(F1={f1_scores[best_idx]:.4f}, precision={precisions[best_idx]:.4f}, recall={recalls[best_idx]:.4f}).")
+
+        try:
+            threshold_path = self._resolve_threshold_path(job_id)
+            self.checkpoint_dao.save(threshold_path, {
+                "decision_threshold": best_threshold,
+                "n_val_samples": len(all_y_true),
+                "f1_score": float(f1_scores[best_idx]),
+                "precision": float(precisions[best_idx]),
+                "recall": float(recalls[best_idx]),
+            })
+        except Exception as e_save:
+            print(f"[{self.orchestrator_name}] [WARN] Soglia federata calcolata ma non salvata "
+                  f"({e_save}): l'inferenza ricadrà sulla soglia della baseline.")
+            return None
+
+        return best_threshold
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
