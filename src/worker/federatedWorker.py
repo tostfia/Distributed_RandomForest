@@ -1,960 +1,1220 @@
-import json
-import os
 import pickle
-import gc
-import time as time_module
+import os
+import random
+import socket
+import threading
+import time
+import traceback
 from botocore.exceptions import ClientError
 import boto3
+import rpyc
 import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
+import re
+
 from rpyc.utils.classic import obtain
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
-from src.shared.utilities.preprocessing import CICIDSPreprocessor
-from src.shared.utilities.undersampling import undersample_majority_class
-from src.shared.utilities.datasplitter import StratifiedDataSplitter
-from src.worker.BaseWorker import BaseWorker
-from src.shared.factory import DatasetDAOFactory
-from src.shared.utilities.task_storage import save_task_part_to_shared_storage, save_task_manifest
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from src.dataset.checkpoint_dao import CheckpointDAOFactory
+from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
+from src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
+from src.shared.binding.serviceregistry import ServiceRegistry
+from src.shared.config import SystemConfig
 
-from multiprocessing import shared_memory
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
 
-_fed_child_X = None
-_fed_child_y = None
-_shm_X_ref = None  # tiene vivo il blocco nel processo figlio
-_shm_y_ref = None
+# Timeout (in secondi) per le chiamate RPC sincrone verso i worker. Configurabile via
+# .env / variabile d'ambiente per poter alzarlo su AWS (dove un singolo worker può
+# dover addestrare/predire un chunk molto più grande che in locale, es. scenario di
+# scalabilita' con pochi worker attivi), senza toccare il default usato finora in
+# locale/Docker se la variabile non e' impostata. Due costanti separate perché
+# training e inferenza avevano gia' default diversi (600s e 300s).
+#
+# int(os.environ.get(...)) è stato sostituito da env_timeout_seconds: Terraform (ecs_task_definitions.tf),
+# quando la chiave manca nel .env, ripiega su "1800s"/"900s" — col suffisso — e
+# int("1800s") solleva ValueError a livello di modulo, uccidendo il container
+# all'import. Vedi il docstring di env_timeout_seconds in BaseOrchestrator.py.
+RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 1800)
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900)
 
+class FederatedOrchestrator(BaseOrchestrator):
 
-RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
-# Stesso valore di run_baseline.py/centralized.py: senza allinearlo qui, lo
-# shard di train di ciascun worker federato resterebbe alla distribuzione
-# sbilanciata originale (o a quella prodotta dalla strategia di
-# partizionamento, es. molto più sbilanciata di quella globale con
-# partition_strategy='by_day'), mentre la baseline addestra sempre su un
-# train bilanciato 1:1 -- due modelli non confrontabili sulle metriche.
-# Stesso valore di run_baseline.py: vedi centralized.py per la motivazione
-# completa (allineamento di VOLUME del train prima dell'undersampling, non
-# ancora usato per calibrare una soglia in questo percorso).
-UNDERSAMPLING_RATIO = 1.0
-VALIDATION_SIZE_FOR_THRESHOLD = 0.15
+    def __init__(self, orchestrator_name: str = None, num_workers: int = None):
+        self.cfg = SystemConfig()
+        self.num_workers = num_workers or int(os.environ.get("NUM_WORKERS", getattr(self.cfg, "num_workers", 3)))
+        name = orchestrator_name or f"Orchestrator-Federato-{socket.gethostname()}"
 
-def _init_fed_child_process(shm_name_X, shape_X, dtype_X, shm_name_y, shape_y, dtype_y):
-    """Inizializza il processo figlio agganciandosi allo shared memory invece
-    di ricevere una copia pickle-ata di X/y (che con 'spawn' verrebbe
-    duplicata integralmente per OGNI processo, moltiplicando l'uso di RAM
-    per pool_size)."""
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-    global _fed_child_X, _fed_child_y, _shm_X_ref, _shm_y_ref
-    _shm_X_ref = shared_memory.SharedMemory(name=shm_name_X)
-    _fed_child_X = np.ndarray(shape_X, dtype=dtype_X, buffer=_shm_X_ref.buf)
-    _shm_y_ref = shared_memory.SharedMemory(name=shm_name_y)
-    _fed_child_y = np.ndarray(shape_y, dtype=dtype_y, buffer=_shm_y_ref.buf)
-
-def _train_single_fed_tree(args):
-    global _fed_child_X, _fed_child_y
-    tree_seed, max_depth, max_samples, bootstrap, tree_class, class_weight, max_features, min_samples_split, criterion = args
-    np.random.seed(tree_seed)
-
-    n_samples = _fed_child_X.shape[0]
-
-    if bootstrap:
-        if max_samples is None:
-            num_samples_to_draw = n_samples
-        elif isinstance(max_samples, float):
-            num_samples_to_draw = int(max_samples * n_samples)
-        else:
-            num_samples_to_draw = max_samples
-
-        indices = np.random.choice(n_samples, size=num_samples_to_draw, replace=True)
-        # Zero-copy: invece di X_sampled = _fed_child_X[indices] (~572MB copiati),
-        # calcoliamo quante volte ogni riga originale è stata estratta e passiamo
-        # questo peso a tree.fit(). Matematicamente equivalente al duplicare le
-        # righe (stesso identico calcolo di impurità Gini/MSE che fa sklearn
-        # internamente in _parallel_build_trees), ma senza mai allocare una
-        # copia fisica dell'array.
-        sample_weight = np.bincount(indices, minlength=n_samples).astype(np.float64)
-        X_fit, y_fit = _fed_child_X, _fed_child_y
-    else:
-        sample_weight = None
-        X_fit, y_fit = _fed_child_X, _fed_child_y
-
-    kwargs = {"random_state": tree_seed, "max_features": max_features, "min_samples_split": min_samples_split}
-    if max_depth is not None:
-        kwargs["max_depth"] = max_depth
-    if criterion is not None:
-        kwargs["criterion"] = criterion
-    if class_weight is not None and "Classifier" in tree_class.__name__:
-        kwargs["class_weight"] = class_weight
-
-    tree = tree_class(**kwargs)
-    tree.fit(X_fit, y_fit, sample_weight=sample_weight)
-    return tree
-
-class FederatedWorker(BaseWorker):
-    """Worker per la gestione dell'addestramento in modalità federata.
-
-    In ambiente AWS, il worker possiede GIÀ i propri dati (shard reale +
-    manifesti di feature selection) prima ancora di registrarsi come
-    disponibile: li scarica una volta sola nel proprio __init__, da un bucket
-    S3 seminato in precedenza da uno script di provisioning standalone
-    (scripts/provision_federated_shards.py). Nessun download o generazione di
-    dati avviene più reattivamente durante un job — questo simula un vero
-    scenario federato, dove il nodo nasce già con il proprio dataset locale.
-
-    In ambiente locale (single machine) resta invece il comportamento
-    precedente: il vincolo tecnico della macchina unica rende necessario un
-    passaggio intermedio gestito dall'Orchestratore.
-    """
-
-    def __init__(
-        self,
-        worker_name: str,
-        queue_name: str,
-        tree_class_reference: type,
-        target_column: str = "Label",
-        max_samples: float = None,
-        bootstrap: bool = True,
-        tree_type: str = "classifier"
-    ):
         super().__init__(
-            worker_name=worker_name,
-            queue_name=queue_name,
-            tree_class_reference=tree_class_reference,
-            max_samples=max_samples,
-            bootstrap=bootstrap,
+            orchestrator_name=name,
+            queue_name=self.cfg.sqs_federated_queue
         )
-        self.target_column = target_column
-        self.tree_type = tree_type
-        
-        # Cache dello stato interno
-        self._cached_job_id = None
-        self._cached_X_train = None
-        self._cached_y_train = None
-        self._cached_X_test = None
-        self._cached_y_test = None
-        self.local_sample_count = 0
-        
-        # Manteniamo aperto il file di lock come variabile d'istanza per impedire al Garbage Collector di distruggerlo
-        # (usato solo dal branch locale, vedi _claim_worker_index)
-        self._index_lock_file = None
+        self.chunk_sent_event = threading.Event()
+        self.current_job_id = None
+        self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
+        self.worker_wait_timeout = float(os.environ.get("FED_WORKER_WAIT_TIMEOUT_SECONDS", 0))
 
-        # --- ASSEGNAZIONE DELL'INDICE WORKER (= "quale shard mi appartiene") ---
-        if self.environment == "aws":
-            # Binding FISSO, deciso a priori in fase di provisioning/deploy
-            # (es. user-data / launch template dell'istanza EC2), non più
-            # reclamato dinamicamente a runtime: in un ambiente federato reale
-            # un nodo non "sorteggia" il proprio dataset, lo possiede già.
-            worker_index_env = os.environ.get("WORKER_INDEX")
-            if not worker_index_env:
-                raise RuntimeError(
-                    f"[{worker_name}] Variabile d'ambiente WORKER_INDEX non impostata. "
-                    f"In ambiente AWS ogni istanza worker deve ricevere un indice di shard "
-                    f"fisso (1..N), assegnato in fase di provisioning/deploy — non è più "
-                    f"reclamato dinamicamente via ServiceRegistry."
-                )
-            try:
-                self.worker_index = int(worker_index_env)
-            except ValueError:
-                raise RuntimeError(
-                    f"[{worker_name}] WORKER_INDEX='{worker_index_env}' non è un intero valido."
-                )
+        # Cache in-memoria (solo per QUESTA istanza di processo) degli alberi
+        # già addestrati per un dato job. Serve esclusivamente a evitare una
+        # GET S3 ridondante quando il round successivo viene gestito dalla
+        # STESSA istanza orchestratore. NON sostituisce mai il checkpoint
+        # fisico su S3, che resta l'unica fonte di verità condivisa: se
+        # un'altra istanza (nuovo leader dopo un fault) subentra, questa
+        # cache sarà vuota/non coerente e si procederà comunque con un
+        # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
+        self._trees_cache = {}
 
-            self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
-            self.local_cache_dir = f"/tmp/{self.worker_name}_cache"
-            os.makedirs(self.local_cache_dir, exist_ok=True)
+        # Strumentazione dei tempi (letta da performance.py/scalability.py via
+        # getattr): prima assente su FederatedOrchestrator, che ha la propria
+        # implementazione di _execute_training_step separata da quella
+        # centralizzata dove questi attributi erano già impostati. Inizializzati
+        # qui (non solo assegnati a runtime) così un getattr(...) prima del
+        # primo job trova comunque 0.0 invece di ricadere sul default silenzioso
+        # del chiamante, che mascherava l'assenza di dato reale.
+        self.last_etl_seconds = 0.0
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+        # Il federato non esegue stima OOB (scelta di design: l'OOB richiede il
+        # training set completo in un unico posto, qui ogni worker vede solo il
+        # proprio shard) — resta sempre 0.0, non "non misurato".
+        self.last_oob_seconds = 0.0
 
-            dataset_type_env = os.environ.get("DATASET_TYPE", "real").strip().lower()
-            if dataset_type_env == "synthetic":
-                print(f"[{self.worker_name}] [PROVISIONING] Dataset SINTETICO: nessuno shard reale da "
-                      f"scaricare (verrà generato autonomamente al momento del job).")
-            else:
-                self._bootstrap_local_data_from_s3()
-        else:
-            # Siamo in ambiente "local" (Docker Compose Replicas)
-            # Acquisiamo un indice atomico non-bloccante tramite fcntl
-            num_workers = int(os.environ.get("NUM_WORKERS", 2))
-            self.worker_index = self._claim_worker_index(num_workers)
-            # Generiamo il nome uniforme corrispondente alle directory generate dallo splitter dell'orchestratore
-            worker_id_uniforme = f"Worker-Locale-{self.worker_index:02d}"
-            self.local_cache_dir = os.path.join("./workers_cache", worker_id_uniforme)
-            os.makedirs(self.local_cache_dir, exist_ok=True)
-            # Iniettiamo l'indice stabile appena conquistato nel NOME del worker
-            # (marcatore WIDX), esattamente come fa il ramo AWS sopra. Senza questo,
-            # il nome registrato presso l'orchestratore resterebbe quello generico
-            # passato dal compose (Worker-Locale-federated-<hostname-hash>), privo
-            # di indice: _infer_worker_index non potrebbe estrarlo e ripiegherebbe
-            # sulla POSIZIONE nella lista dei worker disponibili — un indice
-            # instabile tra orchestratori diversi, che romperebbe sia il binding
-            # worker<->shard sia la ripresa da checkpoint dell'inferenza dopo un
-            # failover. Con WIDX nel nome, l'indice è deterministico ovunque.
-            self.worker_name = f"Worker-WIDX{self.worker_index}-{worker_name}"
-
-        print(
-            f"[{self.worker_name}] Inizializzato con successo. "
-            f"Indice Worker: {self.worker_index} — Cache Dir: {self.local_cache_dir}"
-        )
-
-    def _bootstrap_local_data_from_s3(self):
+    def _ensure_local_bootstrap(self, payload: dict):
         """
-        Scarica in modo sincrono, PRIMA che il worker si registri come
-        disponibile, tutto ciò che gli serve per essere autonomo: il proprio
-        shard del dataset reale e i manifesti di feature selection
-        (config_real.json / config_synthetic.json), se presenti.
+        VERIFICA (senza generarli) che gli shard federati siano già presenti sul
+        filesystem locale per l'ambiente 'local'. La generazione/sharding NON
+        avviene più qui: è responsabilità di uno script di provisioning standalone
+        (script_local/provision_local_shards.py), eseguito UNA VOLTA, PRIMA di
+        avviare master e worker — coerente con quanto già fa _ensure_aws_bootstrap
+        per l'ambiente AWS, e con l'idea che in uno scenario federato i dati
+        risiedano già sui nodi quando il sistema parte, invece di essere
+        generati/distribuiti reattivamente durante un job.
 
-        Questi artefatti sono generati offline da uno script di provisioning
-        dedicato (scripts/provision_federated_shards.py), MAI durante un job
-        di training.
+        Per il dataset 'synthetic' non serve alcun provisioning: ogni worker
+        genera autonomamente il proprio shard sintetico al boot.
         """
-        bucket_name = os.environ.get(
-            "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
-        )
+        if self.environment != "local":
+            print(f"[{self.orchestrator_name}] Ambiente Cloud/AWS rilevato. Bootstrap locale saltato.")
+            return
+        datasetype = self._resolve_dataset_type(payload)
+        if datasetype == "synthetic":
+            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Nessun controllo shard necessario "
+                  f"(generato autonomamente da ogni worker).")
+            return
+
+        num_workers = self.num_workers
+        base_cache_dir = "./workers_cache"
+        print(f"[{self.orchestrator_name}] [CHECK LOCAL] Verifica provisioning shard su disco per {num_workers} worker...")
+
+        mancanti = []
+        for i in range(1, num_workers + 1):
+            dir_padded = os.path.join(base_cache_dir, f"Worker-Locale-{i:02d}")
+            dir_unpadded = os.path.join(base_cache_dir, f"Worker-Locale-{i}")
+
+            train_p = os.path.join(dir_padded, "train_shard.csv")
+            test_p = os.path.join(dir_padded, "test_shard.csv")
+            train_up = os.path.join(dir_unpadded, "train_shard.csv")
+            test_up = os.path.join(dir_unpadded, "test_shard.csv")
+
+            if not ((os.path.exists(train_p) and os.path.exists(test_p)) or
+                    (os.path.exists(train_up) and os.path.exists(test_up))):
+                mancanti.append(f"Worker-Locale-{i:02d}")
+
+        if mancanti:
+            raise RuntimeError(
+                f"[{self.orchestrator_name}] Provisioning locale incompleto: mancano gli shard per "
+                f"{len(mancanti)} worker (in '{base_cache_dir}'), es. {mancanti[:3]}. Esegui "
+                f"'python -m script_local.provision_local_shards --num-workers {num_workers}' "
+                f"prima di avviare il cluster."
+            )
+        print(f"[{self.orchestrator_name}] [CHECK LOCAL OK] Tutti gli shard richiesti sono presenti su disco.")
+
+    def _ensure_aws_bootstrap(self, payload: dict):
+        """
+        Verifica (senza generarli) che gli shard siano già stati provisionati
+        su S3 per l'ambiente AWS. La generazione/upload NON avviene più qui:
+        è responsabilità di uno script di provisioning standalone
+        (scripts/provision_federated_shards.py), eseguito UNA VOLTA, PRIMA di
+        avviare master e worker — coerente con l'idea che, in un vero
+        scenario federato, i dati risiedono già sui nodi quando il sistema
+        parte, non vengono generati/distribuiti reattivamente durante un job.
+        """
+        datasetype = self._resolve_dataset_type(payload)
+        if datasetype == "synthetic":
+            print(f"[{self.orchestrator_name}] Dataset SINTETICO rilevato. Nessun controllo shard necessario "
+                  f"(generato autonomamente da ogni worker).")
+            return
+
+        num_workers = self.num_workers
         s3_client = boto3.client("s3")
 
-        print(f"[{self.worker_name}] [PROVISIONING] Download shard e manifesti da S3 (bucket: {bucket_name})...")
+        print(f"[{self.orchestrator_name}] [CHECK AWS] Verifica provisioning shard su S3 per {num_workers} worker...")
+        mancanti = []
+        for i in range(1, num_workers + 1):
+            for fname in ("train_shard.csv", "test_shard.csv"):
+                key = f"federated_shards/worker_{i}/{fname}"
+                try:
+                    s3_client.head_object(Bucket=BUCKET_NAME, Key=key)
+                except ClientError:
+                    mancanti.append(key)
 
-        # 1. Shard del dataset reale: OBBLIGATORIO. Se manca, il worker non
-        #    può considerarsi operativo — meglio fallire subito ed
-        #    esplicitamente che scoprirlo al primo job.
-        shard_keys = {
-            "train_shard.csv": f"federated_shards/worker_{self.worker_index}/train_shard.csv",
-            "test_shard.csv": f"federated_shards/worker_{self.worker_index}/test_shard.csv",
-        }
-        for local_filename, s3_key in shard_keys.items():
-            local_path = os.path.join(self.local_cache_dir, local_filename)
+        if mancanti:
+            raise RuntimeError(
+                f"[{self.orchestrator_name}] Provisioning AWS incompleto: mancano {len(mancanti)} shard su S3 "
+                f"(bucket '{BUCKET_NAME}'), es. {mancanti[:3]}. Esegui "
+                f"'python -m scripts.provision_federated_shards' prima di avviare il cluster."
+            )
+        print(f"[{self.orchestrator_name}] [CHECK AWS OK] Tutti gli shard richiesti sono presenti su S3.")
+
+    def _perform_active_recovery(self):
+        """Innesca il bootstrap locale subito dopo la conquista del lock di leadership."""
+
+        super()._perform_active_recovery()
+
+    def _infer_worker_index(self, w_name: str, fallback_idx: int) -> int:
+        marker = re.search(r"WIDX(\d+)", w_name)
+        if marker:
+            return int(marker.group(1))
+        print(f"[{self.orchestrator_name}] [WARN] Impossibile derivare un indice stabile dal nome "
+            f"'{w_name}'. Fallback sulla posizione nella lista ({fallback_idx}).")
+        return fallback_idx
+
+    def _resolve_dataset_type(self, payload: dict) -> str:
+        """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
+        dataset_type = payload.get("dataset_type")
+        if dataset_type:
+            return str(dataset_type).strip().lower()
+        return "real"
+
+    def _fetch_worker_shard_sizes(self, worker_names: list, available_workers: dict, job_id: str = None) -> dict:
+        """
+        Interroga in parallelo ogni worker per la dimensione del proprio shard di
+        training locale (exposed_get_local_shard_size), PRIMA di allocare il
+        budget di alberi del round: è il prerequisito per una ripartizione
+        proporzionale alla quantità di dati posseduti, invece che equa a
+        prescindere (fondamentale con partizionamento non-IID). Timeout breve
+        per singola chiamata: è solo un conteggio righe su un file già locale,
+        non deve competere in durata con le RPC di training vere e proprie.
+        Un worker che non risponde in tempo viene semplicemente OMESSO dal
+        dizionario risultato (non con size=0): la gestione del fallback per i
+        worker "senza dimensione nota" è delegata a _allocate_tree_quotas.
+
+        job_id: inoltrato a exposed_get_local_shard_size così un worker che ha
+        già preprocessato lo shard per QUESTO job (round >= 2 dello stesso
+        job) può riportare il conteggio reale post-undersampling invece
+        della sola stima sul CSV grezzo — vedi quel metodo per i dettagli.
+        """
+        sizes = {}
+        lock = threading.Lock()
+
+        def _probe(w_name):
+            w_info = available_workers.get(w_name)
+            if not w_info:
+                return
+            conn = None
             try:
-                s3_client.download_file(bucket_name, s3_key, local_path)
-                print(f"[{self.worker_name}] [PROVISIONING] Scaricato {s3_key} -> {local_path}")
-            except ClientError as e:
-                raise IOError(
-                    f"[{self.worker_name}] Impossibile scaricare lo shard '{s3_key}' dal bucket "
-                    f"'{bucket_name}'. Hai eseguito lo script di provisioning "
-                    f"(scripts/provision_federated_shards.py) prima di avviare i worker? Dettaglio: {e}"
+                conn = rpyc.connect(
+                    w_info["host"], w_info["port"],
+                    config={"allow_pickle": True, "sync_request_timeout": 30}
                 )
-
-        # 2. Manifesti di feature selection: best-effort, possono non esistere
-        #    entrambi (es. se la baseline è stata eseguita solo sul reale o
-        #    solo sul sintetico). Il worker li terrà entrambi in cache e
-        #    sceglierà quello giusto al momento del job, in base al
-        #    dataset_type richiesto — senza bisogno che il master glieli
-        #    inietti via RPC.
-        for dataset_type in ("real", "synthetic"):
-            config_filename = f"config_{dataset_type}.json"
-            s3_key = f"federated_config/{config_filename}"
-            local_path = os.path.join(self.local_cache_dir, config_filename)
-            try:
-                s3_client.download_file(bucket_name, s3_key, local_path)
-                print(f"[{self.worker_name}] [PROVISIONING] Scaricato manifesto '{config_filename}'.")
-            except ClientError:
-                print(
-                    f"[{self.worker_name}] [PROVISIONING] Manifesto '{config_filename}' non trovato su S3 "
-                    f"(ok se non esegui job con dataset_type='{dataset_type}')."
-                )
-
-    def _claim_worker_index(self, num_workers: int) -> int:
-        import fcntl
-        
-        lock_dir = os.environ.get("LOCAL_STORAGE_PATH", os.path.abspath("./.local_storage"))
-        os.makedirs(lock_dir, exist_ok=True)
-
-        # Scansione atomica degli indici disponibili da 1 a NUM_WORKERS
-        for candidate in range(1, num_workers + 1):
-            lock_path = os.path.join(lock_dir, f"worker_{candidate}.lock")
-            
-            try:
-                # Apertura del file pointer associato alla sedia numerica
-                f = open(lock_path, "w")
-                
-                # Tentativo di acquisizione del lock esclusivo NON BLOCCANTE
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                
-                # Se la chiamata non genera BlockingIOError, la sedia è libera!
-                f.write(f"Occupato da {self.worker_name} al timestamp {time_module.time()}\n")
-                f.flush()
-                
-                # Preserviamo l'oggetto file aperto nell'istanza per mantenere attivo il lock a livello di kernel
-                self._index_lock_file = f 
-                
-                print(f"[{self.worker_name}] [AUTO-INDEX] Conquistato con successo l'indice stazionario: {candidate}")
-                return candidate
-
-            except BlockingIOError:
-                # Sedia occupata da un'altra replica concorrente, chiudiamo il descrittore locale e passiamo oltre
-                f.close()
-                continue
-
-        # Estremo fallback protettivo
-        print(f"[{self.worker_name}] [ATTENZIONE] Nessuna sedia libera trovata in .local_storage. Fallback forzato su indice 1.")
-        return 1
-
-    def is_regression(self) -> bool:
-        return self.tree_type == "regressor"
-    
-    def _get_tree_class(self) -> type:
-        return self.tree_class_reference
-   
-    def _load_data(self, dataset_tag: str):
-        dao = DatasetDAOFactory.get_dao(self.environment)
-        
-        train_path = os.path.join(self.local_cache_dir, "train_shard.csv")
-        test_path = os.path.join(self.local_cache_dir, "test_shard.csv")
-        
-        train_df = dao.load_dataset(train_path)
-        self.X_train = train_df.drop(columns=[self.target_column])
-        self.y_train = train_df[self.target_column]
-        
-        test_df = dao.load_dataset(test_path)
-        self.X_test = test_df.drop(columns=[self.target_column])
-        self.y_test = test_df[self.target_column]
-        return True
-
-
-    
-    def exposed_train_local_federated_forest(self, job_id: str, dataset_type: str, n_estimators_local: int, worker_index: int, hyperparameters: dict) -> list:
-        hyperparameters = obtain(hyperparameters)
-        max_depth = hyperparameters.get("max_depth")
-        base_seed = int(hyperparameters.get("random_state", 123))
-        max_samples = hyperparameters.get("max_samples", self.max_samples) 
-
-        self.tree_type = hyperparameters.get("tree_type", "classifier")
-    
-        # Fallback ai default "corretti" di RandomForest{Classifier,Regressor}
-        # se il manifesto non specifica esplicitamente max_features.
-        max_features = hyperparameters.get(
-            "max_features", "sqrt" if not self.is_regression() else (1 / 3)
-        )
-        min_samples_split = hyperparameters.get("min_samples_split", 2)
-        criterion = hyperparameters.get("criterion", None)
-        self.target_column = "Target" if self.is_regression() else "Label"
-        
-        print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
-
-        if self._cached_job_id != job_id or self._cached_X_train is None:
-            if dataset_type == "synthetic":
-                self._load_synthetic_data(hyperparameters, worker_index=worker_index)
-            else:
-                self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
-            self._cached_job_id = job_id
-
-        tree_type = hyperparameters.get("tree_type", "classifier")
-        if tree_type == "classifier":
-            tree_class = DecisionTreeClassifier
-        else:
-            tree_class = DecisionTreeRegressor
-        totale_core = os.cpu_count() or 1
-        allocated_cores = max(1, totale_core - 1) if totale_core > 2 else totale_core
-        
-        class_weight = hyperparameters.get("class_weight", None)
-        worker_tasks = []
-        for i in range(n_estimators_local):
-            seed = base_seed + i
-            worker_tasks.append((seed, max_depth, max_samples, self.bootstrap, tree_class, class_weight, max_features,
-                                min_samples_split, criterion))
-
-        # PERSISTENZA INCREMENTALE PER BATCH (stessa modifica applicata a
-        # BaseWorker.exposed_train_subset_forest): ogni batch di alberi viene
-        # serializzato e scritto sullo storage condiviso APPENA PRONTO, invece
-        # di restare accumulato in 'local_trees' fino alla fine dell'intero
-        # task. Il picco di RAM scende da "n_estimators_local alberi" a
-        # "~pool_size*4 alberi" (dimensione di un batch), indipendentemente
-        # da quanto è grande la quota assegnata a questo worker federato.
-        synthetic_source_info = f"shared_train_{job_id}.csv"
-        parts_num_trees = []
-
-        def _persist_fed_batch(batch_trees: list, part_idx: int):
-            serialized_part = pickle.dumps(batch_trees)
-            try:
-                save_task_part_to_shared_storage(
-                    synthetic_source_info, base_seed, n_estimators_local, part_idx,
-                    serialized_part, self.environment, self.worker_name
-                )
+                size = int(obtain(conn.root.exposed_get_local_shard_size(job_id)))
+                with lock:
+                    sizes[w_name] = size
             except Exception as e:
-                print(f"[!] [{self.worker_name}] ERRORE CRITICO: batch {part_idx} calcolato "
-                      f"ma il salvataggio della parte nello storage condiviso è fallito. "
-                      f"Dettaglio: {e}")
-                raise
-            parts_num_trees.append(len(batch_trees))
-
-        if n_estimators_local == 1:
-            print(f"[{self.worker_name}] Ottimizzazione: 1 solo albero. Calcolo diretto senza Pool.")
-            global _fed_child_X, _fed_child_y
-            _fed_child_X = self._cached_X_train
-            _fed_child_y = self._cached_y_train
-            single_tree = _train_single_fed_tree(worker_tasks[0])
-            _persist_fed_batch([single_tree], 0)
-        else:
-            pool_size = min(n_estimators_local, allocated_cores)
-            print(f"[{self.worker_name}] Istanziazione ThreadPool locale con {pool_size} thread "
-                f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
-
-            # I thread condividono già la memoria del processo: niente shared_memory,
-            # niente initializer, niente re-import per processo (spawn). _fed_child_X/y
-            # restano semplici variabili globali del modulo, assegnate una sola volta qui.
-            
-            _fed_child_X = self._cached_X_train
-            _fed_child_y = self._cached_y_train
-
-            BATCH_SIZE = max(1, min(pool_size * 4, n_estimators_local))
-            with ThreadPoolExecutor(max_workers=pool_size) as executor:
-                for part_idx, batch_start in enumerate(range(0, len(worker_tasks), BATCH_SIZE)):
-                    batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
-                    print(f"[{self.worker_name}] Batch alberi {batch_start}-{batch_start+len(batch)} "
-                        f"di {n_estimators_local}...")
-                    futures = [executor.submit(_train_single_fed_tree, task) for task in batch]
+                print(f"[{self.orchestrator_name}] [WARN] Impossibile ottenere la dimensione dello "
+                      f"shard da '{w_name}' ({e}): riceverà una quota di fallback.")
+            finally:
+                if conn is not None:
                     try:
-                        batch_trees = [f.result(timeout=RPC_SYNC_TIMEOUT_SECONDS) for f in futures]
-                    except TimeoutError:
-                        raise RuntimeError(
-                            f"[{self.worker_name}] Timeout ({RPC_SYNC_TIMEOUT_SECONDS}s) durante il "
-                            f"training parallelo (ThreadPool)."
-                        )
-                    print(f"[{self.worker_name}] Batch {part_idx} completato "
-                          f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
-                    _persist_fed_batch(batch_trees, part_idx)
-                    del batch_trees
-                    # BUG SOSPETTATO E CORRETTO (7/9/2026): 'del' rimuove solo il
-                    # riferimento -- non garantisce che il garbage collector
-                    # ciclico di Python liberi SUBITO la memoria sottostante
-                    # (gli alberi scikit-learn, con le loro strutture interne,
-                    # possono creare riferimenti ciclici che il refcounting da
-                    # solo non risolve, rimandando la liberazione reale al
-                    # prossimo giro schedulato del GC). Osservato empiricamente:
-                    # un primo round di training completava correttamente su
-                    # worker vicini al proprio tetto di memoria, ma un secondo
-                    # round identico, subito dopo, faceva sforare 3 worker su 3
-                    # simultaneamente -- compatibile con memoria del batch
-                    # precedente non ancora riclamata quando il secondo round
-                    # iniziava. Forziamo qui una collezione esplicita e
-                    # immediata, stesso principio già applicato al percorso
-                    # centralizzato (vedi CentralizedOrchestrator, salvataggio
-                    # manifesto leggero).
-                    gc.collect()
+                        conn.close()
+                    except Exception:
+                        pass
 
-        # Manifest scritto per ultimo, dopo tutte le parti: stesso principio
-        # di BaseWorker.exposed_train_subset_forest (vedi lì per i dettagli).
-        try:
-            save_task_manifest(
-                synthetic_source_info, base_seed, n_estimators_local, parts_num_trees,
-                self.environment, self.worker_name
-            )
-        except Exception as e:
-            print(f"[!] [{self.worker_name}] ERRORE CRITICO: tutte le {len(parts_num_trees)} parti "
-                  f"sono state salvate ma la scrittura del manifest è fallita. Il task viene "
-                  f"segnalato come fallito all'Orchestratore. Dettaglio: {e}")
-            raise
-        print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
-              f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
-        # Pulizia esplicita di fine task, in aggiunta a quella per-batch sopra:
-        # il worker resta vivo tra un round e l'altro dello stesso job (mai
-        # riavviato), quindi qualunque oggetto temporaneo di QUESTO task
-        # (worker_tasks, futures già consumati, ecc.) va liberato ora, prima
-        # che il prossimo round arrivi via RPC e trovi meno margine del
-        # previsto.
-        gc.collect()
-        # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore li
-        # rilegge dallo storage condiviso con lo stesso 'source_info' sintetico
-        # (vedi federated.py). Stesso fix già applicato al path centralizzato per
-        # evitare l'hang su payload grandi come valore di ritorno RPC sincrono.
-        return {"ack": True, "num_trees": n_estimators_local}
+        threads = [threading.Thread(target=_probe, args=(w,)) for w in worker_names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=35)
+        return sizes
 
-    def _resolve_selected_features(self, dataset_type: str, hyperparameters: dict):
+    def _allocate_tree_quotas(self, total_step_trees: int, worker_names: list, worker_shard_sizes: dict,
+                               strategy: str = "proportional") -> dict:
         """
-        Determina quale spazio di feature usare per il preprocessing dello shard.
+        Alloca il budget di alberi da addestrare in QUESTO round tra i worker
+        (metodo dei resti più grandi: garantisce che la somma delle quote sia
+        ESATTAMENTE total_step_trees, senza doverla clampare a valle come
+        nella vecchia ripartizione a CHUNK_SIZE fisso).
 
-        - In AWS: il worker le risolve in AUTONOMIA leggendo il manifesto
-          già scaricato in cache al boot (config_{dataset_type}.json). Non
-          dipende più da ciò che il master inietta via RPC.
-        - In locale: comportamento invariato, la lista arriva ancora nel
-          payload hyperparameters (iniettata dal master via select_from_config).
+        strategy="proportional" (default): pesa ogni worker in base alla
+        dimensione del proprio shard locale — corrisponde alla formula di
+        FedAvg n_k/n applicata al numero di alberi anziché ai pesi del
+        modello. Con partizionamento IID gli shard sono quasi uguali per
+        costruzione, quindi il risultato è praticamente indistinguibile dalla
+        ripartizione equa. Con partizionamento non-IID (dirichlet/by_day),
+        dove le dimensioni possono differire di molto, evita di addestrare
+        tanti alberi quanto un worker "ricco di dati" su uno shard minuscolo:
+        alberi ad alta varianza che, nel soft voting finale, peserebbero
+        comunque quanto tutti gli altri.
+
+        strategy="equal": stessa quota a tutti i worker indipendentemente
+        dalla dimensione dello shard (comportamento storico). Utile come
+        confronto controllato: con partizionamento non-IID estremo, pesare
+        per dimensione può ridurre la rappresentazione nella foresta finale
+        di un worker che detiene un pattern raro ma prezioso (es. una classe
+        minoritaria concentrata su quel worker) — "equal" garantisce a quel
+        worker la stessa voce in capitolo degli altri, a scapito di dedicare
+        più alberi a shard piccoli e ad alta varianza.
+
+        Worker senza dimensione nota (RPC fallita, solo rilevante per
+        "proportional") ricevono la dimensione MEDIA dei worker noti come
+        stima di fallback, invece di 0 (che li escluderebbe implicitamente
+        dal round). Se NESSUN worker ha una dimensione nota (es.
+        dataset_type='synthetic', dove lo shard non esiste ancora sul disco a
+        questo punto), si ricade comunque sulla ripartizione equa.
         """
+        if strategy == "equal":
+            sizes = {w: 1 for w in worker_names}
+            print(f"[{self.orchestrator_name}] Allocazione alberi EQUA (tree_allocation_strategy='equal'): "
+                  f"ogni worker riceve la stessa quota indipendentemente dalla dimensione del proprio shard.")
+        else:
+            sizes = dict(worker_shard_sizes)
+            # IMPORTANTE: "sconosciuto" (RPC fallita) è diverso da "noto e pari a
+            # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
+            # non assegna alcuna riga di quella classe a quel worker). Solo il
+            # primo caso va coperto con una stima di fallback; il secondo va
+            # rispettato così com'è — un worker con shard vuoto deve ricevere
+            # quota 0, non una quota "media" che lo manderebbe in errore al primo
+            # bootstrap su un array senza campioni.
+            missing = [w for w in worker_names if w not in sizes]
+            known = [w for w in worker_names if w in sizes]
+
+            if missing and known and sum(sizes[w] for w in known) > 0:
+                fallback_size = max(1, int(np.mean([sizes[w] for w in known])))
+                for w in missing:
+                    sizes[w] = fallback_size
+                print(f"[{self.orchestrator_name}] [WARN] Dimensione shard non disponibile per {missing}: "
+                      f"uso la media dei worker noti ({fallback_size}) come stima di fallback.")
+            elif not known or sum(sizes[w] for w in known) <= 0:
+                print(f"[{self.orchestrator_name}] [WARN] Nessuna dimensione di shard rilevata per alcun "
+                      f"worker (probabile dataset sintetico): ricado sulla ripartizione EQUA storica.")
+                sizes = {w: 1 for w in worker_names}
+
+        total_size = sum(sizes.get(w, 0) for w in worker_names)
+        if total_size <= 0:
+            sizes = {w: 1 for w in worker_names}
+            total_size = len(worker_names)
+
+        raw_quotas = {w: total_step_trees * sizes[w] / total_size for w in worker_names}
+        quotas = {w: int(np.floor(q)) for w, q in raw_quotas.items()}
+        remainder = total_step_trees - sum(quotas.values())
+
+        # Distribuiamo l'arrotondamento residuo ai worker con la parte
+        # frazionaria più alta (metodo dei resti più grandi / Hamilton).
+        by_fraction_desc = sorted(worker_names, key=lambda w: raw_quotas[w] - quotas[w], reverse=True)
+        for w in by_fraction_desc[:remainder]:
+            quotas[w] += 1
+
+        label = "EQUA" if strategy == "equal" else "proporzionale alla dimensione dello shard"
+        print(f"[{self.orchestrator_name}] Allocazione alberi {label}: " +
+              ", ".join(f"{w}={quotas[w]} (size={sizes.get(w, '?')})" for w in worker_names))
+        return quotas
+
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
+        """
+        Invia la richiesta a ciascun worker attivo per il proprio shard locale.
+        Se un worker fallisce, viene registrato il dropout e si prosegue con i rimanenti.
+        Alla fine, se gli alberi totali superano il target (over-provisioning), applica lo scarto uniforme.
+        """
+        self.current_job_id = payload.get("job_id")
+
+        # Azzerati a ogni step, come nel centralizzato: senza questo, uno step
+        # che non costruisce alberi (o che fallisce prima del dispatch)
+        # lascerebbe in piedi i valori dello step PRECEDENTE, e il report li
+        # attribuirebbe a questo. Eseguendo 'all' gli scenari condividono la
+        # stessa istanza di orchestratore, quindi il rischio e' concreto.
+        self.last_dispatch_seconds = 0.0
+        self.last_aggregation_seconds = 0.0
+
+        checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
         if self.environment == "aws":
-            config_path = os.path.join(self.local_cache_dir, f"config_{dataset_type}.json")
-            if os.path.exists(config_path):
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config_data = json.load(f)
-                    feature_selezionate = config_data.get("feature_selezionate")
-                    if feature_selezionate:
-                        print(
-                            f"[{self.worker_name}] Feature space risolto localmente da "
-                            f"'{config_path}' ({len(feature_selezionate)} colonne)."
-                        )
-                        return feature_selezionate
-                except Exception as e:
-                    print(f"[{self.worker_name}] [ATTENZIONE] Lettura manifesto locale fallita: {e}")
-            print(
-                f"[{self.worker_name}] [ATTENZIONE] Nessun manifesto locale trovato per "
-                f"dataset_type='{dataset_type}'. Uso il set di feature completo."
-            )
-            return None
+            self._ensure_aws_bootstrap(payload)
+        else:
+            self._ensure_local_bootstrap(payload)
+            os.makedirs("./.local_storage", exist_ok=True)
 
-        return hyperparameters.get("feature_selezionate", None)
 
-    def _load_and_preprocess_real_shard(self, worker_index: int, hyperparameters: dict, dataset_type: str = "real"):
-        train_filename = "train_shard.csv"
-        test_filename = "test_shard.csv"
-        local_train_path = os.path.join(self.local_cache_dir, train_filename)
-        local_test_path = os.path.join(self.local_cache_dir, test_filename)
-
-        hyperparameters = obtain(hyperparameters)
-
-        # In AWS lo shard è già stato scaricato in fase di provisioning/boot
-        # (_bootstrap_local_data_from_s3, chiamato da __init__): qui leggiamo
-        # solo dal disco locale, nessuna chiamata di rete durante il job.
-        if not os.path.exists(local_train_path):
-            hint = (
-                " Il provisioning AWS non è stato eseguito o è fallito: lancia "
-                "'python -m scripts.provision_federated_shards' prima di avviare i worker."
-                if self.environment == "aws"
-                else ""
-            )
-            raise FileNotFoundError(f"Shard non trovato in {local_train_path}.{hint}")
-            
-        df_train_raw = pd.read_csv(local_train_path, low_memory=False)
-        df_test_raw = pd.read_csv(local_test_path, low_memory=False)
-
-        # Se lo shard è stato generato con partition_strategy='by_day', contiene
-        # la colonna '_capture_day' (usata SOLO in fase di provisioning per
-        # raggruppare le righe per giorno di origine — vedi
-        # FederatedDataSplitter._shard_by_day). Non è una feature del traffico
-        # e va scartata QUI, PRIMA di binarize_target/process: CICIDSPreprocessor
-        # non la protegge (non è nei suoi metadata_keywords), quindi
-        # _convert_feature_columns_to_numeric la forzerebbe a numerico (NaN su
-        # ogni riga, essendo una stringa tipo 'Wednesday-28-02-2018') e
-        # _drop_invalid_rows cancellerebbe l'intero shard riga per riga.
-        df_train_raw = df_train_raw.drop(columns=["_capture_day"], errors="ignore")
-        df_test_raw = df_test_raw.drop(columns=["_capture_day"], errors="ignore")
-
-        preprocessor = CICIDSPreprocessor(target_column=self.target_column)
-        
-        df_train_bin = preprocessor.binarize_target(df_train_raw)
-        df_test_bin = preprocessor.binarize_target(df_test_raw)
-        
-        df_train_clean = preprocessor.process(df_train_bin)
-        df_test_clean = preprocessor.process(df_test_bin)
-
-        if not self.is_regression():
-            random_state = int(hyperparameters.get("random_state", 123))
-            n_minority = int((df_train_clean[self.target_column] == 1).sum())
-
-            if n_minority == 0:
-                # Rete di sicurezza: con tree_allocation_strategy='equal' la
-                # probe di dimensione (exposed_get_local_shard_size) viene
-                # saltata a monte (vedi federated.py), quindi la protezione
-                # "quota 0 -> worker mai dispatchato" lì implementata non
-                # scatta sempre. Qui, invece di andare in crash dentro
-                # StratifiedDataSplitter/undersample_majority_class (nessuna
-                # delle due può bilanciare una classe con zero righe), si
-                # salta ESPLICITAMENTE validation-split e undersampling e si
-                # addestra sul train shard così com'è (sbilanciato, o
-                # interamente Benign). Gli alberi risultanti da questo
-                # worker saranno probabilmente poco informativi (o
-                # costanti), ma il job nel complesso completa invece di
-                # fallire per intero per colpa di un singolo worker.
-                print(f"[{self.worker_name}] [ATTENZIONE] Nessuna riga di classe minoritaria "
-                      f"(Attacco) nel train shard locale: split di validation e undersampling "
-                      f"SALTATI (impossibile bilanciare una classe con zero campioni). "
-                      f"Addestramento su questo shard così com'è (probabile scarsa/nulla "
-                      f"informatività degli alberi risultanti da questo worker).")
+        if start_alberi == 0:
+            # Rimuove parti incrementali E monolitico: ripartendo da zero non
+            # deve sopravvivere nulla di un tentativo precedente sullo stesso id.
+            self._purge_trees_checkpoint(self.current_job_id)
+        if start_alberi == 0:
+            self._trees_cache.pop(self.current_job_id, None)
+        all_trained_trees = []
+        if start_alberi > 0:
+            cached = self._trees_cache.get(self.current_job_id)
+            if cached is not None and len(cached) == start_alberi:
+                # Stessa istanza, stesso job: nessun fault, è solo il round successivo
+                # nello stesso processo. Riusiamo la lista già in memoria, niente GET S3.
+                print(f"\n[{self.orchestrator_name}] [STATE-SYNC] Continuazione round nella stessa istanza "
+                      f"({start_alberi} alberi già in memoria). Nessun reload da storage necessario.")
+                all_trained_trees = cached
             else:
-                # Split del validation set (15% del train shard, PRIMA
-                # dell'undersampling) -- stesso ordine/percentuale di
-                # run_baseline.py e di centralized.py: allinea il VOLUME dello
-                # shard che arriva all'undersampling a quello che la baseline
-                # userebbe, non ancora usato per calibrare una soglia in questo
-                # percorso federato (vedi VALIDATION_SIZE_FOR_THRESHOLD).
-                # Scartato subito dopo lo split.
-                #
-                # BUG CORRETTO (7/9/2026): n_minority > 0 non garantisce che lo
-                # split stratificato riesca -- con partizionamento Dirichlet
-                # molto eterogeneo (es. alpha=0.1) uno shard può avere 1-2
-                # righe di classe minoritaria: troppo poche perché
-                # StratifiedDataSplitter possa mettere almeno un esempio in
-                # entrambi i lati dello split (solleva ValueError "resta al
-                # massimo 1 classe stratificabile"), ma comunque troppe per
-                # far scattare la guardia n_minority==0 sopra. Prima di questo
-                # fix il ValueError risaliva non gestito fino al chiamante RPC,
-                # mandando il worker in errore e bloccando l'intero round
-                # (nessun riassegnamento automatico del task con
-                # FED_SUPERVISOR_MAX_RESTARTS=0). Stesso fallback già usato per
-                # n_minority==0: split/undersampling saltati, training sullo
-                # shard così com'è, invece di far fallire l'intero job per un
-                # singolo worker con dati troppo esigui.
-                try:
-                    validation_splitter = StratifiedDataSplitter(
-                        target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
-                        random_state=random_state,
-                    )
-                    df_train_clean, _ = validation_splitter.split(df_train_clean)
-
-                    # Under-sampling della classe maggioritaria, SOLO sul train shard
-                    # di QUESTO worker (mai sul test, stesso principio della baseline
-                    # centrale): applicato per-shard, non globalmente, perché in un
-                    # sistema federato i dati restano decentralizzati per design --
-                    # ogni worker bilancia i propri dati locali. Rilevante soprattutto
-                    # con partition_strategy non-IID (es. 'by_day'), dove il rapporto
-                    # Benign/Attacco di un singolo shard può discostarsi parecchio da
-                    # quello del dataset globale.
-                    print(f"[{self.worker_name}] Under-sampling della classe maggioritaria "
-                          f"(solo train shard locale, ratio={UNDERSAMPLING_RATIO})...")
-                    df_train_clean = undersample_majority_class(
-                        df_train_clean, target_column=self.target_column,
-                        majority_class=0, minority_class=1,
-                        ratio=UNDERSAMPLING_RATIO, random_state=random_state,
-                    )
-                except ValueError as e:
-                    print(f"[{self.worker_name}] [ATTENZIONE] Classe minoritaria presente ma troppo "
-                          f"esigua ({n_minority} righe) per uno split di validation stratificato "
-                          f"({e}). Split di validation e undersampling SALTATI (stesso fallback del "
-                          f"caso 'zero righe minoritarie'). Addestramento su questo shard così "
-                          f"com'è (probabile scarsa informatività degli alberi risultanti).")
-
-        selected_features = self._resolve_selected_features(dataset_type, hyperparameters)
-        
-        if selected_features is not None:
-            print(f"[{self.worker_name}] Applicazione spazio feature sincronizzato ({len(selected_features)} colonne).")
-            features_to_keep = [col for col in selected_features if col != self.target_column]
-            X_train_df = df_train_clean[features_to_keep]
-            X_test_df = df_test_clean[features_to_keep]
-        else:
-            print(f"[{self.worker_name}] [ATTENZIONE] Nessuna lista feature disponibile. Uso il set completo.")
-            X_train_df = df_train_clean.drop(columns=[self.target_column])
-            X_test_df = df_test_clean.drop(columns=[self.target_column])
-
-        y_train_df = df_train_clean[self.target_column]
-        y_test_df = df_test_clean[self.target_column]
-
-        self._cached_X_train = X_train_df.to_numpy(dtype=np.float64)
-        self._cached_X_test = X_test_df.to_numpy(dtype=np.float64)
-        
-        if self.is_regression():
-            self._cached_y_train = y_train_df.to_numpy(dtype=np.float64)
-            self._cached_y_test = y_test_df.to_numpy(dtype=np.float64)
-        else:
-            self._cached_y_train = y_train_df.to_numpy(dtype=np.int64)
-            self._cached_y_test = y_test_df.to_numpy(dtype=np.int64)
-        
-        self.local_sample_count = len(self._cached_X_train)
-        print(f"[{self.worker_name}] Shard caricato in cache. X_train Shape: {self._cached_X_train.shape}")
-
-    def _load_synthetic_data(self, hyperparameters: dict, worker_index: int = None):
-        """
-        worker_index: usato per derivare un seed DIVERSO per ciascun worker
-        (worker_seed = seed_base + worker_index), così ogni worker genera un
-        dataset sintetico con la STESSA struttura statistica (stessa
-        funzione, stessi n_samples/n_features/noise) ma dati EFFETTIVAMENTE
-        diversi -- analogo allo sharding IID del dataset reale, dove ogni
-        worker vede una porzione diversa dello stesso spazio campionario.
-
-        PRIMA: ogni worker usava lo stesso identico seed_base letto da
-        hyperparameters (condiviso via broadcast RPC a tutti i worker),
-        quindi generava esattamente lo STESSO dataset di tutti gli altri --
-        nessun partizionamento reale dei dati, solo calcolo distribuito su
-        dati duplicati. worker_index=None (fallback, es. se il chiamante non
-        lo passa) preserva quel comportamento precedente, con un avviso
-        esplicito invece di un cambiamento silenzioso.
-        """
-        hyperparameters = obtain(hyperparameters)
-        seed_base = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
-        if worker_index is not None:
-            seed = int(seed_base) + int(worker_index)
-        else:
-            seed = seed_base
-            print(f"[{self.worker_name}] [ATTENZIONE] worker_index non disponibile: uso il seed "
-                  f"condiviso senza offset -- questo worker genererà lo STESSO dataset sintetico "
-                  f"di tutti gli altri worker (nessun partizionamento reale).")
-
-        task = "regression" if self.is_regression() else "classification"
-        target_column = "Target" if task == "regression" else "Label"
-        n_samples = hyperparameters.get("n_samples", 166666)
-        loader = SyntheticDataLoader(task=task,n_samples=n_samples, random_seed=seed, target_column=target_column,output_dir=self.local_cache_dir)
-        df = loader.load()
-
-        X = df.drop(columns=[target_column]).to_numpy(dtype=np.float64)
-        y = df[target_column].to_numpy()
-
-        if task == "classification":
-            X_tr, X_te, y_tr, y_te = train_test_split(
-                X, y, test_size=0.20, random_state=seed, stratify=y
-            )
-        else:
-            X_tr, X_te, y_tr, y_te = train_test_split(
-                X, y, test_size=0.20, random_state=seed
-            )
-        
-        self._cached_X_train = X_tr.astype(np.float64)
-        self._cached_X_test = X_te.astype(np.float64)
-        
-        if self.is_regression():
-            self._cached_y_train = y_tr.astype(np.float64)
-            self._cached_y_test = y_te.astype(np.float64)
-        else:
-            self._cached_y_train = y_tr.astype(np.int64)
-            self._cached_y_test = y_te.astype(np.int64)
-            
-        self.local_sample_count = len(self._cached_X_train)
-
-    def exposed_predict_subset_forest(self, payload: dict) -> bytes:
-        payload = pickle.loads(payload)
-        # 'model_path' (nuovo, preferito): il modello globale è già su storage
-        # condiviso (l'Orchestratore lo ha appena caricato da lì per ottenere
-        # 'all_trees'), quindi lo riscarichiamo e deserializziamo da soli
-        # invece di riceverlo per intero via RPC. Prima veniva ripetuto questo
-        # trasferimento (fino a 1+ GB) UNA VOLTA PER OGNI WORKER — peggio
-        # ancora del path centralizzato, dove almeno viene diviso in chunk.
-        # 'forest' (retrocompatibilità): byte già serializzati, usati se
-        # 'model_path' non è presente.
-        model_path = payload.get("model_path")
-        forest = payload.get("forest")
-        job_id = payload.get("job_id", None)
-        worker_index = payload.get("worker_index", None)
-        hyperparameters = payload.get("hyperparameters", {})
-        dataset_type = hyperparameters.get("dataset_type", "real")
-        tree_type = hyperparameters.get("tree_type", "classifier")
-
-        if self._cached_job_id != job_id or self._cached_X_test is None or self._cached_y_test is None:
-            print(f"[{self.worker_name}] Rigenerazione cache di test tramite pipeline ufficiale...")
-            if dataset_type == "synthetic":
-                self._load_synthetic_data(hyperparameters, worker_index=worker_index)
-            else:
-                self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
-        self._cached_job_id = job_id
-
-        if model_path is not None:
-            from src.dataset.checkpoint_dao import CheckpointDAOFactory
-            print(f"[{self.worker_name}] Caricamento del modello globale da storage condiviso: {model_path}")
-            checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
-            loaded_model = checkpoint_dao.load(model_path)
-            # Normalizziamo sempre a LISTA di alberi (coerente col resto del
-            # metodo, che si aspetta 'unpacked_model' come lista): il file
-            # salvato è l'oggetto RandomForest{Classifier,Regressor} completo.
-            unpacked_model = loaded_model.estimators_ if hasattr(loaded_model, "estimators_") else loaded_model
-        elif forest is not None:
-            unpacked_model = pickle.loads(forest)
-        else:
-            raise ValueError(
-                f"[{self.worker_name}] Payload di inferenza privo sia di 'model_path' sia di 'forest'."
-            )
-
-        if isinstance(unpacked_model, list):
-            from sklearn.tree import DecisionTreeRegressor as DTR
-            actual_is_regressor = isinstance(unpacked_model[0], DTR)
-
-            if actual_is_regressor != (tree_type == "regressor"):
-                print(
-                    f"[{self.worker_name}] [WARN] Mismatch tree_type: payload='{tree_type}' "
-                    f"ma alberi ricevuti={'Regressor' if actual_is_regressor else 'Classifier'}. "
-                    f"Uso il tipo reale degli alberi."
-                )
-
-            if actual_is_regressor:
-                rf = RandomForestRegressor(n_estimators=len(unpacked_model), n_jobs=-1)
-            else:
-                rf = RandomForestClassifier(n_estimators=len(unpacked_model),n_jobs=-1)
-                global_classes = hyperparameters.get("global_classes", [0, 1])
-                rf.classes_ = np.array(global_classes, dtype=np.int64)
-                rf.n_classes_ = len(rf.classes_)
-                local_unique = np.unique(self._cached_y_test)
-                if len(local_unique) < len(rf.classes_):
-                    print(f"[{self.worker_name}] [WARN] Il test-shard locale contiene solo le classi {local_unique.tolist()} "
-                        f"su {rf.classes_.tolist()} attese. Possibile shard sbilanciato o indice worker duplicato.")
-
-            rf.estimators_ = unpacked_model
-            rf.n_features_in_ = self._cached_X_test.shape[1]
-            rf.n_outputs_ = 1
-
-            y_probs = None
-            if not actual_is_regressor and len(rf.classes_) == 2:
-                proba_matrix = rf.predict_proba(self._cached_X_test)
-                positive_label = rf.classes_[-1]  # convenzione: classe con etichetta maggiore = positiva (es. 1 in 0/1)
-                positive_idx = int(np.where(rf.classes_ == positive_label)[0][0])
-                if proba_matrix.shape[1] == len(rf.classes_):
-                    y_probs = proba_matrix[:, positive_idx]
+                # Cache assente o non coerente con start_alberi: questa istanza non ha
+                # memoria diretta del progresso richiesto (riavvio dopo crash, o nuovo
+                # leader subentrato dopo un fault di un'altra istanza). Il checkpoint
+                # fisico su S3 (fonte di verità condivisa) è l'unico modo sicuro per
+                # recuperare lo stato: qui avviene il vero, garantito, recovery cross-istanza.
+                print(f"\n[{self.orchestrator_name}] [FAILOVER-RESUME] Nessuna cache locale valida per "
+                      f"start_alberi = {start_alberi}. Ripristino checkpoint fisico da storage condiviso...")
+                if self._trees_checkpoint_exists(self.current_job_id):
+                    try:
+                        # Il checkpoint e' ora INCREMENTALE: una parte per scrittura,
+                        # contenente solo gli alberi nuovi. _load_trees_checkpoint le
+                        # rilegge in ordine e le ricompone, con fallback automatico sul
+                        # vecchio formato monolitico se non esiste alcuna parte.
+                        all_trained_trees = self._load_trees_checkpoint(self.current_job_id)
+                        print(f"[{self.orchestrator_name}] [OK] Ripristinati con successo {len(all_trained_trees)} alberi reali dal checkpoint.")
+                        start_alberi = len(all_trained_trees)
+                    except Exception as e_load:
+                        print(f"[{self.orchestrator_name}] [ERROR] Checkpoint fisico corrotto: {e_load}. Ricalcolo da 0.")
+                        start_alberi = 0
+                        all_trained_trees = []
                 else:
-                    print(f"[{self.worker_name}] [WARN] predict_proba ha restituito "
-                          f"{proba_matrix.shape[1]} colonne, attese {len(rf.classes_)}: "
-                          f"AUC non calcolabile su questo worker.")
+                    print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
+                    start_alberi = 0
 
-            # Soglia di decisione calibrata dalla baseline (letta da
-            # config_real.json dall'Orchestratore federato e inoltrata qui
-            # via hyperparameters, vedi BaseOrchestrator.
-            # read_decision_threshold_from_config): se disponibile e binario,
-            # sostituisce rf.predict() (argmax interno, soglia implicita
-            # 0.50) con una decisione esplicita sulle stesse probabilità già
-            # calcolate sopra. None -> comportamento invariato.
-            decision_threshold = hyperparameters.get("decision_threshold")
-            if not actual_is_regressor and len(rf.classes_) == 2 and decision_threshold is not None and y_probs is not None:
-                negative_label = rf.classes_[1 - positive_idx]
-                y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
-            else:
-                y_pred = rf.predict(self._cached_X_test)
+        total_step_trees = target_alberi - start_alberi
+        print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
+
+        if total_step_trees <= 0:
+            print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
+            return len(all_trained_trees)
         else:
-            y_probs = None
-            positive_idx = None
-            classes = None
-            if tree_type == "classifier" and hasattr(unpacked_model, "predict_proba"):
-                try:
-                    classes = getattr(unpacked_model, "classes_", None)
-                    if classes is not None and len(classes) == 2:
-                        proba_matrix = unpacked_model.predict_proba(self._cached_X_test)
-                        positive_idx = int(np.where(classes == classes[-1])[0][0])
-                        y_probs = proba_matrix[:, positive_idx]
-                except Exception as e:
-                    print(f"[{self.worker_name}] [WARN] predict_proba non disponibile su questo modello: {e}")
+            print(f"\n [{self.orchestrator_name}] Distribuzione carico residuo: {total_step_trees} alberi da generare...")
+            while True:
+                available_workers = ServiceRegistry.get_available_workers(self.environment)
+                if available_workers:
+                    print(f"[{self.orchestrator_name}] Worker rilevati: {list(available_workers.keys())}. Procedo...")
+                    break
+                print(f"[{self.orchestrator_name}] Nessun worker disponibile. In Attesa...")
+                time.sleep(10)
 
-            # Stessa logica del ramo sopra: soglia calibrata dalla baseline
-            # se disponibile, altrimenti .predict() nativo (invariato).
-            decision_threshold = hyperparameters.get("decision_threshold")
-            if classes is not None and len(classes) == 2 and decision_threshold is not None and y_probs is not None:
-                positive_label = classes[positive_idx]
-                negative_label = classes[1 - positive_idx]
-                y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+            worker_names = list(available_workers.keys())
+            num_workers = len(worker_names)
+
+            hp = payload.get("hyperparameters", {})
+            tree_type = hp.get("tree_type", "classifier")
+
+            # Iperparametro dell'ESPERIMENTO (non del modello): come sono stati
+            # ripartiti i dati tra i worker in fase di provisioning. Letto qui
+            # solo per tracciabilità nei log/nelle metriche — la ripartizione
+            # vera e propria è già avvenuta offline (provision_*_shards.py); qui
+            # ne teniamo semplicemente traccia per poter correlare i risultati
+            # del job con la strategia/alpha usati per generare gli shard.
+            # Campi PIATTI su TrainingRequest (non nidificati sotto
+            # "hyperparameters"), popolati da main.py leggendo il manifesto:
+            # sopravvivono al giro completo client -> SQS -> qui.
+            partitioning_info = {
+                "strategy": payload.get("partition_strategy", "iid"),
+                "alpha": payload.get("partition_alpha"),
+                "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
+            }
+            print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
+                  f"strategy='{partitioning_info.get('strategy', 'iid')}'"
+                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "")
+                  + f" | tree_allocation='{partitioning_info.get('tree_allocation')}'.")
+
+            # Allocazione del budget di alberi tra i worker, secondo la strategia
+            # dichiarata (vedi _fetch_worker_shard_sizes / _allocate_tree_quotas).
+            # Con "equal" saltiamo del tutto la probe RPC delle dimensioni: non
+            # serve, e risparmia un giro di rete per ogni round di training.
+            tree_allocation_strategy = partitioning_info["tree_allocation"]
+            if tree_allocation_strategy == "equal":
+                worker_shard_sizes = {}
             else:
-                y_pred = unpacked_model.predict(self._cached_X_test)
+                worker_shard_sizes = self._fetch_worker_shard_sizes(
+                    worker_names, available_workers, job_id=self.current_job_id
+                )
+            tree_quotas = self._allocate_tree_quotas(
+                total_step_trees, worker_names, worker_shard_sizes, strategy=tree_allocation_strategy
+            )
 
-        response = {
-            "y_pred": y_pred.tolist() if isinstance(y_pred, np.ndarray) else list(y_pred),
-            "y_true": self._cached_y_test.tolist() if isinstance(self._cached_y_test, np.ndarray) else list(self._cached_y_test),
-            "n_samples": len(self._cached_X_test)
+            assigned_tasks = {}
+            sub_start = start_alberi
+            task_id_counter = start_alberi + 1
+            # riceve UN SOLO chunk, di sua esclusiva proprietà. Se il worker muore mentre
+            # lo sta processando, il chunk NON viene ripreso da nessun altro worker:
+            # il thread dedicato smette di ritentare la RPC e resta in attesa che quello
+            # stesso worker ricompaia nel ServiceRegistry, poi riprova lo stesso task.
+            for w_name in worker_names:
+                quota_chunk = tree_quotas.get(w_name, 0)
+                if quota_chunk <= 0:
+                    print(f"[{self.orchestrator_name}] [SKIP] '{w_name}' non riceve alberi in questo round "
+                          f"(quota proporzionale = 0).")
+                    continue
+                sub_end = sub_start + quota_chunk
+                task_seed = seed + sub_start
+                assigned_tasks[w_name] = (task_id_counter, sub_start, sub_end, task_seed)
+                task_id_counter += 1
+                sub_start = sub_end
+
+            feature_selezionate = (None if self.environment == "aws" else self.select_from_config(self._resolve_dataset_type(payload)))
+            results_lock = threading.Lock()
+            checkpoint_time_accum = [0.0]
+
+            # Lock DEDICATO alla persistenza del checkpoint, separato da
+            # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
+            # cioe' dentro la stessa sezione critica che serve ad accodare gli
+            # alberi ricevuti: ogni worker che finiva restava fermo ad aspettare
+            # la fine dell'upload di un altro, non per calcolare ma solo per
+            # poter registrare il proprio risultato. Era un punto di
+            # serializzazione che cresceva col numero di worker, e falsava
+            # proprio la misura di strong scaling.
+            checkpoint_lock = threading.Lock()
+            # Contatore monotono dell'ultimo snapshot effettivamente persistito:
+            #  1) impedisce che uno snapshot piu' VECCHIO sovrascriva uno piu'
+            #     recente, ora che la scrittura e' fuori da results_lock e due
+            #     thread possono arrivarci in ordine diverso da quello in cui
+            #     hanno preso lo snapshot (un checkpoint che regredisce
+            #     sposterebbe INDIETRO il punto di ripartenza dopo un guasto);
+            #  2) salta le scritture gia' superate: se risulta persistito uno
+            #     stato con piu' alberi, riscrivere e' inutile e il checkpoint
+            #     resta comunque piu' avanti.
+            # "parts" riparte dal numero di parti gia'su storage: scrivere di nuovo
+            # dalla 0 sovrascriverebbe un delta valido con un altro delta.
+            checkpoint_lock_state = {"count": start_alberi,
+                                     "parts": self._count_trees_checkpoint_parts(self.current_job_id)}
+            RETRY_WAIT_SECONDS = 10
+            # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
+            # che i test di fault injection possano attendere in modo affidabile il
+            # momento in cui il PRIMO task di training viene davvero inviato a un
+            # worker, invece di limitarsi a un'attesa temporale fissa.
+            self.chunk_sent_event.clear()
+            def contact_worker(w_name, idx):
+                task = assigned_tasks.get(w_name)
+                if task is None:
+                    return
+                task_id, start_t, end_t, chunk_seed = task
+                quota_chunk = end_t - start_t
+                wait_started_at = time.perf_counter()
+                while True:
+                    while True:
+                        available_now = ServiceRegistry.get_available_workers(self.environment)
+                        if w_name in available_now:
+                            w_info = available_now[w_name]
+                            break
+
+                        if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
+                            print(f"[{self.orchestrator_name}] [TIMEOUT] Worker '{w_name}' non tornato disponibile "
+                                f"entro {self.worker_wait_timeout:.0f}s. Task {task_id} ({quota_chunk} alberi) "
+                                f"ABBANDONATO per questo round. Verrà ritentato al prossimo step con i worker rimasti.")
+                            return  # rinuncia al chunk per questo step, senza bloccare gli altri thread
+
+                        print(f"[{self.orchestrator_name}] [WAIT] Worker '{w_name}' non raggiungibile. "
+                              f"Il suo Task {task_id} ({quota_chunk} alberi) resta in attesa: "
+                              f"nessun altro worker lo prenderà in carico.")
+                        time.sleep(RETRY_WAIT_SECONDS)
+                    worker_conn = None
+                    try:
+                        print(f" [RPC -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                        worker_conn = rpyc.connect(
+                            w_info["host"],
+                            w_info["port"],
+                            config={
+                                'allow_pickle': True,
+                                'sync_request_timeout': RPC_SYNC_TIMEOUT_SECONDS,
+                                'keepalive': True
+                            }
+                        )
+                        with self.connessioni_lock:
+                            self.connessioni_attive.append(worker_conn)
+                        print(f"[{self.orchestrator_name}-Thread] Assegnazione Task {task_id} ({quota_chunk} alberi: {start_t}-{end_t}) a {w_name}")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="PROCESSING")
+                        self.chunk_sent_event.set()
+                        effective_seed = chunk_seed + (idx * 1000)
+                        ack_raw = worker_conn.root.exposed_train_local_federated_forest(
+                            job_id=self.current_job_id,
+                            dataset_type=self._resolve_dataset_type(payload),
+                            n_estimators_local=quota_chunk,
+                            worker_index=idx,
+                            hyperparameters={
+                                **hp,
+                                "random_state": effective_seed,
+                                "dataset_random_state": seed,
+                                "feature_selezionate": feature_selezionate,
+
+                            },
+                        )
+
+                        # Il worker NON restituisce più gli alberi per intero via
+                        # RPC: li ha già persistiti nello storage condiviso prima
+                        # di rispondere (vedi federatedWorker.py,
+                        # exposed_train_local_federated_forest), e qui ci
+                        # limitiamo a un piccolo ack + rilettura diretta dallo
+                        # storage. Stesso fix già applicato al path centralizzato
+                        # per evitare l'hang osservato quando RPyC deve
+                        # trasportare un payload sincrono molto grande come
+                        # valore di ritorno (Scenario 2 - Scalabilità).
+                        ack = obtain(ack_raw)
+                        if not isinstance(ack, dict) or not ack.get("ack"):
+                            raise RuntimeError(
+                                f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
+                            )
+
+                        # 'source_info' sintetico: il federato non usa un path di
+                        # dataset per il training locale (ogni worker ha già il
+                        # proprio shard in cache), quindi costruiamo la stessa
+                        # stringa 'shared_train_<job_id>.csv' usata lato worker
+                        # per derivare la medesima chiave di storage.
+                        #
+                        # 'load_task_trees_from_shared_storage' ritorna gli alberi
+                        # già deserializzati, evitando il giro superfluo
+                        # oggetti->bytes->oggetti che load_task_from_shared_storage
+                        # avrebbe richiesto qui (stesso fix applicato al path
+                        # centralizzato dopo l'OOM osservato sull'Orchestratore).
+                        #
+                        # 'tree_reconstruction_lock' (definito in BaseOrchestrator,
+                        # condiviso con il path centralizzato) serializza QUESTA fase
+                        # tra i thread worker, per evitare che più task vengano
+                        # ricomposti in RAM nello stesso istante -- stesso fix
+                        # applicato a centralized.py dopo l'OOM osservato anche con
+                        # 16GB di memoria sull'Orchestratore.
+                        synthetic_source_info = f"shared_train_{self.current_job_id}.csv"
+                        with self.tree_reconstruction_lock:
+                            result_trees = load_task_trees_from_shared_storage(
+                                synthetic_source_info, effective_seed, quota_chunk,
+                                self.environment, self.orchestrator_name
+                            )
+                        if result_trees is None:
+                            raise RuntimeError(
+                                f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
+                                f"non è stato trovato nello storage condiviso."
+                            )
+                        # SEZIONE CRITICA MINIMA: solo l'aggiornamento della lista
+                        # condivisa e uno snapshot immutabile. Upload su S3 e
+                        # scrittura su DynamoDB sono spostati fuori (vedi sotto).
+                        with results_lock:
+                            all_trained_trees.extend(result_trees)
+                            current_total = len(all_trained_trees)
+                            # Copia: la serializzazione fuori dal lock non deve
+                            # poter vedere la lista mutare sotto i piedi.
+                            snapshot = list(all_trained_trees)
+
+                        # --- fuori da results_lock ---
+                        with checkpoint_lock:
+                            if current_total > checkpoint_lock_state["count"]:
+                                try:
+                                    t_chk_start = time.perf_counter()
+                                    # Scrive SOLO gli alberi nuovi (alla parte 0 l'intero
+                                    # snapshot, per migrare dal formato monolitico).
+                                    self._persist_trees_delta(
+                                        self.current_job_id, snapshot,
+                                        checkpoint_lock_state["count"], checkpoint_lock_state["parts"])
+                                    checkpoint_time_accum[0] += time.perf_counter() - t_chk_start
+                                    checkpoint_lock_state["count"] = current_total
+                                    checkpoint_lock_state["parts"] += 1
+                                    # Cache di istanza allineata SOLO dopo il salvataggio
+                                    # riuscito, cosi' non e' mai "piu' avanti" della fonte
+                                    # di verita' persistita.
+                                    self._trees_cache[self.current_job_id] = snapshot
+                                    print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
+                                except Exception as e_fs:
+                                    # Il contatore NON avanza: un writer successivo deve
+                                    # poter riprovare a persistere lo stato.
+                                    print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+
+                                if hasattr(self, 'state_manager') and self.state_manager:
+                                    try:
+                                        self.state_manager.update_request_status(
+                                            job_id=self.current_job_id,
+                                            status="PROCESSING",
+                                            orchestrator_id=self.orchestrator_name,
+                                            retries=payload.get("retries", 0),
+                                            base_random_state=seed,
+                                            alberi_addestrati=current_total,
+                                        )
+                                    except Exception as e_db:
+                                        print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                            else:
+                                print(f"   [RPC <- {w_name}] [CHECKPOINT SKIP] Task {task_id}: gia' persistito uno "
+                                      f"stato piu' avanzato ({checkpoint_lock_state['count']} alberi >= {current_total}).")
+
+                        print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
+                        return  # task di questo worker concluso, il thread termina
+                    except Exception as e:
+                        print(f"   [ERRORE RPC] Fallimento o disconnessione del worker {w_name} durante il Task {task_id}: {e}")
+                        print(f"[{self.orchestrator_name}-Thread] Task {task_id} NON viene riassegnato ad altri worker. "
+                              f"In attesa che '{w_name}' si riavvii per riprendere lo stesso chunk.")
+                        self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="WAITINGFORWORKER")
+                        time.sleep(RETRY_WAIT_SECONDS)
+                        continue  # nessun task_queue.put(): il chunk resta di proprietà esclusiva di w_name
+                    finally:
+                        if worker_conn:
+                            with self.connessioni_lock:
+                                if worker_conn in self.connessioni_attive:
+                                    self.connessioni_attive.remove(worker_conn)
+                            try:
+                                worker_conn.close()
+                            except Exception:
+                                pass
+            dispatch_start = time.perf_counter()
+            threads = []
+            for i, worker_name in enumerate(worker_names, start=1):
+                stable_idx = self._infer_worker_index(worker_name, i)
+                t = threading.Thread(target=contact_worker, args=(worker_name, stable_idx))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+            self.last_dispatch_seconds = time.perf_counter() - dispatch_start
+            print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")
+
+            if not all_trained_trees:
+                raise RuntimeError("Tutti i nodi interessati sono falliti. Nessun albero raccolto per questo Job.")
+
+            if len(all_trained_trees) > target_alberi:
+                print(f"[{self.orchestrator_name}] [SCARTO UNIFORME] Trovati {len(all_trained_trees)} alberi. Riduzione casuale a quota {target_alberi}.")
+                collected_trees = random.sample(all_trained_trees, target_alberi)
+            else:
+                print(f"[{self.orchestrator_name}] Raccolti in totale {len(all_trained_trees)} alberi dai worker superstiti.")
+                collected_trees = all_trained_trees
+
+            aggregation_start = time.perf_counter()
+            final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
+            self.last_aggregation_seconds = time.perf_counter() - aggregation_start
+            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
+            return final_count
+
+    def _execute_inference_step(self, payload: dict) -> dict:
+        print(f"\n[{self.orchestrator_name}] == AVVIO VALIDAZIONE FEDERATA DISTRIBUITA ==")
+        job_id = payload.get("job_id")
+        hyperparameters = payload.get("hyperparameters", {})
+        tree_type = hyperparameters.get("tree_type", "classifier")
+        # Stesso iperparametro dell'esperimento letto in fase di training: qui
+        # serve solo per taggare le metriche salvate, non cambia il comportamento
+        # dell'inferenza (che è comunque agnostica alla strategia di sharding
+        # usata a monte, valuta semplicemente il modello globale già assemblato).
+        # Campi piatti su InferenceRequest, popolati da main.py a partire dallo
+        # storico locale del job di training corrispondente.
+        partitioning_info = {
+            "strategy": payload.get("partition_strategy", "iid"),
+            "alpha": payload.get("partition_alpha"),
+            "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
         }
-        if y_probs is not None:
-            response["y_probs"] = y_probs.tolist() if isinstance(y_probs, np.ndarray) else list(y_probs)
 
-        return pickle.dumps(response)
-    
+        # Marcatore di "inferenza avviata": l'inferenza federata calcola tutto in
+        # RAM e via RPC, senza salvare il checkpoint chunk-per-chunk che invece
+        # produce quella centralizzata. Non lascerebbe quindi alcun segnale
+        # osservabile dall'esterno mentre è in corso — il che rende impossibile,
+        # per un monitor esterno (o per il test di failover), sapere che l'inferenza
+        # è davvero partita. Scriviamo un flag leggero su disco per colmare questo
+        # divario: viene creato appena l'inferenza inizia e rimosso quando termina.
+        self._mark_inference_started(job_id)
 
-    def exposed_get_local_y_test(self) -> bytes:
-        if self._cached_y_test is None:
-            raise ValueError(f"[{self.worker_name}] Errore: Nessun target vector locale y_test in RAM.")
-        return pickle.dumps(self._cached_y_test)
-    
-    def exposed_get_local_sample_count(self) -> int:
-        return self.local_sample_count
+        inference_start_time = time.perf_counter()
 
-    def exposed_get_local_shard_size(self, job_id: str = None) -> int:
-        """
-        Stima della dimensione UTILE dello shard di training locale, usata
-        dall'Orchestratore PRIMA di avviare un round di training per allocare
-        il budget di alberi in proporzione alla quantità di dati posseduti da
-        ciascun worker invece che in parti uguali — indispensabile con
-        partizionamento non-IID (dirichlet/by_day), dove gli shard possono
-        avere dimensioni molto diverse tra loro; con partizionamento IID il
-        risultato è comunque praticamente identico alla vecchia ripartizione
-        equa.
+        model_path = self._resolve_model_path(job_id)
+        if not self.checkpoint_dao.exists(model_path):
+            raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
 
-        Due percorsi, in ordine di preferenza:
+        # Leggiamo solo i metadati leggeri (conteggio alberi, classi) invece di
+        # deserializzare l'intero modello: qui serve solo per loggare/taggare
+        # le metriche e per 'global_classes' nel payload ai worker — sono loro
+        # (non l'orchestratore) a scaricare e deserializzare gli alberi veri e
+        # propri per predire (vedi 'model_path' passato più sotto). Fallback al
+        # caricamento completo per compatibilità con modelli salvati PRIMA di
+        # questo fix (nessun file '.meta' ancora presente per quel job).
+        meta_path = self._resolve_model_meta_path(job_id)
+        global_classes = None
+        if self.checkpoint_dao.exists(meta_path):
+            meta = self.checkpoint_dao.load(meta_path)
+            total_trees = meta["num_trees"]
+            global_classes = meta.get("classes")
+            print(f"[{self.orchestrator_name}] Metadati letti da {meta_path}. "
+                  f"Numero totale di alberi: {total_trees}")
+        else:
+            print(f"[{self.orchestrator_name}] [WARN] Metadati leggeri non trovati per questo job "
+                  f"(modello salvato prima di questo fix?): fallback al caricamento completo di "
+                  f"{model_path}...")
+            fallback_model = self.checkpoint_dao.load(model_path)
+            total_trees = len(fallback_model.estimators_)
+            if hasattr(fallback_model, "classes_"):
+                global_classes = fallback_model.classes_.tolist()
+            print(f"[{self.orchestrator_name}] Foresta caricata (fallback). Numero totale di alberi: {total_trees}")
 
-        1. CACHE (round >= 2 dello stesso job): se lo shard è già stato
-           preprocessato per QUESTO job_id (binarizzazione, pulizia,
-           split di validation, undersampling -- vedi
-           _load_and_preprocess_real_shard), self.local_sample_count
-           contiene già il conteggio REALE del train set che verrà usato
-           per il fit, a costo zero (nessuna nuova lettura da disco).
+        available_workers = ServiceRegistry.get_available_workers(self.environment)
+        worker_names = list(available_workers.keys())
+        num_workers = len(worker_names)
+        if num_workers == 0:
+            raise RuntimeError("Nessun worker disponibile per l'inferenza federata.")
+        print(f"[{self.orchestrator_name}] Worker pronti per l'inferenza: {num_workers} -> {worker_names}")
 
-        2. STIMA ECONOMICA (round 1, nessuna cache ancora): PRIMA qui si
-           leggeva solo il conteggio grezzo di righe del CSV (via/prima della
-           pulizia NaN/Inf) -- un'approssimazione che con partizionamento
-           IID non fa differenza, ma con by_day/dirichlet può divergere
-           parecchio dalla dimensione REALE del train set dopo il taglio di
-           validation e l'undersampling: uno shard con molte righe ma quasi
-           tutte Benign riceverebbe comunque una quota alberi alta,
-           sproporzionata al poco segnale utile che contiene. Qui si legge
-           SOLO la colonna target (non l'intero file), si toglie la stessa
-           quota di validation set (VALIDATION_SIZE_FOR_THRESHOLD) che
-           _load_and_preprocess_real_shard toglie PRIMA dell'undersampling,
-           e si applica la stessa formula di undersample_majority_class
-           (ratio=UNDERSAMPLING_RATIO) -- senza fare il preprocessing
-           completo (metadata drop, feature engineering, multicollinearità)
-           né lo split di validation vero e proprio, quello avviene comunque,
-           una volta sola, al primo training vero.
+        # Non serializziamo più l'intera foresta per rimandarla via RPC: il
+        # modello è già su storage condiviso a 'model_path' (l'abbiamo appena
+        # caricato da lì), quindi passiamo solo quel riferimento a ciascun
+        # worker, che lo scarica e deserializza da sé. Prima veniva rifatto
+        # pickle.dumps(all_trees) una volta qui E il blob risultante (fino a
+        # 1+ GB) veniva ritrasmesso per intero via RPC UNA VOLTA PER OGNI
+        # WORKER — peggio ancora del path centralizzato, dove almeno la
+        # foresta viene divisa in chunk tra i worker invece di essere ripetuta.
+        feature_selezionate = (
+            None if self.environment == "aws"
+            else self.select_from_config(self._resolve_dataset_type(payload))
+        )
+        # Soglia di decisione calibrata dalla baseline (vedi
+        # VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py):
+        # stesso pattern di feature_selezionate sopra, incluso il guard su AWS
+        # (il file locale config_<dataset_type>.json non esiste sul container
+        # dell'orchestratore in quell'ambiente). None -> ogni worker ricade sul
+        # comportamento di default (argmax/soglia implicita 0.50), vedi
+        # FederatedWorker.exposed_predict_subset_forest.
+        decision_threshold = (
+            None if self.environment == "aws"
+            else self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
+        )
 
-           Se la classe minoritaria (Attacco) è del tutto assente in questo
-           shard (possibile con Dirichlet ad alpha molto basso, o con
-           by_day e più worker che giorni disponibili), ritorna
-           ESPLICITAMENTE 0: la quota alberi risultante per questo worker
-           sarà 0, l'Orchestratore lo salta per questo round -- evitando
-           così il crash che si avrebbe più avanti in
-           undersample_majority_class / nello split di validation su uno
-           shard senza classe minoritaria, invece di scoprirlo a metà
-           training.
+        # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
+        # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
+        # dopo un failover sa esattamente quali worker sono già stati validati e
+        # può saltarli, richiedendo solo quelli mancanti. Ogni voce contiene il
+        # risultato completo di un worker: {y_pred, y_true, y_probs, n_samples}.
+        # Struttura persistita tramite CheckpointDAO in inference_chunks_{job_id}.
+        results_by_worker = {}
+        failed_workers = set()
+        self.chunk_sent_event.clear()
+        results_lock = threading.Lock()
+        INF_RETRY_WAIT_SECONDS = 10
 
-        Per dataset_type='synthetic' il file non esiste ancora a questo
-        punto (i dati sintetici vengono generati pigramente al primo
-        training, non al boot): ritorna 0, e l'Orchestratore ricade sulla
-        ripartizione equa storica quando NESSUN worker restituisce una
-        dimensione nota.
-        """
-        if job_id is not None and job_id == self._cached_job_id and self.local_sample_count > 0:
-            return self.local_sample_count
-
-        train_path = os.path.join(self.local_cache_dir, "train_shard.csv")
-        if not os.path.exists(train_path):
-            print(f"[{self.worker_name}] [INFO] Shard locale non ancora presente in {train_path} "
-                  f"(probabile dataset sintetico): ritorno dimensione 0.")
-            return 0
+        # Ripresa da checkpoint: se un leader precedente (poi caduto) aveva già
+        # raccolto i risultati di alcuni worker, li ricarichiamo e non li
+        # richiediamo di nuovo. In inferenza federata "un worker" è l'unità di
+        # lavoro (predice sul proprio shard), quindi il checkpoint è chiavato per
+        # worker_index, non per chunk di alberi come nel centralizzato.
+        inference_cp_path = self._get_inference_checkpoint_path(job_id)
         try:
-            # Solo la colonna target, non l'intero file: sul CSV grezzo il
-            # nome colonna è sempre "Label" (mai ancora rinominato/binarizzato
-            # a questo punto della pipeline), indipendentemente da
-            # self.target_column (che potrebbe non essere stato impostato
-            # correttamente per QUESTO job se questa probe avviene prima di
-            # qualunque chiamata di training).
-            label_series = pd.read_csv(train_path, usecols=["Label"])["Label"]
-            is_benign = label_series.astype(str).str.strip() == "Benign"
-            n_majority_raw = int(is_benign.sum())
-            n_minority_raw = int((~is_benign).sum())
-
-            if n_minority_raw == 0:
-                print(f"[{self.worker_name}] [ATTENZIONE] Shard locale senza alcuna riga di classe "
-                      f"minoritaria (Attacco): dimensione utile riportata come 0 (quota alberi "
-                      f"risultante per questo worker: 0, verrà saltato in questo round).")
-                return 0
-
-            # Nella pipeline reale, il 15% del train viene tolto per il
-            # validation set PRIMA dell'undersampling (vedi
-            # VALIDATION_SIZE_FOR_THRESHOLD in _load_and_preprocess_real_shard) --
-            # va tenuto in conto qui, altrimenti questa stima sovrastimerebbe
-            # sistematicamente il volume finale di circa il 15%, proprio nel
-            # caso (round 1, nessuna cache ancora) in cui è l'UNICA stima
-            # disponibile. Approssimazione: split stratificato, quindi si
-            # assume che la quota tolta sia proporzionale su entrambe le
-            # classi (non esattamente vero per classi molto piccole, che
-            # StratifiedDataSplitter esclude dalla stratificazione e tiene
-            # per intero in train -- ma qui n_minority_raw è già garantito
-            # > 0, e per conteggi piccoli l'errore residuo è comunque
-            # trascurabile ai fini di un'allocazione di risorse).
-            n_majority = int(n_majority_raw * (1 - VALIDATION_SIZE_FOR_THRESHOLD))
-            n_minority = int(n_minority_raw * (1 - VALIDATION_SIZE_FOR_THRESHOLD))
-            if n_minority == 0:
-                # Il taglio del 15% ha eroso l'unica manciata di righe
-                # minoritarie rimaste: stesso esito pratico di
-                # n_minority_raw == 0, stessa gestione.
-                print(f"[{self.worker_name}] [ATTENZIONE] Dopo il taglio del validation set "
-                      f"({VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}%), nessuna riga di classe "
-                      f"minoritaria residua stimata: dimensione utile riportata come 0.")
-                return 0
-
-            # Stessa formula di undersample_majority_class: se il rapporto
-            # richiesto richiederebbe più righe di maggioritaria di quelle
-            # disponibili, non si sotto-campiona affatto (dataset invariato).
-            target_majority = int(round(n_minority * UNDERSAMPLING_RATIO))
-            effective_majority = min(n_majority, target_majority)
-            return effective_majority + n_minority
+            if self.checkpoint_dao.exists(inference_cp_path):
+                restored = self.checkpoint_dao.load(inference_cp_path)
+                if isinstance(restored, dict):
+                    results_by_worker.update(restored)
+                    print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Ripristinati "
+                          f"{len(results_by_worker)} worker già validati dal checkpoint: "
+                          f"{sorted(results_by_worker.keys())}.")
         except Exception as e:
-            print(f"[{self.worker_name}] [WARN] Errore nella stima della dimensione utile di "
-                  f"{train_path} ({e}): ricado sul conteggio grezzo delle righe.")
+            print(f"[{self.orchestrator_name}] [WARN] Checkpoint di inferenza non caricabile "
+                  f"({e}): riparto senza ripresa.")
+
+        def validate_worker(w_name, idx):
+            wait_started_at = time.perf_counter()
+            while True:
+                while True:
+                    available_now = ServiceRegistry.get_available_workers(self.environment)
+                    if w_name in available_now:
+                        w_info = available_now[w_name]
+                        break
+
+                    if self.worker_wait_timeout > 0 and (time.perf_counter() - wait_started_at) > self.worker_wait_timeout:
+                        print(f"[{self.orchestrator_name}] [TIMEOUT INF] Worker '{w_name}' non è tornato disponibile "
+                              f"entro {self.worker_wait_timeout:.0f}s. I suoi campioni vengono ESCLUSI dalla metrica "
+                              f"finale (status PARTIAL), non richiesti ad altri worker.")
+                        with results_lock:
+                            failed_workers.add(w_name)
+                        return
+                    print(f"[{self.orchestrator_name}] [WAIT INF] Worker '{w_name}' non raggiungibile. "
+                          f"La sua validazione resta in attesa: nessun altro worker userà il suo test-shard.")
+                    time.sleep(INF_RETRY_WAIT_SECONDS)
+                conn = None
+                try:
+                    print(f" [RPC INF -> {w_name}] Apertura connessione su {w_info['host']}:{w_info['port']}...")
+                    conn = rpyc.connect(
+                        w_info["host"], w_info["port"],
+                        config={"allow_public_attrs": True, "allow_pickle": True, "sync_request_timeout": RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}
+                    )
+                    with self.connessioni_lock:
+                        self.connessioni_attive.append(conn)
+                    self.chunk_sent_event.set()
+
+                    worker_hyperparameters = {
+                        **hyperparameters,
+                        "dataset_type": self._resolve_dataset_type(payload),
+                        "feature_selezionate": feature_selezionate,
+                        "tree_type": tree_type,
+                        "decision_threshold": decision_threshold,
+                    }
+                    if tree_type == "classifier" and global_classes is not None:
+                        worker_hyperparameters["global_classes"] = global_classes
+                    # ----------------------------------------------------------------------------
+                    print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
+                          f"({total_trees} alberi, {model_path}) a {w_name}...")
+                    raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
+                        "model_path": model_path,
+                        "job_id": job_id,
+                        "worker_index": idx,
+                        "hyperparameters": worker_hyperparameters
+                    }))
+                    worker_data = pickle.loads(obtain(raw_response))
+
+                    with results_lock:
+                        # Registriamo il risultato COMPLETO del worker sotto il suo
+                        # indice stabile. Salvare per-worker (invece di estendere
+                        # liste piatte) è ciò che rende la ripresa possibile: un
+                        # eventuale standby subentrato ritrova esattamente questi
+                        # risultati e non re-interroga i worker già validati.
+                        worker_probs = worker_data.get("y_probs") if tree_type == "classifier" else None
+                        if tree_type == "classifier" and worker_probs is None:
+                            print(f"[{self.orchestrator_name}] [WARN] Worker '{w_name}' non ha restituito "
+                                  f"'y_probs': l'AUC finale sarà None (worker non aggiornato).")
+                        results_by_worker[idx] = {
+                            "y_pred": list(worker_data["y_pred"]),
+                            "y_true": list(worker_data["y_true"]),
+                            "y_probs": list(worker_probs) if worker_probs is not None else None,
+                            "n_samples": worker_data["n_samples"],
+                        }
+                        # Persistiamo il checkpoint aggiornato. La LocalCheckpointDAO
+                        # scrive in modo atomico (tmp + os.replace), quindi un crash
+                        # a metà non corrompe il file già valido.
+                        try:
+                            self.checkpoint_dao.save(inference_cp_path, dict(results_by_worker))
+                        except Exception as cp_err:
+                            print(f"[{self.orchestrator_name}] [WARN] Salvataggio checkpoint inferenza "
+                                  f"fallito per worker {idx}: {cp_err}")
+                        print(f"[{self.orchestrator_name}] Validazione completata su '{w_name}' "
+                              f"({worker_data['n_samples']} record). Checkpoint: {len(results_by_worker)} worker.")
+                    return  # successo, il thread termina
+
+                except Exception as ex:
+                    print(f"   [ERRORE INF] Fallimento su '{w_name}': {ex}. In attesa che torni disponibile "
+                          f"(la sua validazione NON verrà eseguita da altri worker).")
+                    time.sleep(INF_RETRY_WAIT_SECONDS)
+                    continue  # torna al ciclo di attesa, stesso worker
+                finally:
+                    if conn:
+                        with self.connessioni_lock:
+                            if conn in self.connessioni_attive:
+                                self.connessioni_attive.remove(conn)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+
+        rpc_start_time = time.perf_counter()
+        threads = []
+        for idx, name in enumerate(worker_names, start=1):
+            stable_idx = self._infer_worker_index(name, idx)
+            # SHORT-CIRCUIT ripresa: se questo worker è già nel checkpoint (validato
+            # da un leader precedente prima del crash), non lo re-interroghiamo.
+            if stable_idx in results_by_worker:
+                print(f"[{self.orchestrator_name}] [SHORT-CIRCUIT INF] Worker '{name}' "
+                      f"(index {stable_idx}) già validato dal checkpoint. Skip.")
+                continue
+            t = threading.Thread(target=validate_worker, args=(name, stable_idx))
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        with self.connessioni_lock:
+            for conn in self.connessioni_attive:
+                try: conn.close()
+                except Exception: pass
+
+        rpc_inference_time = time.perf_counter() - rpc_start_time
+
+        # Assemblaggio finale: ricomponiamo le liste globali dai risultati
+        # per-worker (sia quelli ripresi dal checkpoint sia quelli appena
+        # raccolti). Ordiniamo per worker_index così l'output è deterministico
+        # e y_probs resta allineato a y_pred/y_true campione-per-campione.
+        y_pred_global = []
+        y_true_global = []
+        y_probs_global = []
+        total_samples = 0
+        all_probs_present = True
+        for w_idx in sorted(results_by_worker.keys()):
+            r = results_by_worker[w_idx]
+            y_pred_global.extend(r["y_pred"])
+            y_true_global.extend(r["y_true"])
+            total_samples += r["n_samples"]
+            if r.get("y_probs") is not None:
+                y_probs_global.extend(r["y_probs"])
+            else:
+                all_probs_present = False
+        total_samples_ref = [total_samples]
+
+        if not y_pred_global:
+            print(f"[{self.orchestrator_name}] [ERRORE] Nessun worker ha risposto alla validazione federata.")
+            self._clear_inference_started(job_id)
+            return {}
+
+        if failed_workers:
+            print(f"[{self.orchestrator_name}] [WARN] {len(failed_workers)} worker non hanno risposto: {failed_workers}. Metriche calcolate sui rimanenti.")
+
+        total_inference_time = time.perf_counter() - inference_start_time
+
+        y_true_dtype = np.float64 if tree_type == "regressor" else np.int64
+
+        # y_probs è utilizzabile per l'AUC solo se OGNI worker incluso lo ha
+        # fornito: in tal caso è allineato campione-per-campione con
+        # y_pred/y_true (stesso ordine per-worker). Se anche un solo worker non
+        # l'ha restituito, l'array sarebbe disallineato: meglio non calcolare
+        # l'AUC che calcolarla male.
+        y_probs_array = None
+        if tree_type == "classifier" and all_probs_present and len(y_probs_global) == len(y_pred_global):
+            y_probs_array = np.array(y_probs_global, dtype=np.float64)
+
+        # I worker restituiscono già la predizione finale del modello globale sul proprio
+        # shard locale (non i voti dei singoli alberi), quindi qui NON si passa da
+        # _aggregate_forest_predictions: si calcolano le metriche direttamente.
+        metrics = self.calculate_metrics(
+            final_predictions=np.array(y_pred_global, dtype=np.float64),
+            y_test=np.array(y_true_global, dtype=y_true_dtype),
+            tree_type=tree_type,
+            y_probs=y_probs_array
+        )
+
+        metrics_per_worker = {}
+        for w_idx, r in results_by_worker.items():
+            y_true_arr = np.array(r["y_true"], dtype=y_true_dtype)
+            classes, counts = np.unique(y_true_arr, return_counts=True)
+            class_counts = dict(zip(classes.tolist(), counts.tolist()))
+
+            y_probs_w = np.array(r["y_probs"], dtype=np.float64) if r.get("y_probs") is not None else None
             try:
-                with open(train_path, "r", encoding="utf-8", errors="ignore") as f:
-                    n_lines = sum(1 for _ in f)
-                return max(0, n_lines - 1)  # -1 per l'header, mai negativo
-            except Exception as e2:
-                print(f"[{self.worker_name}] [WARN] Errore anche nel conteggio grezzo di "
-                      f"{train_path}: {e2}. Ritorno 0.")
-                return 0
+                m = self.calculate_metrics(
+                    final_predictions=np.array(r["y_pred"], dtype=np.float64),
+                    y_test=y_true_arr,
+                    tree_type=tree_type,
+                    y_probs=y_probs_w,
+                )
+            except ValueError as e:
+                print(f"[{self.orchestrator_name}] [WARN] calculate_metrics fallito per worker {w_idx} "
+                    f"(class_counts={class_counts}): {e}. Escluso dal report metriche.")
+                continue  # niente entry per questo worker: meglio assente che un crash dell'intera inferenza
+
+            m["n_samples"] = r["n_samples"]
+            m["class_counts"] = class_counts
+            metrics_per_worker[w_idx] = m
+        MIN_SAMPLES_PER_CLASS = 30  # da tarare
+        def _reliable_for_macro(m):
+            counts = m.get("class_counts", {})
+            return bool(counts) and min(counts.values()) >= MIN_SAMPLES_PER_CLASS
+
+        reliable = {k: v for k, v in metrics_per_worker.items() if _reliable_for_macro(v)}
+        excluded = set(metrics_per_worker) - set(reliable)
+        if excluded:
+            print(f"[{self.orchestrator_name}] [WARN] Worker esclusi dalla macro-average "
+                f"(< {MIN_SAMPLES_PER_CLASS} campioni in almeno una classe): {sorted(excluded)}")
+
+        numeric_keys = [k for k, v in next(iter(reliable.values()), {}).items() if isinstance(v, (int, float))] if reliable else []
+        metrics_macro = {
+            k: float(np.mean([m[k] for m in reliable.values() if m.get(k) is not None]))
+            for k in numeric_keys
+        }
+        self._save_metrics(job_id, "inference", {
+            "job_id": job_id, "mode": "federated", "phase": "inference",
+            "tree_type": tree_type, "testing_set_size": total_samples_ref[0],
+            "federated_partitioning": partitioning_info,
+            "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
+            "metrics": metrics,                        # invariato
+            "metrics_per_worker": metrics_per_worker,   # NUOVO
+            "metrics_macro": metrics_macro,             # NUOVO
+        })
+        if hasattr(self, 'state_manager') and self.state_manager:
+            try:
+                self.state_manager.update_request_status(
+                    job_id=job_id,
+                    status="COMPLETED",
+                    orchestrator_id=self.orchestrator_name,
+                    alberi_addestrati=total_trees,
+                )
+            except Exception as e_db:
+                print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
+
+        # Job concluso: rimuoviamo sia il marcatore di "inferenza avviata" sia il
+        # checkpoint di inferenza per-worker. Lasciarli confonderebbe un eventuale
+        # rilancio dello stesso job_id (ripresa da uno stato ormai completo).
+        self._clear_inference_started(job_id)
+        try:
+            self.checkpoint_dao.delete(inference_cp_path)
+        except Exception:
+            pass
+        return {
+            "status": "SUCCESS" if not failed_workers else "PARTIAL",
+            "testing_set_size": total_samples_ref[0],
+            "failed_workers": list(failed_workers),
+            "total_inference_time": total_inference_time,
+            "rpc_inference_time": rpc_inference_time,
+            "metrics": metrics
+        }
+
+
+    def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
+        if not all_trained_trees:
+            print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
+            return 0
+
+        print(f"[{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
+        try:
+            n_features = all_trained_trees[0].n_features_in_
+
+            if tree_type == "classifier":
+                global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
+                # Stesso fix applicato in centralized.py: classi derivate dagli alberi reali
+                # invece di un'assunzione binaria fissa {0, 1}.
+                trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
+                if trees_with_classes:
+                    detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                else:
+                    print(f"[{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
+                    detected_classes = np.array([0, 1])
+                global_model.classes_ = detected_classes.astype(np.int64)
+                global_model.n_classes_ = len(detected_classes)
+            else:
+                global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
+
+            global_model.estimators_ = all_trained_trees
+            global_model.n_features_in_ = n_features
+            global_model.n_outputs_ = 1
+
+            model_path = self._resolve_model_path(self.current_job_id)
+            self.checkpoint_dao.save(model_path, global_model)
+
+            print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
+
+            # Metadati leggeri accanto al blob pesante: _execute_inference_step
+            # li legge al posto del modello intero quando deve solo sapere
+            # quanti alberi/quali classi contiene (vedi commento lì). Fallimento
+            # non bloccante: se salta, l'inferenza ricade sul caricamento
+            # completo (comportamento precedente a questo fix).
+            try:
+                meta = {
+                    "num_trees": len(all_trained_trees),
+                    "tree_type": tree_type,
+                    "classes": global_model.classes_.tolist() if hasattr(global_model, "classes_") else None,
+                }
+                meta_path = self._resolve_model_meta_path(self.current_job_id)
+                self.checkpoint_dao.save(meta_path, meta)
+            except Exception as e_meta:
+                print(f"[{self.orchestrator_name}] [WARN] Salvataggio metadati leggeri del modello "
+                      f"fallito (non bloccante, l'inferenza ricadrà sul caricamento completo): {e_meta}")
+
+
+            return len(all_trained_trees)
+
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
+            traceback.print_exc()
+            return len(all_trained_trees)
+
+
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
+        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
+
+        if alberi_reali is not None and len(alberi_reali) > 0:
+            try:
+                # Sostituzione integrale dello stato: si azzera e si riscrive come
+                # parte 0. Percorso oggi mai esercitato — BaseOrchestrator chiama
+                # _save_checkpoint senza 'alberi_reali' — ma va tenuto coerente
+                # col formato a parti, altrimenti reintrodurrebbe un monolitico.
+                self._purge_trees_checkpoint(job_id)
+                self._persist_trees_delta(job_id, alberi_reali, 0, 0)
+                checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
+                print(f"[{self.orchestrator_name}] Checkpoint alberi salvato in {checkpoint_trees_path}.")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile salvare checkpoint alberi: {e}")
+
+    def _clean_checkpoint(self, job_id: str):
+        super()._clean_checkpoint(job_id)
+        self._trees_cache.pop(job_id, None)
+        try:
+            # Rimuove tutte le parti incrementali oltre all'eventuale monolitico.
+            self._purge_trees_checkpoint(job_id)
+            print(f"[{self.orchestrator_name}] Checkpoint alberi rimosso per il job {job_id}.")
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint alberi: {e}")
+
+        inference_cp = self._get_inference_checkpoint_path(job_id)
+        try:
+            self.checkpoint_dao.delete(inference_cp)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE CLEANUP] Impossibile rimuovere checkpoint inferenza: {e}")
+
+    def _resolve_trees_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/checkpoints/checkpoint_trees_{job_id}.pkl"
+        return f"./.local_storage/checkpoint_trees_{job_id}.pkl"
+
+    def _resolve_model_meta_path(self, job_id: str) -> str:
+        """Path dei metadati leggeri (conteggio alberi, classi) associati al
+        modello globale: evita che _execute_inference_step debba deserializzare
+        l'intero blob del modello (fino a 1+ GB con alberi non regolarizzati)
+        solo per leggere questi due valori. Stessa sotto-cartella/convenzione
+        di _resolve_model_path, suffisso 'model_meta_' invece di 'model_'."""
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/model_meta_{job_id}.pkl"
+        return os.path.join("./saved_models", f"model_meta_{job_id}.pkl")
+
+    def _resolve_model_path(self, job_id: str) -> str:
+        """Path del modello globale aggregato, in una sotto-cartella dedicata alla
+        modalità federata per evitare collisioni col modello centralizzato in caso
+        di job_id riutilizzati tra le due modalità."""
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/model_{job_id}.pkl"
+        return os.path.join("./saved_models", f"model_{job_id}.pkl")
+
+    def _get_inference_checkpoint_path(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/checkpoints/inference_chunks_{job_id}.pkl"
+        return f"./.local_storage/inference_chunks_{job_id}.pkl"
+
+    def _get_inference_marker_path(self, job_id: str) -> str:
+        """
+        Path del marcatore 'inferenza avviata'. Solo per ambiente 'local': è un
+        segnale di osservabilità pensato per monitor/test sullo stesso filesystem
+        (via bind mount in Docker), non un artefatto di stato distribuito.
+        """
+        return f"./.local_storage/inference_started_{job_id}.marker"
+
+    def _mark_inference_started(self, job_id: str):
+        """Crea il marcatore leggero che segnala l'avvio dell'inferenza federata."""
+        if self.environment != "local" or not job_id:
+            return
+        try:
+            marker = self._get_inference_marker_path(job_id)
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [WARN] Impossibile creare il marcatore di inferenza per {job_id[:8]}: {e}")
+
+    def _clear_inference_started(self, job_id: str):
+        """Rimuove il marcatore a inferenza conclusa (o fallita). Idempotente."""
+        if self.environment != "local" or not job_id:
+            return
+        try:
+            marker = self._get_inference_marker_path(job_id)
+            if os.path.exists(marker):
+                os.remove(marker)
+        except Exception:
+            pass
+
+    def _load_inference_checkpoint(self, job_id: str):
+        path = self._get_inference_checkpoint_path(job_id)
+        if self.checkpoint_dao.exists(path):
+            try:
+                chunks = self.checkpoint_dao.load(path)
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Caricati {len(chunks)} chunk di inferenza dal checkpoint.")
+                return chunks
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [LOAD CHECKPOINT INFERENZA] Errore nel caricamento del checkpoint: {e}")
+        return []
+
+    def select_from_config(self, dataset_type: str = "real"):
+        """Alias storico: delega al metodo condiviso in BaseOrchestrator
+        (read_selected_features_from_config), riusato ora anche da
+        centralized.py. Mantenuto per non rompere le chiamate esistenti in
+        questo file."""
+        return self.read_selected_features_from_config(dataset_type)
+
+if __name__ == "__main__":
+    print("[BOOT] Avvio del nodo Orchestratore Federato...")
+    orchestrator = FederatedOrchestrator()
+    orchestrator.start()
