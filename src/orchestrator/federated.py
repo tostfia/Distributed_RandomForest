@@ -969,12 +969,53 @@ class FederatedOrchestrator(BaseOrchestrator):
             tree_type=tree_type,
             y_probs=y_probs_array
         )
+
+        metrics_per_worker = {}
+        for w_idx, r in results_by_worker.items():
+            y_true_arr = np.array(r["y_true"], dtype=y_true_dtype)
+            classes, counts = np.unique(y_true_arr, return_counts=True)
+            class_counts = dict(zip(classes.tolist(), counts.tolist()))
+
+            y_probs_w = np.array(r["y_probs"], dtype=np.float64) if r.get("y_probs") is not None else None
+            try:
+                m = self.calculate_metrics(
+                    final_predictions=np.array(r["y_pred"], dtype=np.float64),
+                    y_test=y_true_arr,
+                    tree_type=tree_type,
+                    y_probs=y_probs_w,
+                )
+            except ValueError as e:
+                print(f"[{self.orchestrator_name}] [WARN] calculate_metrics fallito per worker {w_idx} "
+                    f"(class_counts={class_counts}): {e}. Escluso dal report metriche.")
+                continue  # niente entry per questo worker: meglio assente che un crash dell'intera inferenza
+
+            m["n_samples"] = r["n_samples"]
+            m["class_counts"] = class_counts
+            metrics_per_worker[w_idx] = m
+        MIN_SAMPLES_PER_CLASS = 30  # da tarare
+        def _reliable_for_macro(m):
+            counts = m.get("class_counts", {})
+            return bool(counts) and min(counts.values()) >= MIN_SAMPLES_PER_CLASS
+
+        reliable = {k: v for k, v in metrics_per_worker.items() if _reliable_for_macro(v)}
+        excluded = set(metrics_per_worker) - set(reliable)
+        if excluded:
+            print(f"[{self.orchestrator_name}] [WARN] Worker esclusi dalla macro-average "
+                f"(< {MIN_SAMPLES_PER_CLASS} campioni in almeno una classe): {sorted(excluded)}")
+
+        numeric_keys = [k for k, v in next(iter(reliable.values()), {}).items() if isinstance(v, (int, float))] if reliable else []
+        metrics_macro = {
+            k: float(np.mean([m[k] for m in reliable.values() if m.get(k) is not None]))
+            for k in numeric_keys
+        }
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "federated", "phase": "inference",
             "tree_type": tree_type, "testing_set_size": total_samples_ref[0],
             "federated_partitioning": partitioning_info,
             "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
-            "metrics": metrics
+            "metrics": metrics,                        # invariato
+            "metrics_per_worker": metrics_per_worker,   # NUOVO
+            "metrics_macro": metrics_macro,             # NUOVO
         })
         if hasattr(self, 'state_manager') and self.state_manager:
             try:

@@ -71,7 +71,7 @@ RANDOM_STATE = 123
 # dell'ESPERIMENTO (non del modello) e va quindi tracciato insieme al resto della
 # configurazione dell'esperimento (es. nel config JSON prodotto da run_baseline.py),
 # non hard-codato qui come gli altri parametri sopra.
-DEFAULT_PARTITION_STRATEGY = "iid"
+DEFAULT_PARTITION_STRATEGY = "per_day"
 DEFAULT_ALPHA = 0.5
 
 BASE_CACHE_DIR = "./workers_cache"
