@@ -99,32 +99,8 @@ def _train_single_fed_tree(args):
     return tree
 
 
-def _weighted_forest_predict_proba(estimators, X, classes, leaf_cap=50):
-    """
-    Soft-voting pesato per foglia, in sostituzione della media NON pesata che
-    farebbe RandomForestClassifier.predict_proba su una foresta 'estimators_'
-    riassemblata da alberi di worker/giorni diversi (partition_strategy
-    'by_day'/'dirichlet').
-
-    Ogni albero contribuisce alla probabilità finale in proporzione a quanti
-    campioni di training sono finiti nella foglia raggiunta dal campione di
-    test: una foglia densa indica che l'albero (quindi il worker/giorno che
-    l'ha addestrato) conosce bene quel pattern; una foglia quasi vuota è
-    spesso il segnale che il campione è fuori dal dominio di specializzazione
-    di quell'albero (es. un tipo di attacco mai visto nel giorno su cui quel
-    worker si è specializzato).
-
-    Usata sia in inferenza reale (exposed_predict_subset_forest) sia nello
-    scoring del validation set per la calibrazione della soglia
-    (exposed_get_validation_predictions): la soglia calibrata deve
-    corrispondere esattamente a come il modello verrà poi usato, quindi le
-    due chiamate condividono la stessa funzione di scoring.
-
-    leaf_cap: satura il peso oltre questa soglia, altrimenti un singolo
-    albero con foglie enormi (es. worker con shard molto più grande degli
-    altri) dominerebbe il voto indipendentemente dalla sua reale affidabilità
-    sul campione specifico.
-    """
+def _weighted_forest_predict_proba_streaming(model_dir, num_trees, checkpoint_dao,
+                                              X, classes, leaf_cap=50, batch_size=10):
     n_samples = X.shape[0]
     n_classes = len(classes)
     class_to_idx = {c: i for i, c in enumerate(classes)}
@@ -132,31 +108,69 @@ def _weighted_forest_predict_proba(estimators, X, classes, leaf_cap=50):
     weighted_sum = np.zeros((n_samples, n_classes), dtype=np.float64)
     weight_total = np.zeros(n_samples, dtype=np.float64)
 
-    for tree in estimators:
-        leaf_ids = tree.apply(X)
-        n_node_samples = tree.tree_.n_node_samples[leaf_ids].astype(np.float64)
-        if leaf_cap is not None:
-            n_node_samples = np.minimum(n_node_samples, leaf_cap)
+    for start in range(0, num_trees, batch_size):
+        batch_paths = [
+            os.path.join(model_dir, f"tree_{i:04d}.pkl")
+            for i in range(start, min(start + batch_size, num_trees))
+        ]
+        # Carica SOLO questo batch (pochi alberi), mai tutta la foresta.
+        batch_trees = [checkpoint_dao.load(p) for p in batch_paths]
 
-        tree_proba = tree.predict_proba(X)
-        tree_classes = tree.classes_
+        for tree in batch_trees:
+            leaf_ids = tree.apply(X)
+            n_node_samples = tree.tree_.n_node_samples[leaf_ids].astype(np.float64)
+            if leaf_cap is not None:
+                n_node_samples = np.minimum(n_node_samples, leaf_cap)
 
-        # Riallinea le colonne dell'albero sull'ordine di classi GLOBALE: un
-        # albero addestrato su un worker senza una certa classe (es. un
-        # giorno senza Infiltration) non la conosce affatto, e sommare le
-        # colonne "as-is" le mescolerebbe silenziosamente con classi diverse.
-        aligned = np.zeros((n_samples, n_classes), dtype=np.float64)
-        for local_idx, cls in enumerate(tree_classes):
-            global_idx = class_to_idx.get(cls)
-            if global_idx is not None:
-                aligned[:, global_idx] = tree_proba[:, local_idx]
+            tree_proba = tree.predict_proba(X)
+            aligned = np.zeros((n_samples, n_classes), dtype=np.float64)
+            for local_idx, cls in enumerate(tree.classes_):
+                global_idx = class_to_idx.get(cls)
+                if global_idx is not None:
+                    aligned[:, global_idx] = tree_proba[:, local_idx]
 
-        weighted_sum += aligned * n_node_samples[:, None]
-        weight_total += n_node_samples
+            weighted_sum += aligned * n_node_samples[:, None]
+            weight_total += n_node_samples
 
-    weight_total = np.where(weight_total == 0, 1.0, weight_total)  # evita divisione per zero
+        # Scarta esplicitamente il batch prima di caricare il prossimo:
+        # è il punto chiave, senza questo la RAM tornerebbe a salire come prima.
+        del batch_trees
+        gc.collect()
+
+    weight_total = np.where(weight_total == 0, 1.0, weight_total)
     return weighted_sum / weight_total[:, None]
 
+def _weighted_forest_predict_regression_streaming(model_dir, num_trees, checkpoint_dao,
+                                                    X, leaf_cap=50, batch_size=10):
+    """Analoga a _weighted_forest_predict_proba_streaming, ma per regressione:
+    media pesata delle predizioni scalari di ogni albero, invece della somma
+    delle probabilità per classe. Stessa pesatura per affidabilità locale
+    tramite n_node_samples della foglia raggiunta."""
+    n_samples = X.shape[0]
+    weighted_sum = np.zeros(n_samples, dtype=np.float64)
+    weight_total = np.zeros(n_samples, dtype=np.float64)
+
+    for start in range(0, num_trees, batch_size):
+        batch_paths = [
+            os.path.join(model_dir, f"tree_{i:04d}.pkl")
+            for i in range(start, min(start + batch_size, num_trees))
+        ]
+        batch_trees = [checkpoint_dao.load(p) for p in batch_paths]
+
+        for tree in batch_trees:
+            leaf_ids = tree.apply(X)
+            n_node_samples = tree.tree_.n_node_samples[leaf_ids].astype(np.float64)
+            if leaf_cap is not None:
+                n_node_samples = np.minimum(n_node_samples, leaf_cap)
+
+            weighted_sum += tree.predict(X) * n_node_samples
+            weight_total += n_node_samples
+
+        del batch_trees
+        gc.collect()
+
+    weight_total = np.where(weight_total == 0, 1.0, weight_total)
+    return weighted_sum / weight_total
 
 class FederatedWorker(BaseWorker):
     """Worker per la gestione dell'addestramento in modalità federata.
@@ -413,8 +427,8 @@ class FederatedWorker(BaseWorker):
             tree_class = DecisionTreeClassifier
         else:
             tree_class = DecisionTreeRegressor
-        totale_core = os.cpu_count() or 1
-        allocated_cores = max(1, totale_core - 1) if totale_core > 2 else totale_core
+    
+        allocated_cores = self._resolve_allocated_cores()
         
         class_weight = hyperparameters.get("class_weight", None)
         worker_tasks = []
@@ -800,14 +814,16 @@ class FederatedWorker(BaseWorker):
 
     def exposed_predict_subset_forest(self, payload: dict) -> bytes:
         payload = pickle.loads(payload)
-        # 'model_path' (nuovo, preferito): il modello globale è già su storage
-        # condiviso (l'Orchestratore lo ha appena caricato da lì per ottenere
-        # 'all_trees'), quindi lo riscarichiamo e deserializziamo da soli
-        # invece di riceverlo per intero via RPC. Prima veniva ripetuto questo
-        # trasferimento (fino a 1+ GB) UNA VOLTA PER OGNI WORKER — peggio
-        # ancora del path centralizzato, dove almeno viene diviso in chunk.
-        # 'forest' (retrocompatibilità): byte già serializzati, usati se
-        # 'model_path' non è presente.
+        # 'model_dir' + 'num_trees' (nuovo, preferito): il modello globale è salvato
+        # come un file .pkl per albero in una cartella dedicata su storage condiviso.
+        # Il worker carica gli alberi a BATCH (vedi _weighted_forest_predict_proba_streaming
+        # / _weighted_forest_predict_regression_streaming), senza mai materializzare
+        # l'intera foresta in RAM in un colpo solo.
+        # 'model_path' / 'forest' (retrocompatibilità): job salvati prima di questo
+        # fix, dove il modello globale è un unico blob monolitico (o già serializzato
+        # nel payload RPC). In questo caso l'intera foresta viene caricata in memoria
+        # come avveniva prima.
+        model_dir = payload.get("model_dir")
         model_path = payload.get("model_path")
         forest = payload.get("forest")
         job_id = payload.get("job_id", None)
@@ -815,6 +831,7 @@ class FederatedWorker(BaseWorker):
         hyperparameters = payload.get("hyperparameters", {})
         dataset_type = hyperparameters.get("dataset_type", "real")
         tree_type = hyperparameters.get("tree_type", "classifier")
+        num_trees = hyperparameters.get("num_trees")
 
         if self._cached_job_id != job_id or self._cached_X_test is None or self._cached_y_test is None:
             print(f"[{self.worker_name}] Rigenerazione cache di test tramite pipeline ufficiale...")
@@ -824,42 +841,19 @@ class FederatedWorker(BaseWorker):
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
         self._cached_job_id = job_id
 
-        if model_path is not None:
+        y_probs = None
+        positive_idx = None
+
+        if model_dir is not None and num_trees is not None:
+            # --- PATH A STREAMING: nessun caricamento integrale della foresta ---
+            print(f"[{self.worker_name}] Inferenza a streaming da '{model_dir}' ({num_trees} alberi)...")
             from src.dataset.checkpoint_dao import CheckpointDAOFactory
-            print(f"[{self.worker_name}] Caricamento del modello globale da storage condiviso: {model_path}")
             checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
-            loaded_model = checkpoint_dao.load(model_path)
-            # Normalizziamo sempre a LISTA di alberi (coerente col resto del
-            # metodo, che si aspetta 'unpacked_model' come lista): il file
-            # salvato è l'oggetto RandomForest{Classifier,Regressor} completo.
-            unpacked_model = loaded_model.estimators_ if hasattr(loaded_model, "estimators_") else loaded_model
-        elif forest is not None:
-            unpacked_model = pickle.loads(forest)
-        else:
-            raise ValueError(
-                f"[{self.worker_name}] Payload di inferenza privo sia di 'model_path' sia di 'forest'."
-            )
 
-        if isinstance(unpacked_model, list):
-            from sklearn.tree import DecisionTreeRegressor as DTR
-            actual_is_regressor = isinstance(unpacked_model[0], DTR)
-
-            if actual_is_regressor != (tree_type == "regressor"):
-                print(
-                    f"[{self.worker_name}] [WARN] Mismatch tree_type: payload='{tree_type}' "
-                    f"ma alberi ricevuti={'Regressor' if actual_is_regressor else 'Classifier'}. "
-                    f"Uso il tipo reale degli alberi."
+            if tree_type == "regressor":
+                y_pred = _weighted_forest_predict_regression_streaming(
+                    model_dir, num_trees, checkpoint_dao, self._cached_X_test, batch_size=10
                 )
-
-            y_probs = None
-            positive_idx = None
-
-            if actual_is_regressor:
-                rf = RandomForestRegressor(n_estimators=len(unpacked_model), n_jobs=-1)
-                rf.estimators_ = unpacked_model
-                rf.n_features_in_ = self._cached_X_test.shape[1]
-                rf.n_outputs_ = 1
-                y_pred = rf.predict(self._cached_X_test)  # regressione: invariato, non affetta dal problema del voto per foglia
             else:
                 global_classes = np.array(hyperparameters.get("global_classes", [0, 1]), dtype=np.int64)
                 local_unique = np.unique(self._cached_y_test)
@@ -867,56 +861,114 @@ class FederatedWorker(BaseWorker):
                     print(f"[{self.worker_name}] [WARN] Il test-shard locale contiene solo le classi {local_unique.tolist()} "
                         f"su {global_classes.tolist()} attese. Possibile shard sbilanciato o indice worker duplicato.")
 
-                # Voto pesato per foglia (vedi _weighted_forest_predict_proba)
-                # al posto della media NON pesata che farebbe un
-                # RandomForestClassifier.predict_proba su una foresta
-                # riassemblata da worker/giorni diversi (partition_strategy
-                # 'by_day'/'dirichlet'): pesa il contributo di ogni albero, per
-                # ogni campione, in base a quanti campioni di training simili
-                # lo sostengono nella foglia raggiunta.
-                proba_matrix = _weighted_forest_predict_proba(unpacked_model, self._cached_X_test, global_classes)
+                proba_matrix = _weighted_forest_predict_proba_streaming(
+                    model_dir, num_trees, checkpoint_dao, self._cached_X_test, global_classes, batch_size=10
+                )
                 y_pred = global_classes[np.argmax(proba_matrix, axis=1)]
 
                 if len(global_classes) == 2:
-                    positive_label = global_classes[-1]  # convenzione: classe con etichetta maggiore = positiva (es. 1 in 0/1)
+                    positive_label = global_classes[-1]  # convenzione: etichetta maggiore = positiva (es. 1 in 0/1)
                     positive_idx = int(np.where(global_classes == positive_label)[0][0])
                     y_probs = proba_matrix[:, positive_idx]
 
-                # Soglia di decisione: quella calibrata sul modello federato
-                # (vedi FederatedOrchestrator._calibrate_federated_threshold)
-                # quando disponibile, altrimenti quella della baseline
-                # (entrambe inoltrate qui via hyperparameters, l'Orchestratore
-                # sceglie quale delle due passare). Se disponibile e binario,
-                # sostituisce l'argmax implicito con una decisione esplicita
-                # sulle stesse probabilità pesate già calcolate sopra.
-                # None -> resta l'argmax.
+                # Soglia calibrata sul modello federato quando disponibile, altrimenti
+                # quella della baseline (entrambe inoltrate via hyperparameters,
+                # l'Orchestratore sceglie quale passare). None -> resta l'argmax.
                 decision_threshold = hyperparameters.get("decision_threshold")
                 if len(global_classes) == 2 and decision_threshold is not None and y_probs is not None:
                     negative_label = global_classes[1 - positive_idx]
                     y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
-        else:
-            y_probs = None
-            positive_idx = None
-            classes = None
-            if tree_type == "classifier" and hasattr(unpacked_model, "predict_proba"):
-                try:
-                    classes = getattr(unpacked_model, "classes_", None)
-                    if classes is not None and len(classes) == 2:
-                        proba_matrix = unpacked_model.predict_proba(self._cached_X_test)
-                        positive_idx = int(np.where(classes == classes[-1])[0][0])
-                        y_probs = proba_matrix[:, positive_idx]
-                except Exception as e:
-                    print(f"[{self.worker_name}] [WARN] predict_proba non disponibile su questo modello: {e}")
 
-            # Stessa logica del ramo sopra: soglia calibrata dalla baseline
-            # se disponibile, altrimenti .predict() nativo (invariato).
-            decision_threshold = hyperparameters.get("decision_threshold")
-            if classes is not None and len(classes) == 2 and decision_threshold is not None and y_probs is not None:
-                positive_label = classes[positive_idx]
-                negative_label = classes[1 - positive_idx]
-                y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+        elif model_path is not None or forest is not None:
+            # --- FALLBACK RETROCOMPATIBILE: carica l'intera foresta in RAM ---
+            if model_path is not None:
+                print(f"[{self.worker_name}] [FALLBACK] Caricamento del modello globale intero da: {model_path}")
+                from src.dataset.checkpoint_dao import CheckpointDAOFactory
+                checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
+                loaded_model = checkpoint_dao.load(model_path)
+                # Normalizziamo sempre a LISTA di alberi: il file salvato è l'oggetto
+                # RandomForest{Classifier,Regressor} completo.
+                unpacked_model = loaded_model.estimators_ if hasattr(loaded_model, "estimators_") else loaded_model
             else:
-                y_pred = unpacked_model.predict(self._cached_X_test)
+                unpacked_model = pickle.loads(forest)
+
+            if isinstance(unpacked_model, list):
+                from sklearn.tree import DecisionTreeRegressor as DTR
+                actual_is_regressor = isinstance(unpacked_model[0], DTR)
+
+                if actual_is_regressor != (tree_type == "regressor"):
+                    print(
+                        f"[{self.worker_name}] [WARN] Mismatch tree_type: payload='{tree_type}' "
+                        f"ma alberi ricevuti={'Regressor' if actual_is_regressor else 'Classifier'}. "
+                        f"Uso il tipo reale degli alberi."
+                    )
+
+                if actual_is_regressor:
+                    rf = RandomForestRegressor(n_estimators=len(unpacked_model), n_jobs=-1)
+                    rf.estimators_ = unpacked_model
+                    rf.n_features_in_ = self._cached_X_test.shape[1]
+                    rf.n_outputs_ = 1
+                    y_pred = rf.predict(self._cached_X_test)
+                else:
+                    global_classes = np.array(hyperparameters.get("global_classes", [0, 1]), dtype=np.int64)
+                    local_unique = np.unique(self._cached_y_test)
+                    if len(local_unique) < len(global_classes):
+                        print(f"[{self.worker_name}] [WARN] Il test-shard locale contiene solo le classi {local_unique.tolist()} "
+                            f"su {global_classes.tolist()} attese. Possibile shard sbilanciato o indice worker duplicato.")
+
+                    # Stessa pesatura per foglia dello streaming, ma sugli alberi già
+                    # in memoria (niente da caricare da model_dir in questo ramo legacy).
+                    class_to_idx = {c: i for i, c in enumerate(global_classes)}
+                    n_samples = self._cached_X_test.shape[0]
+                    weighted_sum = np.zeros((n_samples, len(global_classes)), dtype=np.float64)
+                    weight_total = np.zeros(n_samples, dtype=np.float64)
+                    for tree in unpacked_model:
+                        leaf_ids = tree.apply(self._cached_X_test)
+                        n_node_samples = np.minimum(tree.tree_.n_node_samples[leaf_ids].astype(np.float64), 50)
+                        tree_proba = tree.predict_proba(self._cached_X_test)
+                        aligned = np.zeros((n_samples, len(global_classes)), dtype=np.float64)
+                        for local_idx, cls in enumerate(tree.classes_):
+                            global_idx = class_to_idx.get(cls)
+                            if global_idx is not None:
+                                aligned[:, global_idx] = tree_proba[:, local_idx]
+                        weighted_sum += aligned * n_node_samples[:, None]
+                        weight_total += n_node_samples
+                    weight_total = np.where(weight_total == 0, 1.0, weight_total)
+                    proba_matrix = weighted_sum / weight_total[:, None]
+                    y_pred = global_classes[np.argmax(proba_matrix, axis=1)]
+
+                    if len(global_classes) == 2:
+                        positive_label = global_classes[-1]
+                        positive_idx = int(np.where(global_classes == positive_label)[0][0])
+                        y_probs = proba_matrix[:, positive_idx]
+
+                    decision_threshold = hyperparameters.get("decision_threshold")
+                    if len(global_classes) == 2 and decision_threshold is not None and y_probs is not None:
+                        negative_label = global_classes[1 - positive_idx]
+                        y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+            else:
+                classes = None
+                if tree_type == "classifier" and hasattr(unpacked_model, "predict_proba"):
+                    try:
+                        classes = getattr(unpacked_model, "classes_", None)
+                        if classes is not None and len(classes) == 2:
+                            proba_matrix = unpacked_model.predict_proba(self._cached_X_test)
+                            positive_idx = int(np.where(classes == classes[-1])[0][0])
+                            y_probs = proba_matrix[:, positive_idx]
+                    except Exception as e:
+                        print(f"[{self.worker_name}] [WARN] predict_proba non disponibile su questo modello: {e}")
+
+                decision_threshold = hyperparameters.get("decision_threshold")
+                if classes is not None and len(classes) == 2 and decision_threshold is not None and y_probs is not None:
+                    positive_label = classes[positive_idx]
+                    negative_label = classes[1 - positive_idx]
+                    y_pred = np.where(y_probs >= decision_threshold, positive_label, negative_label)
+                else:
+                    y_pred = unpacked_model.predict(self._cached_X_test)
+        else:
+            raise ValueError(
+                f"[{self.worker_name}] Payload di inferenza privo sia di 'model_dir' sia di 'model_path'/'forest'."
+            )
 
         response = {
             "y_pred": y_pred.tolist() if isinstance(y_pred, np.ndarray) else list(y_pred),
@@ -927,53 +979,6 @@ class FederatedWorker(BaseWorker):
             response["y_probs"] = y_probs.tolist() if isinstance(y_probs, np.ndarray) else list(y_probs)
 
         return pickle.dumps(response)
-
-    def exposed_get_validation_predictions(self, payload: bytes) -> bytes:
-        """
-        Restituisce (y_true, y_probs) sul validation fold locale (self._cached_X_val/_y_val,
-        vedi _load_and_preprocess_real_shard), scorato con lo STESSO modello globale e la
-        STESSA funzione di voto pesato per foglia usata in inferenza reale
-        (exposed_predict_subset_forest) -- la soglia calibrata su questi numeri deve
-        corrispondere esattamente a come il modello verrà poi usato davvero.
-
-        Chiamato da FederatedOrchestrator._calibrate_federated_threshold subito dopo
-        l'aggregazione di un round di training, PRIMA di qualunque richiesta di inferenza.
-
-        Restituisce liste vuote (non un errore) se questo worker non ha un validation set
-        disponibile: capita per i worker senza classe minoritaria nel proprio shard, o con
-        una classe minoritaria troppo esigua per uno split stratificato (vedi df_val=None in
-        _load_and_preprocess_real_shard) -- l'Orchestratore li esclude semplicemente dal pool
-        di calibrazione, esattamente come già fa per le metriche (MIN_SAMPLES_PER_CLASS).
-        """
-        payload = pickle.loads(payload)
-        if self._cached_X_val is None or self._cached_y_val is None or len(self._cached_X_val) == 0:
-            print(f"[{self.worker_name}] [CALIBRAZIONE SOGLIA] Nessun validation set locale disponibile: "
-                  f"escluso dal pool di calibrazione.")
-            return pickle.dumps({"y_true": [], "y_probs": []})
-
-        model_path = payload.get("model_path")
-        from src.dataset.checkpoint_dao import CheckpointDAOFactory
-        checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
-        loaded_model = checkpoint_dao.load(model_path)
-        trees = loaded_model.estimators_ if hasattr(loaded_model, "estimators_") else loaded_model
-
-        global_classes = np.array(payload.get("global_classes", [0, 1]), dtype=np.int64)
-        if len(global_classes) != 2:
-            # La calibrazione della soglia riguarda solo il caso binario (stessa
-            # limitazione già presente in exposed_predict_subset_forest): con
-            # più di 2 classi non esiste un'unica soglia di decisione da tarare.
-            print(f"[{self.worker_name}] [CALIBRAZIONE SOGLIA] {len(global_classes)} classi globali "
-                  f"rilevate: calibrazione soglia supportata solo per il caso binario. Escluso dal pool.")
-            return pickle.dumps({"y_true": [], "y_probs": []})
-
-        proba_matrix = _weighted_forest_predict_proba(trees, self._cached_X_val, global_classes)
-        positive_idx = int(np.where(global_classes == global_classes[-1])[0][0])
-        y_probs = proba_matrix[:, positive_idx]
-
-        return pickle.dumps({
-            "y_true": self._cached_y_val.tolist(),
-            "y_probs": y_probs.tolist(),
-        })
 
     def exposed_get_local_y_test(self) -> bytes:
         if self._cached_y_test is None:
@@ -1103,3 +1108,13 @@ class FederatedWorker(BaseWorker):
                 print(f"[{self.worker_name}] [WARN] Errore anche nel conteggio grezzo di "
                       f"{train_path}: {e2}. Ritorno 0.")
                 return 0
+
+    def _resolve_allocated_cores(self) -> int:
+        env_cores = os.environ.get("WORKER_CORES", "").strip()
+        if env_cores:
+            try:
+                return max(1, int(float(env_cores)))
+            except ValueError:
+                print(f"[{self.worker_name}] [WARN] WORKER_CORES='{env_cores}' non valido, ricado su os.cpu_count().")
+        totale_core = os.cpu_count() or 1
+        return max(1, totale_core - 1) if totale_core > 2 else totale_core

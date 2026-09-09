@@ -48,7 +48,7 @@ services:
       - TRAINING_MODE=${TRAINING_MODE:-federated}
       - RUNNING_IN_DOCKER=true
       - LOCAL_STORAGE_PATH=/app/.local_storage
-      - WORKER_CORES=${WORKER_CORES:-}
+      - WORKER_CORES=${WORKER_CORES:-2}
     volumes:
       - .:/app:z
       - ./synthetic:/app/synthetic:z

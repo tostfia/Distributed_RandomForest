@@ -731,10 +731,41 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         inference_start_time = time.perf_counter()
 
-        model_path = self._resolve_model_path(job_id)
-        if not self.checkpoint_dao.exists(model_path):
-            raise FileNotFoundError(f"Modello globale non trovato in '{model_path}'.")
+        # FIX allineamento path: qui si ricostruiva il path a mano con
+        # os.path.join(self.models_dir, ...), un attributo non impostato da
+        # questa classe (probabile residuo di un'implementazione precedente)
+        # e comunque con una convenzione di naming diversa da quella usata in
+        # fase di training (manca il prefisso 'model_' e, su AWS, il
+        # sottopercorso 'saved_models/federated/'). Il training salva sempre
+        # tramite _resolve_model_dir/_resolve_model_path (vedi più sotto in
+        # questo file), quindi l'inferenza deve leggere dagli stessi identici
+        # resolver, non da un path costruito in modo indipendente.
+        trees_dir = self._resolve_model_dir(job_id)
+        model_pkl = self._resolve_model_path(job_id)
+        meta_path = self._resolve_model_meta_path(job_id)
 
+        # NB: il controllo di esistenza deve passare SEMPRE da checkpoint_dao,
+        # mai da os.path.exists/os.path.isdir/os.listdir direttamente: questi
+        # ultimi funzionano solo su path locali, mentre su 'aws' trees_dir/
+        # model_pkl sono URI 's3://...' (os.path.exists su un URI del genere
+        # ritorna silenziosamente False, senza errore, quindi il blocco
+        # solleverebbe FileNotFoundError anche quando il modello esiste
+        # davvero su S3). CheckpointDAO inoltre non espone alcun metodo di
+        # listing su S3, quindi non possiamo comunque "contare i file nella
+        # cartella" come si faceva prima: usiamo la presenza dei metadati
+        # (scritti dal training in modalità streaming, vedi model_dir più
+        # sotto in questo file) come segnale di esistenza del modello a
+        # alberi separati, che è equivalente e non richiede listing.
+        if self.checkpoint_dao.exists(meta_path):
+            is_streaming = True
+        elif self.checkpoint_dao.exists(model_pkl):
+            is_streaming = False
+        else:
+            raise FileNotFoundError(
+                f"Nessun modello trovato per il job '{job_id}'. "
+                f"Cercati: metadati '{meta_path}' (modalità a-alberi-separati "
+                f"in '{trees_dir}') o file singolo '{model_pkl}'"
+            )
         # Leggiamo solo i metadati leggeri (conteggio alberi, classi) invece di
         # deserializzare l'intero modello: qui serve solo per loggare/taggare
         # le metriche e per 'global_classes' nel payload ai worker — sono loro
@@ -742,7 +773,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         # propri per predire (vedi 'model_path' passato più sotto). Fallback al
         # caricamento completo per compatibilità con modelli salvati PRIMA di
         # questo fix (nessun file '.meta' ancora presente per quel job).
-        meta_path = self._resolve_model_meta_path(job_id)
         global_classes = None
         if self.checkpoint_dao.exists(meta_path):
             meta = self.checkpoint_dao.load(meta_path)
@@ -753,8 +783,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         else:
             print(f"[{self.orchestrator_name}] [WARN] Metadati leggeri non trovati per questo job "
                   f"(modello salvato prima di questo fix?): fallback al caricamento completo di "
-                  f"{model_path}...")
-            fallback_model = self.checkpoint_dao.load(model_path)
+                  f"{self._resolve_model_dir(job_id)}...")
+            fallback_model = self.checkpoint_dao.load(self._resolve_model_path(job_id))
             total_trees = len(fallback_model.estimators_)
             if hasattr(fallback_model, "classes_"):
                 global_classes = fallback_model.classes_.tolist()
@@ -881,14 +911,16 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "feature_selezionate": feature_selezionate,
                         "tree_type": tree_type,
                         "decision_threshold": decision_threshold,
+                        "num_trees": total_trees,
                     }
                     if tree_type == "classifier" and global_classes is not None:
                         worker_hyperparameters["global_classes"] = global_classes
                     # ----------------------------------------------------------------------------
-                    print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
-                          f"({total_trees} alberi, {model_path}) a {w_name}...")
+                    #print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
+                          #f"({total_trees} alberi, {model_path}) a {w_name}...")
                     raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
-                        "model_path": model_path,
+                        #"model_path": model_path,
+                        "model_dir"  : trees_dir,
                         "job_id": job_id,
                         "worker_index": idx,
                         "hyperparameters": worker_hyperparameters
@@ -1088,64 +1120,45 @@ class FederatedOrchestrator(BaseOrchestrator):
             "metrics": metrics
         }
 
-
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
         if not all_trained_trees:
             print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
             return 0
-
-        print(f"[{self.orchestrator_name}] Ricomposizione foresta globale conforme a Scikit-Learn...")
         try:
-            n_features = all_trained_trees[0].n_features_in_
-
-            if tree_type == "classifier":
-                global_model = RandomForestClassifier(n_estimators=len(all_trained_trees))
-                # Stesso fix applicato in centralized.py: classi derivate dagli alberi reali
-                # invece di un'assunzione binaria fissa {0, 1}.
-                trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
-                if trees_with_classes:
-                    detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
-                else:
-                    print(f"[{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
-                    detected_classes = np.array([0, 1])
-                global_model.classes_ = detected_classes.astype(np.int64)
-                global_model.n_classes_ = len(detected_classes)
+            trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
+            if trees_with_classes:
+                detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
             else:
-                global_model = RandomForestRegressor(n_estimators=len(all_trained_trees))
+                detected_classes = np.array([0, 1])
 
-            global_model.estimators_ = all_trained_trees
-            global_model.n_features_in_ = n_features
-            global_model.n_outputs_ = 1
+            # Cartella dedicata per QUESTO job: un file pickle per albero invece
+            # di un unico blob monolitico. Ogni file è piccolo (pochi MB), quindi
+            # in inferenza si può caricarne un sottoinsieme alla volta senza mai
+            # materializzare tutti i 100 alberi insieme in RAM.
+            model_dir = self._resolve_model_dir(self.current_job_id)
+            for i, tree in enumerate(all_trained_trees):
+                tree_path = os.path.join(model_dir, f"tree_{i:04d}.pkl")
+                self.checkpoint_dao.save(tree_path, tree)
 
-            model_path = self._resolve_model_path(self.current_job_id)
-            self.checkpoint_dao.save(model_path, global_model)
-
-            print(f"[{self.orchestrator_name}] Modello Globale salvato con successo in '{model_path}'.")
-
-            # Metadati leggeri accanto al blob pesante: _execute_inference_step
-            # li legge al posto del modello intero quando deve solo sapere
-            # quanti alberi/quali classi contiene (vedi commento lì). Fallimento
-            # non bloccante: se salta, l'inferenza ricade sul caricamento
-            # completo (comportamento precedente a questo fix).
-            try:
-                meta = {
-                    "num_trees": len(all_trained_trees),
-                    "tree_type": tree_type,
-                    "classes": global_model.classes_.tolist() if hasattr(global_model, "classes_") else None,
-                }
-                meta_path = self._resolve_model_meta_path(self.current_job_id)
-                self.checkpoint_dao.save(meta_path, meta)
-            except Exception as e_meta:
-                print(f"[{self.orchestrator_name}] [WARN] Salvataggio metadati leggeri del modello "
-                      f"fallito (non bloccante, l'inferenza ricadrà sul caricamento completo): {e_meta}")
-
-
+            meta = {
+                "num_trees": len(all_trained_trees),
+                "tree_type": tree_type,
+                "classes": detected_classes.astype(np.int64).tolist(),
+                "model_dir": model_dir,   # esplicito, invece che dedurlo da job_id lato worker
+            }
+            self.checkpoint_dao.save(self._resolve_model_meta_path(self.current_job_id), meta)
+            print(f"[{self.orchestrator_name}] Modello Globale salvato come {len(all_trained_trees)} "
+                f"file separati in '{model_dir}'.")
             return len(all_trained_trees)
-
         except Exception as e:
-            print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] Fallimento durante l'unione dei sotto-modelli: {e}")
+            print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] {e}")
             traceback.print_exc()
             return len(all_trained_trees)
+
+    def _resolve_model_dir(self, job_id: str) -> str:
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/model_{job_id}_trees"
+        return os.path.join("./saved_models", f"model_{job_id}_trees")
 
     def _resolve_threshold_path(self, job_id: str) -> str:
         """Path della soglia di decisione calibrata specificamente sul modello
