@@ -9,8 +9,8 @@ from src.orchestrator.federated import FederatedOrchestrator
 import docker
 
 # ---------------------------------------------------------------------
-# AWS: nomi/tabelle usati per il failover REALE sui 2 task ECS del
-# orchestrator-service già dispiegato (vedi _run_aws_real_failover).
+# AWS: nomi/tabelle usati per il failover REALE sulle 2 istanze EC2
+# dell'orchestrator-asg già dispiegato (vedi _run_aws_real_failover).
 # ---------------------------------------------------------------------
 _LOCK_TABLE = "OrchestratorLocks"
 _LOCK_KEY = "global_orchestrator_leader_lock"
@@ -21,10 +21,11 @@ def _merge_aws_overrides(config: dict, key: str) -> dict:
     Unisce il blocco di config 'key' (es. 'inference_orchestrator_failover')
     con l'eventuale override AWS-specifico in
     config['aws']['suggested_overrides'][key] — quest'ultimo, se presente,
-    vince sui valori "locali". Su AWS il ciclo ETL/RPC reale e il tempo di
-    ecs.stop_task() sono più lenti del kill istantaneo locale/Docker, quindi
-    i timeout tarati per il locale possono essere troppo stretti. Filtra le
-    chiavi di solo commento (es. '_NOTE') presenti nel JSON di config.
+    vince sui valori "locali". Su AWS il ciclo ETL/RPC reale e il tempo del
+    comando SSM (docker kill sull'istanza EC2 remota) sono più lenti del kill
+    istantaneo locale/Docker, quindi i timeout tarati per il locale possono
+    essere troppo stretti. Filtra le chiavi di solo commento (es. '_NOTE')
+    presenti nel JSON di config.
     """
     merged = dict(config.get(key, {}) or {})
     if (config.get("aws", {}) or {}).get("suggested_overrides", {}).get(key):
@@ -35,15 +36,18 @@ def _merge_aws_overrides(config: dict, key: str) -> dict:
 
 def _resolve_aws_infra(config: dict):
     """
-    Cluster/region/nome service ECS: letti da config['aws'] quando presente
-    (stessa sezione già usata da run_test_aws.sh/aws_ecs_utils.py, vedi
-    test_config.json), altrimenti fallback su env var/default fisso.
+    Region AWS: letta da config['aws']['region'] quando presente, altrimenti
+    fallback su env var/default fisso. L'orchestrator non gira più su ECS
+    (vedi orchestrator_ec2.tf: istanze EC2 gestite da 'orchestrator-asg', un
+    Auto Scaling Group), quindi qui non serve più risolvere un cluster/nome
+    di service ECS — le istanze target si trovano per tag EC2
+    (Project=rf-distributed, vedi _resolve_ec2_instance_by_ip), non per
+    service name. La region resta l'unico dato necessario per i client
+    boto3 ('ec2', 'ssm', 'dynamodb').
     """
     aws_cfg = config.get("aws", {}) or {}
-    cluster = aws_cfg.get("ecs_cluster_name") or os.environ.get("CLUSTER_NAME", "forest-cluster")
     region = aws_cfg.get("region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-    orch_service = aws_cfg.get("orchestrator_service_name", "orchestrator-service")
-    return cluster, region, orch_service
+    return region
 
 
 def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
@@ -56,7 +60,8 @@ def _wait_for_leadership(orch, timeout=15, interval=0.5) -> bool:
 
     Usata SOLO dai rami locale/Docker Compose. Il ramo AWS (vedi
     _run_aws_real_failover) non la usa: lì Leader e Standby sono già due
-    task ECS reali, sempre attivi, indipendenti dal test-engine.
+    istanze EC2 reali dell'orchestrator-asg, sempre attive, indipendenti dal
+    test-engine.
     """
     lock_key = orch._get_lock_key()
     waited = 0.0
@@ -318,42 +323,13 @@ def _get_current_leader_name_aws(state_manager):
         return None
 
 
-def _resolve_ecs_task_arn_by_ip(ecs_client, cluster, service_name, ip_dashed):
-    """
-    Trova, tra i task RUNNING del service ECS indicato, quello il cui IP
-    privato (formato Fargate awsvpc, es. '172.31.70.125') corrisponde al
-    frammento '172-31-70-125' estratto dal nome interno dell'orchestratore
-    (che include l'hostname Fargate, identico al pattern già usato per i
-    worker). Ritorna l'ARN del task, o None se non trovato.
-
-    NOTA 'ip_dashed': deve essere SENZA il prefisso 'ip-' (es. '172-31-70-125'),
-    perché va confrontato con 'ip.replace(".", "-")' qui sotto, che produce un
-    IP puro senza prefisso. Passare un valore con il prefisso 'ip-' fa fallire
-    SEMPRE il confronto, anche quando il task cercato esiste davvero.
-    """
-    task_arns = ecs_client.list_tasks(
-        cluster=cluster, serviceName=service_name, desiredStatus="RUNNING"
-    ).get("taskArns", [])
-    if not task_arns:
-        return None
-
-    details = ecs_client.describe_tasks(cluster=cluster, tasks=task_arns).get("tasks", [])
-    for t in details:
-        for att in t.get("attachments", []):
-            for d in att.get("details", []):
-                if d.get("name") == "privateIPv4Address":
-                    ip = d.get("value", "")
-                    if ip and ip.replace(".", "-") == ip_dashed:
-                        return t.get("taskArn")
-    return None
-
-
 def _resolve_ec2_instance_by_ip(ec2_client, ip_dashed):
     """
-    Equivalente EC2 di _resolve_ecs_task_arn_by_ip qui sopra — vedi il
-    commento gemello in orchestrator_fault.py per il dettaglio: le istanze
-    EC2 condividono lo stesso formato di hostname interno AWS delle ENI
-    Fargate, quindi l'estrazione dell'IP dal nome del leader resta identica.
+    Trova, tra le istanze EC2 dell'orchestrator (tag Project=rf-distributed,
+    in stato 'running' — vedi orchestrator_ec2.tf, gestite dall'Auto Scaling
+    Group 'orchestrator-asg'), quella il cui IP privato corrisponde al
+    frammento estratto dal nome del leader — vedi il commento gemello in
+    orchestrator_fault.py per il dettaglio completo.
     """
     reservations = ec2_client.describe_instances(
         Filters=[
@@ -376,8 +352,19 @@ def _kill_orchestrator_container_via_ssm(ssm_client, instance_id, hard_kill=True
     nessuna finestra di grazia) via SSM Run Command — il caso peggiore,
     non testabile su Fargate ma raggiungibile qui perché l'host è una vera
     istanza EC2, non un container ECS.
+
+    BUGFIX (propagato da orchestrator_fault.py, 7/9/2026): il container
+    orchestrator è lanciato con '--restart unless-stopped' (vedi
+    orchestrator_ec2.tf). Senza disattivare prima la restart policy, un
+    'docker kill' risorgerebbe da solo sulla STESSA istanza in pochi secondi,
+    prima che il vero subentro cross-istanza (standby o rimpiazzo dell'ASG)
+    possa avvenire — mascherando un recovery locale come se fosse il
+    failover che questo scenario vuole verificare. Disattivazione e kill in
+    un solo comando SSM composito, per evitare una finestra in cui il
+    container potrebbe risorgere prima della disattivazione.
     """
-    command = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    kill_cmd = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
+    command = f"docker update --restart=no orchestrator && {kill_cmd}"
     send_resp = ssm_client.send_command(
         InstanceIds=[instance_id],
         DocumentName="AWS-RunShellScript",
@@ -394,8 +381,9 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
     Leader (Master-1) e istanzia un secondo orchestratore di Standby
     (Master-2) per il subentro — invariato rispetto alla versione originale.
 
-    Su AWS: NON istanzia nulla in-process. Usa il vero orchestrator-service
-    già dispiegato (2 task ECS, Leader+Standby sempre attivi) — vedi
+    Su AWS: NON istanzia nulla in-process. Usa le vere istanze EC2 già
+    dispiegate dall'Auto Scaling Group 'orchestrator-asg' (2 istanze,
+    Leader+Standby sempre attive — vedi orchestrator_ec2.tf) — vedi
     _run_aws_real_failover per il dettaglio.
     """
 
@@ -822,34 +810,40 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
             _cleanup_orchestrator_fault_inf()
 
     # ------------------------------------------------------------------ #
-    # AWS: failover REALE sui 2 task ECS del orchestrator-service         #
+    # AWS: failover REALE sulle 2 istanze EC2 dell'orchestrator-asg       #
     # ------------------------------------------------------------------ #
 
     def _run_aws_real_failover(self, orch_leader, ft_cfg, target_trees) -> dict:
         """
-        Failover REALE durante l'inferenza sui due task ECS del
-        orchestrator-service già dispiegato. Setup (generazione del modello
+        Failover REALE durante l'inferenza sulle due istanze EC2
+        dell'orchestrator-asg già dispiegato. Setup (generazione del modello
         preliminare) fatto in-process via chiamata diretta, ESATTAMENTE come
         fanno già fault_inf.py/network.py — non richiede failover, serve solo
         a produrre il .pkl su S3. La richiesta di INFERENZA vera e propria
-        invece passa da SQS, così la reclama il leader reale su ECS.
+        invece passa da SQS, così la reclama il leader reale sull'istanza EC2.
 
         Per la finestra di ripresa parziale, il segnale non può più venire da
         un checkpoint locale (nessun filesystem condiviso col test-engine su
-        Fargate): usiamo invece la tabella DynamoDB WorkerTasks (GSI
+        AWS): usiamo invece la tabella DynamoDB WorkerTasks (GSI
         job_id-index), popolata da _track_task() anche durante l'inferenza
         (vedi centralized.py/federated.py) — stesso principio, fonte diversa.
 
         Nessuna scorciatoia su lock/lease: il recovery si affida al TTL
-        naturale, come nella versione training (vedi _run_aws_real_failover
-        in orchestrator_fault.py per il dettaglio del meccanismo).
+        naturale. Il leader viene fermato con un 'docker kill' via SSM Run
+        Command (hard_kill=True, SIGKILL diretto, nessuna finestra di
+        grazia — vedi _kill_orchestrator_container_via_ssm): è un crash
+        improvviso vero, non una terminazione controllata, quindi il
+        subentro atteso è governato dal TTL della job lease (300s), non da
+        un rilascio volontario. Vedi _run_aws_real_failover in
+        orchestrator_fault.py per il dettaglio completo del meccanismo e per
+        il confronto con il precedente comportamento su ECS (ecs:StopTask).
         """
         import boto3
 
-        cluster, region, service_name = _resolve_aws_infra(self.config)
+        region = _resolve_aws_infra(self.config)
 
-        print(f"\n--- [TEST] Failover REALE dell'Orchestratore durante l'inferenza su ECS "
-              f"('{service_name}', cluster '{cluster}') ---")
+        print(f"\n--- [TEST] Failover REALE dell'Orchestratore durante l'inferenza sulle "
+              f"istanze EC2 dell'Auto Scaling Group 'orchestrator-asg' (region '{region}') ---")
 
         job_id = f"test_inference_orch_failover_aws_{int(time.time())}"
         # Iperparametri dal manifesto della baseline: fonte unica condivisa
@@ -887,7 +881,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         if is_federated:
             payload_inference = self._augment_payload_with_partitioning(payload_inference)
         print(f"[TEST] Invio della richiesta di INFERENZA per il Job {job_id[:8]} alla coda "
-              f"'{orch_leader.queue_name}' (la reclamerà il leader reale su ECS)...")
+              f"'{orch_leader.queue_name}' (la reclamerà il leader reale sull'istanza EC2)...")
         try:
             orch_leader.sqs_queue.send_message(queue_name=orch_leader.queue_name, message_dict=payload_inference)
         except Exception as e_inner:
@@ -935,8 +929,8 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
         ip_match = re.search(r"ip-(\d+-\d+-\d+-\d+)\.ec2\.internal", killed_leader_name)
         stopped = False
         if ip_match:
-            # SENZA prefisso 'ip-': vedi nota in _resolve_ecs_task_arn_by_ip
-            # sul formato atteso per il confronto con l'IP letto da ECS.
+            # SENZA prefisso 'ip-': vedi nota in _resolve_ec2_instance_by_ip
+            # sul formato atteso per il confronto con PrivateIpAddress.
             ip_dashed = ip_match.group(1)
             try:
                 ec2 = boto3.client("ec2", region_name=region)
@@ -959,7 +953,7 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
 
         if not stopped:
             return {"status": "FAILED", "duration_seconds": round(time.perf_counter() - start_time, 2),
-                    "error": "Impossibile identificare/fermare il task ECS del leader.",
+                    "error": "Impossibile identificare/fermare l'istanza EC2 del leader.",
                     "original_leader": killed_leader_name}
 
         # Monitoraggio fino al completamento — nessuna scorciatoia su lock/lease.
@@ -1006,9 +1000,11 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                   f"({'completato dal leader fermato' if completed_by_killed_leader else 'job non arrivato a COMPLETED entro il timeout'}).")
 
         return {
-            "scenario_description": "Test di Failover REALE dell'Orchestratore durante l'inferenza sui 2 task ECS "
-                                     "di orchestrator-service (leader fermato con ecs:StopTask, nessuna scorciatoia "
-                                     "sul lock: recovery affidato al TTL naturale).",
+            "scenario_description": "Test di Failover REALE dell'Orchestratore durante l'inferenza sulle 2 istanze "
+                                     "EC2 dell'Auto Scaling Group 'orchestrator-asg' (leader fermato con un 'docker "
+                                     "kill' via SSM Run Command, SIGKILL diretto senza finestra di grazia — crash "
+                                     "improvviso vero, non terminazione controllata. Nessuna scorciatoia sul lock: "
+                                     "recovery affidato al TTL naturale della job lease).",
             "status": test_status,
             "original_leader": killed_leader_name,
             "recovered_by": completed_by if (job_completed and not completed_by_killed_leader) else "None",

@@ -15,6 +15,7 @@ from src.testing.scenarios.orchestrator_fault import OrchestratorFailoverScenari
 from src.testing.scenarios.fault_inf import InferenceWorkerFaultScenario
 from src.testing.scenarios.orchestrator_fault_inf import InferenceOrchestratorFaultScenario
 from src.testing.scenarios.orchestrator_election_concurrency import OrchestratorElectionConcurrencyScenario
+from src.testing.scenarios.orchestrator_asg_replacement import OrchestratorAsgReplacementScenario
 
 
 CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), "test_config.json")
@@ -147,7 +148,8 @@ class TestEngine:
             print("7. Failover dell'Orchestratore (inferenza)")
             print("8. Elezione del Leader sotto Concorrenza (Safety)")
             print("9. Genera Grafici")
-            valid_options = ["1", "2", "3", "4","5", "6", "7", "8", "9", "all"]
+            print("10. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)")
+            valid_options = ["1", "2", "3", "4","5", "6", "7", "8", "9", "10", "all"]
             # Bypass non-interattivo: se la variabile d'ambiente SCENARIO è
             # impostata (usato da run_test_engine_ecs.sh / task ECS one-off
             # senza terminale collegato all'avvio), la usiamo al posto del
@@ -159,7 +161,7 @@ class TestEngine:
                 print(f"Scelta (da variabile d'ambiente SCENARIO): {config_mode}")
             else:
                 while True:
-                    user_choice = input("Scelta (1-9, o 'all' per eseguire tutti): ").strip().lower()
+                    user_choice = input("Scelta (1-10, o 'all' per eseguire tutti): ").strip().lower()
                     if user_choice in valid_options:
                         config_mode = user_choice
                         break
@@ -194,6 +196,9 @@ class TestEngine:
                 from src.testing.plot_generator import PlotGenerator
                 plotter = PlotGenerator()
                 plotter.generate_all_plots()
+            elif config_mode == "10":
+                asg_replacement_scenario = OrchestratorAsgReplacementScenario(self.config, self.orchestrator)
+                self.global_reports["orchestrator_asg_replacement"] = asg_replacement_scenario.run()
             if config_mode not in ("all", "9"):
                 self._print_final_summary()
         finally:
@@ -237,6 +242,11 @@ class TestEngine:
         #Scenario 9 (Elezione del Leader sotto Concorrenza - Safety)
         election_scenario = OrchestratorElectionConcurrencyScenario(self.config, self.orchestrator)
         self.global_reports["orchestrator_election_concurrency"] = election_scenario.run()
+
+        #Scenario 10 (Sostituzione ASG dell'Orchestratore - infrastruttura, solo AWS:
+        # SKIPPED immediato su locale/Docker, nessun rallentamento per quei run)
+        asg_replacement_scenario = OrchestratorAsgReplacementScenario(self.config, self.orchestrator)
+        self.global_reports["orchestrator_asg_replacement"] = asg_replacement_scenario.run()
 
         self._print_final_summary()
 

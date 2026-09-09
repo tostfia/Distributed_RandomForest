@@ -56,7 +56,7 @@
   },
 
   "orchestrator_failover": {
-    "_NOTE": "Scenario 6 - failover dell'orchestratore durante l'addestramento. Su AWS il leader viene fermato davvero con ecs:StopTask e il recupero è affidato ai TTL naturali dei lock (leadership 180s, job lease 300s): max_monitor_timeout_seconds deve coprirli entrambi nel caso peggiore.",
+    "_NOTE": "Scenario 6 - failover dell'orchestratore durante l'addestramento. Su AWS il leader (una delle 2 istanze EC2 dell'Auto Scaling Group 'orchestrator-asg') viene fermato davvero con un 'docker kill' via SSM Run Command (SIGKILL diretto, nessuna finestra di grazia: crash vero, non terminazione controllata) e il recupero è affidato ai TTL naturali dei lock (leadership 180s, job lease 300s): max_monitor_timeout_seconds deve coprirli entrambi nel caso peggiore.",
     "max_wait_for_training_start_seconds": 400,
     "failover_detection_margin_seconds": 90,
     "max_monitor_timeout_seconds": 790
@@ -79,15 +79,21 @@
     "lock_ttl_seconds": 5
   },
 
+  "orchestrator_asg_replacement": {
+    "_NOTE": "Scenario 10 - sostituzione REALE, a livello infrastruttura, di un'istanza EC2 dell'orchestrator terminata (ec2:TerminateInstances, non un docker kill), verificata contro l'Auto Scaling Group 'orchestrator-asg'. Applicabile SOLO su environment='aws' (nessun equivalente locale/Docker per un ASG): sugli altri environment lo scenario si dichiara SKIPPED senza eseguire nulla. Complementare allo scenario 6/7 (failover applicativo su lock/lease): qui si verifica il ripristino della capacità, non la continuità del job.",
+    "max_wait_for_replacement_seconds": 420,
+    "check_interval_seconds": 10
+  },
+
   "aws": {
-    "_NOTE": "Sezione letta dagli scenari per individuare cluster, region e nomi dei service ECS. Le credenziali AWS restano SOLO in ~/.aws/credentials e nel ruolo IAM dei task, MAI qui.",
+    "_NOTE": "Sezione letta dagli scenari per individuare cluster/region/nomi dei service ECS dei WORKER (rimasti su Fargate) e la region per l'orchestrator. L'orchestrator NON è più un service ECS (vedi orchestrator_ec2.tf): gira su istanze EC2 gestite dall'Auto Scaling Group 'orchestrator-asg', risolte per tag (Project=rf-distributed) invece che per nome di service — 'orchestrator_service_name' è stato quindi rimosso da qui, non più letto da nessuno scenario. Le credenziali AWS restano SOLO in ~/.aws/credentials e nel ruolo IAM dei task/istanze, MAI qui.",
     "ecs_cluster_name": "forest-cluster",
     "region": "us-east-1",
-    "orchestrator_service_name": "orchestrator-service",
+    "orchestrator_asg_name": "orchestrator-asg",
     "worker_service_name_centralized": "worker-service",
     "worker_service_name_federated_prefix": "worker-service-",
 
-    "_NOTE_timeouts": "Su AWS l'ETL/RPC reale (S3 più rete tra task Fargate) e il tempo di ecs.stop_task() sono più lenti del kill istantaneo locale/Docker. Questi override vengono applicati AUTOMATICAMENTE quando environment == 'aws' (vedi _merge_aws_overrides nei file degli scenari di guasto): non vanno più copiati a mano sopra i valori locali.",
+    "_NOTE_timeouts": "Su AWS l'ETL/RPC reale (S3 più rete tra worker Fargate/leader EC2) e il tempo del comando SSM (docker kill sull'istanza EC2 dell'orchestrator) sono più lenti del kill istantaneo locale/Docker. Questi override vengono applicati AUTOMATICAMENTE quando environment == 'aws' (vedi _merge_aws_overrides nei file degli scenari di guasto): non vanno più copiati a mano sopra i valori locali.",
     "suggested_overrides": {
       "fault_tolerance": {
         "kill_worker_after_seconds": 45
