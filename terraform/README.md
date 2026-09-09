@@ -6,7 +6,7 @@ buildando e pushando anche l'immagine Docker dell'applicazione. Pensato per
 essere eseguito con un **singolo `terraform apply`** in un account
 **AWS Academy Learner Lab**.
 
-> ⚠️ Un Learner Lab impone alcune restrizioni particolari (SCP) che richiedono
+> Un Learner Lab impone alcune restrizioni particolari (SCP) che richiedono
 > pochi passaggi manuali una tantum prima del primo deploy. Sono descritti
 > nella sezione [Setup manuale richiesto](#3-setup-manuale-richiesto-solo-learner-lab)
 > — **non saltarla**, altrimenti il primo `terraform apply` fallisce.
@@ -76,6 +76,14 @@ nella Console, o con `aws sts get-caller-identity --query Account --output text`
 Il nome deve corrispondere **esattamente** a quello atteso da Terraform:
 `rf-distributed-datasets-<ACCOUNT_ID>-us-east-1`.
 
+> ⚠️ Questo bucket è creato **fuori** da Terraform: se l'account Lab viene
+> resettato o ricreato (Start/End Lab, non un semplice refresh delle
+> credenziali), il bucket sparisce insieme a tutto il resto e va ricreato da
+> capo con lo stesso comando prima del prossimo `apply` — `terraform plan`
+> non lo segnala come mancante (lo referenzia come risorsa già esistente),
+> quindi se te lo dimentichi il fallimento si presenta più avanti, al primo
+> salvataggio di un dataset, non durante l'apply stesso.
+
 ### 3.2 Log group CloudWatch per ECS
 
 I task definition di orchestrator e worker scrivono i log su CloudWatch
@@ -130,8 +138,19 @@ e avviare un test.
 
 Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 
+> ⚠️ **Prima di lanciare qualunque script, aggiorna `API_GATEWAY_URL` nel
+> `.env`** con il valore mostrato nell'output `next_steps` dell'apply appena
+> fatto. Questo endpoint **cambia a ogni ricreazione dello stack** (nuovo
+> apply dopo un `destroy`, o dopo un reset dell'account Lab): se lasci il
+> valore vecchio, il client non fallisce in modo esplicito all'avvio — parla
+> semplicemente con un endpoint API Gateway che non esiste più (o che
+> appartiene a un deploy precedente), quindi il sintomo è una richiesta che
+> non arriva mai a destinazione, non un errore chiaro. Vale anche per il
+> bucket S3 e la region, se sono cambiati.
+
 ```bash
-# aggiorna il tuo .env con i valori mostrati in output (bucket S3, regione, ecc.)
+# aggiorna il tuo .env con i valori mostrati in output (bucket S3, regione,
+# e soprattutto API_GATEWAY_URL — vedi avviso sopra)
 ./run_aws.sh                          # avvia il client contro l'infrastruttura
 ./script_aws/run_test_engine_ecs.sh   # oppure: sessione di test interattiva
 ```
