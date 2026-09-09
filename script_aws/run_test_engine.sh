@@ -81,7 +81,7 @@ if [[ "$TRAINING_MODE" != "centralized" && "$TRAINING_MODE" != "federated" ]]; t
   exit 1
 fi
 
-VALID_SCENARIOS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "all")
+VALID_SCENARIOS=("1" "2" "3" "4" "5" "6" "7" "8" "9" "10" "all")
 SCENARIO_CHOICE="$1"
 
 is_valid_scenario() {
@@ -103,8 +103,9 @@ if [ -z "$SCENARIO_CHOICE" ]; then
   echo "7. Failover dell'Orchestratore (inferenza)"
   echo "8. Elezione del Leader sotto Concorrenza (Safety)"
   echo "9. Genera Grafici"
+  echo "10. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)"
   while true; do
-    read -p "Scelta (1-9, o 'all' per eseguire tutti): " SCENARIO_CHOICE
+    read -p "Scelta (1-10, o 'all' per eseguire tutti): " SCENARIO_CHOICE
     SCENARIO_CHOICE="$(echo "$SCENARIO_CHOICE" | tr '[:upper:]' '[:lower:]' | xargs)"
     is_valid_scenario "$SCENARIO_CHOICE" && break
     echo "[ERRORE] Opzione non valida. Riprova."
@@ -162,8 +163,9 @@ ORCH_RUNNING=$(aws ec2 describe-instances --region "$REGION" \
   --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null || echo "")
 ORCH_COUNT=$(echo "$ORCH_RUNNING" | wc -w)
 if [ "$ORCH_COUNT" -eq 0 ]; then
-  echo "    [ATTENZIONE] Nessuna istanza EC2 dell'orchestrator RUNNING. Gli scenari 6/7 (failover)"
-  echo "                 falliranno; gli altri scenari non ne hanno bisogno (orchestratore in-process)."
+  echo "    [ATTENZIONE] Nessuna istanza EC2 dell'orchestrator RUNNING. Gli scenari 6/7/10"
+  echo "                 (failover/sostituzione ASG) falliranno; gli altri scenari non ne"
+  echo "                 hanno bisogno (orchestratore in-process)."
 else
   echo "    Istanze EC2 orchestrator RUNNING: $ORCH_COUNT ($ORCH_RUNNING)"
 fi
