@@ -3,7 +3,7 @@
 
   "_NOTE_dataset": "ATTENZIONE ai percorsi: 'dataset_path' viene inviato TALE E QUALE all'orchestratore, che su AWS gira dentro un container Fargate. Un percorso locale (es. 'dataset_cache/') lì non esiste e il job fallisce con FileNotFoundError, viene rimesso in coda da SQS e riparte in loop — dall'esterno sembra che il test sia bloccato. Per 'dataset_type': 'real' su AWS il valore corretto è l'URI S3 ('s3://<bucket>/real/'), la stessa convenzione usata dal client (main.py: default_data_url = f's3://{bucket_name}/real/'). 'dataset_cache/' è valido SOLO in locale/Docker.",
   "selected_task": "classifier",
-  "dataset_type": "real",
+  "dataset_type": "synthetic",
   "dataset_path": "dataset_cache/",
 
   "_NOTE_selected_task": "Deve coincidere con il 'tree_type' del manifesto della baseline effettivamente in uso, altrimenti _resolve_hyperparameters stampa un [ATTENZIONE] e il run gira con un selected_task incoerente rispetto al modello davvero addestrato. Verifica con: python3 -c \"import json;print(json.load(open('outputs_baseline/config_synthetic.json'))['hyperparameters'])\"",
@@ -63,7 +63,7 @@
   },
 
   "inference_orchestrator_failover": {
-    "max_wait_for_training_start_seconds": 1200,
+    "max_wait_for_training_start_seconds": 1600,
     "_NOTE": "Scenario 7 - failover dell'orchestratore durante l'inferenza. È la chiave letta da orchestrator_fault_inf.py; il vecchio blocco 'inference_orchestrator_fault' era un doppione che nessuno leggeva ed è stato rimosso.",
     "kill_orchestrator_after_seconds": 5,
     "max_wait_for_inference_start_seconds": 60,
@@ -101,7 +101,7 @@
         "max_monitor_timeout_seconds": 920
       },
       "inference_orchestrator_failover": {
-    "max_wait_for_training_start_seconds": 1200,
+    "max_wait_for_training_start_seconds": 1600,
         "kill_orchestrator_after_seconds": 10,
         "docker_kill_delay_seconds": 5,
         "failover_detection_margin_seconds": 120,

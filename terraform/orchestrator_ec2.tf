@@ -115,40 +115,141 @@ locals {
 # e /ecs/lab-worker (vedi README.md, punto 3.2):
 #   aws logs create-log-group --log-group-name "/ec2/lab-orchestrator" --region us-east-1
 
-resource "aws_instance" "orchestrator" {
-  count = var.orchestrator_desired_count
+# =============================================================================
+# FAULT TOLERANCE: da 'count' di aws_instance a Launch Template + Auto Scaling
+# Group a capacità fissa (min=max=desired=2).
+#
+# PERCHÉ: con due sole istanze in coppia attivo/standby, un singolo guasto è
+# già coperto dal lock DynamoDB applicativo (vedi BaseOrchestrator._try_
+# acquire_leadership), ma finché l'istanza caduta non torna disponibile il
+# sistema resta a UN guasto di distanza dal fermo totale. L'ASG minimizza
+# questa finestra di esposizione sostituendo automaticamente l'istanza persa,
+# per qualunque motivo (crash OS, terminazione manuale, ecc. — non solo
+# guasti hardware).
+#
+# PERCHÉ È SICURO FARLO SENZA TOCCARE IL CODICE APPLICATIVO (verificato):
+#   1. Lo user-data (sopra) deriva hostname/IP dai metadata EC2 ad OGNI boot,
+#      non ha nulla di hardcoded sull'istanza precedente: una nuova istanza
+#      con un nuovo IP si auto-registra correttamente da sola.
+#   2. BaseOrchestrator._get_lock_key() usa una chiave FISSA
+#      ("global_orchestrator_leader_lock", tabella OrchestratorLocks), non
+#      legata a IP/hostname/instance ID — il lock è agnostico rispetto a
+#      quale istanza fisica lo detiene.
+#   3. Su terminazione "pulita" (quella che l'ASG usa in scale-in/replace),
+#      main.py intercetta SIGTERM, deregistra l'orchestratore e rilascia la
+#      leadership nel finally di BaseOrchestrator.start() — nessuna entry
+#      fantasma in orchestrators_registry nel caso comune.
+#
+# COSA COPRE OGNI LIVELLO (i tre livelli sono complementari, non ridondanti):
+#   - Crash del processo/container -> 'docker run --restart unless-stopped'
+#     (già presente nello user-data sopra), la EC2 resta viva.
+#   - Guasto hardware/hypervisor (system status check) -> EC2 Auto Recovery,
+#     ABILITATO DI DEFAULT su istanze che lo supportano dal 2023 (verificato
+#     empiricamente: 'MaintenanceOptions.AutoRecovery' risulta "default" su
+#     un'istanza appena lanciata con questo stesso Launch Template). Nessuna
+#     configurazione esplicita necessaria: stessa istanza, stesso ID/IP/EBS.
+#   - Istanza stoppata/terminata per qualunque altro motivo -> l'ASG la
+#     sostituisce con una nuova (IP diverso, gestito correttamente per i
+#     punti 1-3 sopra).
+#
+# PERMESSI VERIFICATI EMPIRICAMENTE SU LabRole (Learner Lab, nessun accesso
+# IAM separato): ec2:CreateLaunchTemplate con IamInstanceProfile,
+# autoscaling:CreateAutoScalingGroup/DeleteAutoScalingGroup. Il
+# service-linked role 'AWSServiceRoleForAutoScaling' risulta già presente
+# nell'account (visto in describe-auto-scaling-groups durante il test).
+# =============================================================================
 
-  ami                    = var.orchestrator_ec2_ami
-  instance_type          = var.orchestrator_ec2_instance_type
-  subnet_id              = data.aws_subnets.orchestrator_capable.ids[count.index % length(data.aws_subnets.orchestrator_capable.ids)]
+resource "aws_launch_template" "orchestrator" {
+  name_prefix   = "orchestrator-lt-"
+  image_id      = var.orchestrator_ec2_ami
+  instance_type = var.orchestrator_ec2_instance_type
+
+  iam_instance_profile {
+    name = "LabInstanceProfile"
+  }
+
   vpc_security_group_ids = [aws_security_group.rf_distributed.id]
-  iam_instance_profile   = "LabInstanceProfile"
-  associate_public_ip_address = true
 
-  user_data = local.orchestrator_user_data
-  # Senza questo, Terraform aggiorna solo l'attributo 'user_data' nello
-  # state ma NON ricrea l'istanza già esistente (lo user_data gira solo al
-  # primo boot) — esattamente il motivo per cui il bug dell'hostname
-  # (fix di IMDSv2 qui sopra) non si sarebbe mai applicato alle istanze già
-  # create con un semplice 'terraform apply', servendo invece a terminarle
-  # a mano e farle ricreare da zero. Con true, un cambio allo user_data
-  # forza la sostituzione automaticamente.
-  user_data_replace_on_change = true
+  # Un cambio allo user-data crea una nuova versione del Launch Template;
+  # è l'ASG (instance_refresh, sotto) a decidere se e come propagarlo alle
+  # istanze esistenti — sostituisce il vecchio 'user_data_replace_on_change'
+  # che operava direttamente su aws_instance.
+  user_data = base64encode(local.orchestrator_user_data)
 
-  tags = {
-    Project = var.project_name
-    Role    = "orchestrator-ec2-${count.index + 1}"
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.rf_distributed.id]
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Project = var.project_name
+      Role    = "orchestrator-ec2"
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "orchestrator" {
+  name             = "orchestrator-asg"
+  min_size         = var.orchestrator_desired_count
+  max_size         = var.orchestrator_desired_count
+  desired_capacity = var.orchestrator_desired_count
+
+  vpc_zone_identifier = data.aws_subnets.orchestrator_capable.ids
+
+  launch_template {
+    id      = aws_launch_template.orchestrator.id
+    version = "$Latest"
+  }
+
+  # Nessun ELB/Target Group qui (l'orchestrator riceve lavoro da SQS, non da
+  # un load balancer): l'health check di tipo EC2 marca l'istanza da
+  # sostituire solo quando il suo STATO (non i suoi status check di
+  # sistema/istanza) diventa stopped/stopping/terminated/shutting-down. Per
+  # i guasti di sistema più fini ci pensa comunque l'EC2 Auto Recovery di
+  # default descritto sopra, che mantiene la stessa istanza senza bisogno
+  # dell'intervento dell'ASG.
+  health_check_type = "EC2"
+
+  # Se cambia il Launch Template (es. nuova immagine Docker via un nuovo
+  # apply), l'ASG sostituisce le istanze una alla volta, mantenendo sempre
+  # almeno un'istanza (l'altra) disponibile durante il rollout — equivalente
+  # allo scopo del vecchio 'user_data_replace_on_change', ma senza il
+  # downtime totale che un semplice 'terraform apply' su aws_instance
+  # avrebbe causato per un breve periodo.
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+    }
+  }
+
+  tag {
+    key                 = "Project"
+    value               = var.project_name
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "Role"
+    value               = "orchestrator-ec2"
+    propagate_at_launch = true
   }
 
   depends_on = [null_resource.docker_build_push]
 }
 
-output "orchestrator_ec2_instance_ids" {
-  description = "ID delle istanze EC2 dell'orchestrator (per stop/start manuale, vedi README aggiornato)."
-  value       = aws_instance.orchestrator[*].id
+output "orchestrator_asg_name" {
+  description = "Nome dell'Auto Scaling Group dell'orchestrator (per describe-auto-scaling-groups o console)."
+  value       = aws_autoscaling_group.orchestrator.name
 }
 
-output "orchestrator_ec2_public_ips" {
-  description = "IP pubblici delle istanze EC2 dell'orchestrator, utili per controllo diretto/debug (es. SSM Session Manager, non serve SSH: LabRole include ssm.amazonaws.com)."
-  value       = aws_instance.orchestrator[*].public_ip
+output "orchestrator_ec2_instance_ids_command" {
+  description = "Le istanze sono ora gestite dall'ASG e il loro ID cambia ad ogni sostituzione: usare questo comando per ottenere gli ID correnti invece di un output statico."
+  value       = "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names ${aws_autoscaling_group.orchestrator.name} --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text --region ${var.aws_region}"
 }

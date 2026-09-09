@@ -22,29 +22,7 @@ from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
 from src.shared.utilities.datasplitter import StratifiedDataSplitter
 from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
-# ---------------------------------------------------------------------------
-# IPERPARAMETRI DEL TASK SINTETICO DI REGRESSIONE.
-#
-# PRIMA: una configurazione dichiarata a priori (SYNTHETIC_REGRESSOR_REFERENCE_HP),
-# poi (in una revisione successiva) un tuning OOB dedicato via Optuna. Il
-# tuning è stato rimosso di nuovo: il dataset sintetico qui serve SOLO da
-# stress-test di scalabilità (confronto baseline single-node vs cluster
-# distribuito), non a trovare il modello con l'R² più alto -- non ha senso
-# spendere 60 trial di ricerca per un obiettivo che non è "il modello
-# migliore possibile".
-#
-# ORA: i default di scikit-learn per RandomForestRegressor, con UNA sola
-# eccezione dichiarata (max_features, sotto) più n_estimators (mai un
-# default, va sempre misurato -- vedi sotto REGRESSOR_DEFAULT_HP).
-#
-# NESSUNA feature selection (come prima): su Friedman #1 la separazione
-# segnale/rumore è nota per costruzione dal generatore (5 feature
-# informative fisse, il resto rumore puro -- vedi SyntheticDataLoader).
-#
-# ISOLAMENTO DELL'EFFETTO DI SCALABILITA': stessa idea di sempre -- gli
-# iperparametri restano IDENTICI in ogni esperimento del cluster (1, 3, 5, 7
-# worker), letti dalla copia per-task ("config_synthetic_regressor.json").
-# ---------------------------------------------------------------------------
+
 REGRESSOR_DEFAULT_HP = {
     # Tutti i valori sotto sono i DEFAULT ufficiali di
     # sklearn.ensemble.RandomForestRegressor (scikit-learn 1.6.1) --
@@ -54,22 +32,6 @@ REGRESSOR_DEFAULT_HP = {
     "criterion": "squared_error",
     "bootstrap": True,
     "max_samples": None,  # None = bootstrap sample_size = n_samples (default sklearn)
-    # ECCEZIONE DICHIARATA: il default letterale di sklearn per la
-    # regressione è max_features=1.0 (nessun sottoinsieme di feature ad
-    # ogni split -- equivalente a "bagged trees", nessuna randomizzazione
-    # sulle feature). La stessa User Guide di scikit-learn
-    # (Ensemble methods, sez. 1.11.2.3) lo definisce sì "un buon default
-    # empirico", ma nella frase successiva indica esplicitamente
-    # un'alternativa standard in letteratura: "more randomness can be
-    # achieved by setting smaller values (e.g. 0.3 is a typical default in
-    # the literature)" -- che coincide con la raccomandazione classica di
-    # Breiman per la regressione (m ≈ p/3). Non è quindi un allontanamento
-    # dai default, ma la scelta della seconda alternativa già documentata
-    # dalla stessa fonte. Necessario anche per motivi pratici: con
-    # max_features=1.0 un solo fit di produzione (n_samples~1.000.000,
-    # n_estimators~100) è stato misurato empiricamente in ordine di
-    # 35-40 minuti; con max_features=1/3 scende a ~16 minuti (ancora un
-    # carico di lavoro sostanzioso, in linea con lo scopo di stress-test).
     "max_features": 1 / 3,
 }
 
@@ -350,31 +312,6 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
     best_params = dict(results[0]["params"])
     best_fs, best_train_selected = feature_selection_cache[best_params["max_features"]]
     return best_params, results, best_fs, best_train_selected
-
-# ---------------------------------------------------------------------------
-# n_estimators NON viene più raffinato né scelto interattivamente qui.
-#
-# PRIMA: questo file conteneva una seconda ricerca Optuna
-# (optuna_refine_n_estimators, senza warm_start) seguita da una scelta
-# interattiva a runtime (scegli_n_estimators, con tolleranza di F1) che
-# poteva RISCRIVERE l'n_estimators trovato da optuna_oob_hyperparameter_search
-# -- tre punti diversi, con tre metodi diversi (Optuna categorico, Optuna
-# GridSampler senza warm_start, soglia di tolleranza manuale) che decidevano
-# lo stesso numero.
-#
-# ORA: n_estimators è semplicemente quello scelto da
-# optuna_oob_hyperparameter_search insieme a tutti gli altri iperparametri
-# (stessa combinazione vincente, stessa metrica OOB, nessun ripensamento
-# successivo). La giustificazione empirica del valore -- la curva OOB con
-# warm_start, fedele all'esempio ufficiale scikit-learn "OOB Errors for
-# Random Forests" -- è stata spostata per intero in un modulo indipendente,
-# 'analyze_n_estimators.py', che copre sia il task di classificazione
-# (dataset reale) sia quello di regressione (dataset sintetico): va eseguito
-# SEPARATAMENTE, a valle di un run di questo script, per produrre il
-# grafico/tabella da riportare in relazione. Non scrive né modifica alcun
-# manifesto: è puramente diagnostico, mai in the hot path della baseline.
-# ---------------------------------------------------------------------------
-
 
 def run_baseline():
     # --- CONFIGURAZIONE STILISTICA REPORT ---
