@@ -5,7 +5,6 @@ if [ -f .env ]; then
     ENV_NUM_WORKERS=$(grep -E "^[[:space:]]*NUM_WORKERS[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_TRAINING_MODE=$(grep -E "^[[:space:]]*TRAINING_MODE[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_PARTITION_STRATEGY=$(grep -E "^[[:space:]]*PARTITION_STRATEGY[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
-    ENV_ALPHA=$(grep -E "^[[:space:]]*ALPHA[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DAY_COLUMN=$(grep -E "^[[:space:]]*DAY_COLUMN[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DATASET_TYPE=$(grep -E "^[[:space:]]*DATASET_TYPE[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DATASET_LOCAL_PATH=$(grep -E "^[[:space:]]*DATASET_LOCAL_PATH[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
@@ -62,11 +61,6 @@ if [ "$TRAINING_MODE" = "federated" ]; then
     if [ -n "$ENV_DATASET_LOCAL_PATH" ]; then
         echo "[PROVISIONING] Cartella dataset locale: ${ENV_DATASET_LOCAL_PATH} (esplicito da .env)"
         PROVISION_ARGS+=(--data-folder "$ENV_DATASET_LOCAL_PATH")
-    fi
-    if [ "$RESOLVED_PARTITION_STRATEGY" = "dirichlet" ]; then
-        RESOLVED_ALPHA="${ENV_ALPHA:-0.5}"
-        echo "[PROVISIONING] Alpha: ${RESOLVED_ALPHA} (da ALPHA in .env, default 0.5 se assente)"
-        PROVISION_ARGS+=(--alpha "$RESOLVED_ALPHA")
     fi
     if [ "$RESOLVED_PARTITION_STRATEGY" = "by_day" ] && [ -n "$ENV_DAY_COLUMN" ]; then
         echo "[PROVISIONING] Day column: ${ENV_DAY_COLUMN} (esplicito da .env)"

@@ -111,33 +111,11 @@ export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/src"
 if [ "${TRAINING_MODE:-centralized}" = "federated" ]; then
     echo "[PROVISIONING] TRAINING_MODE=federated rilevato: preparo gli shard federati..."
 
-    # BUG CORRETTO (6/9/2026): questa chiamata non passava MAI la strategia
-    # di partizionamento, quindi usava sempre il default 'iid' -- e senza
-    # '--force', il controllo di presenza degli shard (_shards_already_present)
-    # verifica SOLO che i file esistano, non con QUALE strategia sono stati
-    # generati. Risultato osservato: cambiando strategia (es. iid -> by_day)
-    # senza riprovisionare a mano, lo script trovava gli shard vecchi "già
-    # presenti" e li teneva così com'erano, SENZA alcun avviso -- un intero
-    # training federato eseguito silenziosamente sulla strategia sbagliata.
-    #
-    # Fix: passiamo sempre --force (rigenerazione garantita ad ogni avvio,
-    # mai shard stantii di una strategia precedente) e la strategia esplicita
-    # letta da .env (PARTITION_STRATEGY/ALPHA/DAY_COLUMN, le stesse variabili
-    # già lette in autonomo da provision_local_shards.py se presenti
-    # nell'ambiente -- qui le rendiamo esplicite e le stampiamo, così non
-    # dipendono più da un default silenzioso). Costo: qualche minuto in più
-    # ad ogni avvio (il dataset reale viene riletto/ripartizionato sempre),
-    # accettabile per la correttezza -- l'alternativa (fidarsi della cache)
-    # è esattamente il bug appena descritto.
+  
     RESOLVED_PARTITION_STRATEGY="${PARTITION_STRATEGY:-iid}"
     echo "[PROVISIONING] Strategia di partizionamento: ${RESOLVED_PARTITION_STRATEGY}"" (da PARTITION_STRATEGY in .env, default 'iid' se assente)"
 
     PROVISION_ARGS=(--force --partition-strategy "$RESOLVED_PARTITION_STRATEGY")
-    if [ "$RESOLVED_PARTITION_STRATEGY" = "dirichlet" ]; then
-        RESOLVED_ALPHA="${ALPHA:-0.5}"
-        echo "[PROVISIONING] Alpha: ${RESOLVED_ALPHA} (da ALPHA in .env, default 0.5 se assente)"
-        PROVISION_ARGS+=(--alpha "$RESOLVED_ALPHA")
-    fi
     if [ "$RESOLVED_PARTITION_STRATEGY" = "by_day" ] && [ -n "$DAY_COLUMN" ]; then
         echo "[PROVISIONING] Day column: ${DAY_COLUMN} (esplicito da .env)"
         PROVISION_ARGS+=(--day-column "$DAY_COLUMN")
