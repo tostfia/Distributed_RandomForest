@@ -1,195 +1,179 @@
 data.archive_file.rf_gateway_lambda: Reading...
 data.archive_file.rf_gateway_lambda: Read complete after 0s [id=c536cdf52a06e7ccabfd7caef5a0b2455060fa3f]
-data.aws_vpc.default: Reading...
-data.aws_region.current: Reading...
 data.aws_iam_role.lab_role: Reading...
-aws_ecr_repository.rf_distributed: Refreshing state... [id=rf-distributed]
 aws_ecs_cluster.forest_cluster: Refreshing state... [id=arn:aws:ecs:us-east-1:759804778194:cluster/forest-cluster]
-aws_sqs_queue.federated_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/759804778194/federated_queue.fifo]
+aws_dynamodb_table.job_meta_data: Refreshing state... [id=JobMetadata]
 aws_apigatewayv2_api.mljobs: Refreshing state... [id=1y8cm7b35k]
 aws_dynamodb_table.model_status: Refreshing state... [id=ModelStatus]
-aws_dynamodb_table.job_locks: Refreshing state... [id=JobLocks]
-aws_dynamodb_table.job_meta_data: Refreshing state... [id=JobMetadata]
-data.aws_region.current: Read complete after 0s [id=us-east-1]
-aws_dynamodb_table.orchestrators_registry: Refreshing state... [id=orchestrators_registry]
-aws_dynamodb_table.orchestrator_locks: Refreshing state... [id=OrchestratorLocks]
-data.aws_iam_role.lab_role: Read complete after 1s [id=LabRole]
-data.aws_caller_identity.current: Reading...
-aws_dynamodb_table.workers_registry: Refreshing state... [id=workers_registry]
-data.aws_caller_identity.current: Read complete after 0s [id=759804778194]
-aws_dynamodb_table.worker_tasks: Refreshing state... [id=WorkerTasks]
 aws_sqs_queue.centralized_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/759804778194/centralized_queue.fifo]
+aws_dynamodb_table.orchestrator_locks: Refreshing state... [id=OrchestratorLocks]
+aws_dynamodb_table.orchestrators_registry: Refreshing state... [id=orchestrators_registry]
+aws_dynamodb_table.workers_registry: Refreshing state... [id=workers_registry]
+aws_ecr_repository.rf_distributed: Refreshing state... [id=rf-distributed]
+aws_dynamodb_table.worker_tasks: Refreshing state... [id=WorkerTasks]
+data.aws_iam_role.lab_role: Read complete after 1s [id=LabRole]
+aws_dynamodb_table.job_locks: Refreshing state... [id=JobLocks]
+data.aws_vpc.default: Reading...
+data.aws_region.current: Reading...
+data.aws_region.current: Read complete after 0s [id=us-east-1]
+data.aws_caller_identity.current: Reading...
+data.aws_caller_identity.current: Read complete after 0s [id=759804778194]
+aws_sqs_queue.federated_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/759804778194/federated_queue.fifo]
 aws_apigatewayv2_stage.default: Refreshing state... [id=$default]
 null_resource.docker_build_push: Refreshing state... [id=9061046980226611234]
 aws_lambda_function.rf_gateway: Refreshing state... [id=RFGatewayLambda]
-data.aws_vpc.default: Read complete after 2s [id=vpc-075f8d787d624f0ff]
-data.aws_subnets.public: Reading...
+aws_ecs_task_definition.worker_centralized[0]: Refreshing state... [id=lab-worker-task]
+data.aws_vpc.default: Read complete after 1s [id=vpc-075f8d787d624f0ff]
 data.aws_subnets.orchestrator_capable: Reading...
+data.aws_subnets.public: Reading...
 aws_security_group.rf_distributed: Refreshing state... [id=sg-04a516bcf725686a0]
-data.aws_subnets.public: Read complete after 0s [id=us-east-1]
-data.aws_subnets.orchestrator_capable: Read complete after 0s [id=us-east-1]
-aws_security_group_rule.rpc_self_ingress: Refreshing state... [id=sgrule-808804922]
-aws_security_group_rule.egress_all: Refreshing state... [id=sgrule-295745547]
-aws_launch_template.orchestrator: Refreshing state... [id=lt-003270ad25ad1ac2d]
 aws_lambda_permission.apigw_invoke: Refreshing state... [id=AllowAPIGatewayInvoke]
 aws_apigatewayv2_integration.rf_gateway: Refreshing state... [id=e0bedpc]
-aws_autoscaling_group.orchestrator: Refreshing state... [id=orchestrator-asg]
-aws_apigatewayv2_route.post_centralized: Refreshing state... [id=abi5yhr]
-aws_apigatewayv2_route.get_status: Refreshing state... [id=bszpd6a]
+data.aws_subnets.public: Read complete after 0s [id=us-east-1]
 aws_apigatewayv2_route.get_details: Refreshing state... [id=14flhiu]
 aws_apigatewayv2_route.post_federated: Refreshing state... [id=fbywrwd]
+aws_apigatewayv2_route.post_centralized: Refreshing state... [id=abi5yhr]
+aws_apigatewayv2_route.get_status: Refreshing state... [id=bszpd6a]
+data.aws_subnets.orchestrator_capable: Read complete after 1s [id=us-east-1]
+aws_security_group_rule.rpc_self_ingress: Refreshing state... [id=sgrule-808804922]
+aws_security_group_rule.egress_all: Refreshing state... [id=sgrule-295745547]
+aws_ecs_service.worker_centralized[0]: Refreshing state... [id=arn:aws:ecs:us-east-1:759804778194:service/forest-cluster/worker-service]
+aws_launch_template.orchestrator: Refreshing state... [id=lt-003270ad25ad1ac2d]
+aws_autoscaling_group.orchestrator: Refreshing state... [id=orchestrator-asg]
 
 Terraform used the selected providers to generate the following execution
 plan. Resource actions are indicated with the following symbols:
-  + create
+  ~ update in-place
+-/+ destroy and then create replacement
 
 Terraform will perform the following actions:
 
-  # aws_ecs_service.worker_centralized[0] will be created
-  + resource "aws_ecs_service" "worker_centralized" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = "arn:aws:ecs:us-east-1:759804778194:cluster/forest-cluster"
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 2
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_autoscaling_group.orchestrator will be updated in-place
+  ~ resource "aws_autoscaling_group" "orchestrator" {
+      ~ desired_capacity                 = 0 -> 2
+        id                               = "orchestrator-asg"
+      ~ max_size                         = 0 -> 2
+      ~ min_size                         = 0 -> 2
+        name                             = "orchestrator-asg"
+        # (28 unchanged attributes hidden)
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = [
-              + "sg-04a516bcf725686a0",
-            ]
-          + subnets          = [
-              + "subnet-03008d74bd5cec001",
-              + "subnet-037d38de26c10077a",
-              + "subnet-04b51a2067c71e850",
-              + "subnet-08b04980f103205a5",
-              + "subnet-08e2483161b4274f4",
-              + "subnet-0e92198795bf91a25",
-            ]
-        }
+        # (6 unchanged blocks hidden)
     }
 
-  # aws_ecs_task_definition.worker_centralized[0] will be created
-  + resource "aws_ecs_task_definition" "worker_centralized" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = jsonencode(
-            [
-              + {
-                  + command          = [
-                      + "sh",
-                      + "-c",
-                      + "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 centralized aws",
+  # aws_ecs_service.worker_centralized[0] will be updated in-place
+  ~ resource "aws_ecs_service" "worker_centralized" {
+      ~ desired_count                      = 0 -> 10
+        id                                 = "arn:aws:ecs:us-east-1:759804778194:service/forest-cluster/worker-service"
+        name                               = "worker-service"
+        tags                               = {
+            "Project" = "rf-distributed"
+        }
+      ~ task_definition                    = "arn:aws:ecs:us-east-1:759804778194:task-definition/lab-worker-task:2" -> (known after apply)
+        # (16 unchanged attributes hidden)
+
+        # (3 unchanged blocks hidden)
+    }
+
+  # aws_ecs_task_definition.worker_centralized[0] must be replaced
+-/+ resource "aws_ecs_task_definition" "worker_centralized" {
+      ~ arn                      = "arn:aws:ecs:us-east-1:759804778194:task-definition/lab-worker-task:2" -> (known after apply)
+      ~ arn_without_revision     = "arn:aws:ecs:us-east-1:759804778194:task-definition/lab-worker-task" -> (known after apply)
+      ~ container_definitions    = jsonencode(
+          ~ [
+              ~ {
+                  ~ environment      = [
+                        # (3 unchanged elements hidden)
+                        {
+                            name  = "ENV_MODE"
+                            value = "aws"
+                        },
+                      ~ {
+                            name  = "NUM_WORKERS"
+                          ~ value = "2" -> "10"
+                        },
+                        {
+                            name  = "PYTHONDONTWRITEBYTECODE"
+                            value = "1"
+                        },
+                        # (7 unchanged elements hidden)
                     ]
-                  + environment      = [
-                      + {
-                          + name  = "AWS_DEFAULT_REGION"
-                          + value = "us-east-1"
-                        },
-                      + {
-                          + name  = "DATASETS_BUCKET_NAME"
-                          + value = "rf-distributed-datasets-759804778194-us-east-1"
-                        },
-                      + {
-                          + name  = "EC2_ID"
-                          + value = "Fargate"
-                        },
-                      + {
-                          + name  = "ENV_MODE"
-                          + value = "aws"
-                        },
-                      + {
-                          + name  = "NUM_WORKERS"
-                          + value = "2"
-                        },
-                      + {
-                          + name  = "PYTHONDONTWRITEBYTECODE"
-                          + value = "1"
-                        },
-                      + {
-                          + name  = "PYTHONUNBUFFERED"
-                          + value = "1"
-                        },
-                      + {
-                          + name  = "RPC_PORT"
-                          + value = "18861"
-                        },
-                      + {
-                          + name  = "RUNNING_IN_DOCKER"
-                          + value = "true"
-                        },
-                      + {
-                          + name  = "SYS_ENV"
-                          + value = "aws"
-                        },
-                      + {
-                          + name  = "SYS_MODE"
-                          + value = "centralized"
-                        },
-                      + {
-                          + name  = "TRAINING_MODE"
-                          + value = "centralized"
-                        },
-                      + {
-                          + name  = "WORKER_HEARTBEAT_TIMEOUT"
-                          + value = "120"
-                        },
-                    ]
-                  + essential        = true
-                  + image            = "759804778194.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
-                  + logConfiguration = {
-                      + logDriver = "awslogs"
-                      + options   = {
-                          + awslogs-group         = "/ecs/lab-worker"
-                          + awslogs-region        = "us-east-1"
-                          + awslogs-stream-prefix = "worker"
-                        }
-                    }
-                  + name             = "worker"
+                  - mountPoints      = []
+                    name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                    # (4 unchanged attributes hidden)
                 },
-            ]
+            ] # forces replacement
         )
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::759804778194:role/LabRole"
-      + family                   = "lab-worker-task"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
+      ~ enable_fault_injection   = false -> (known after apply)
+      ~ id                       = "lab-worker-task" -> (known after apply)
+      ~ revision                 = 2 -> (known after apply)
+        tags                     = {
+            "Project" = "rf-distributed"
         }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::759804778194:role/LabRole"
-      + track_latest             = false
+        # (12 unchanged attributes hidden)
     }
 
-Plan: 2 to add, 0 to change, 0 to destroy.
+  # aws_launch_template.orchestrator will be updated in-place
+  ~ resource "aws_launch_template" "orchestrator" {
+        id                                   = "lt-003270ad25ad1ac2d"
+      ~ latest_version                       = 2 -> (known after apply)
+        name                                 = "orchestrator-lt-20260910135809819500000001"
+        tags                                 = {}
+      ~ user_data                            = "IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSBpbnN0YWxsIC15IGRvY2tlcgpzeXN0ZW1jdGwgZW5hYmxlIGRvY2tlcgpzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCgphd3MgZWNyIGdldC1sb2dpbi1wYXNzd29yZCAtLXJlZ2lvbiB1cy1lYXN0LTEgfCBcCiAgZG9ja2VyIGxvZ2luIC0tdXNlcm5hbWUgQVdTIC0tcGFzc3dvcmQtc3RkaW4gNzU5ODA0Nzc4MTk0LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQKClRPS0VOPSQoY3VybCAtcyAtWCBQVVQgImh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L2FwaS90b2tlbiIgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbi10dGwtc2Vjb25kczogMjE2MDAiKQpJTlNUQU5DRV9JRD0kKGN1cmwgLXMgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbjogJFRPS0VOIiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvaW5zdGFuY2UtaWQpClBSSVZBVEVfSVA9JChjdXJsIC1zIC1IICJYLWF3cy1lYzItbWV0YWRhdGEtdG9rZW46ICRUT0tFTiIgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWlwdjQpCkNPTlRBSU5FUl9IT1NUTkFNRT0iaXAtJChlY2hvICRQUklWQVRFX0lQIHwgdHIgJy4nICctJykuZWMyLmludGVybmFsIgoKZG9ja2VyIHJ1biAtZCBcCiAgLS1uYW1lIG9yY2hlc3RyYXRvciBcCiAgLS1yZXN0YXJ0IHVubGVzcy1zdG9wcGVkIFwKICAtLWhvc3RuYW1lICIkQ09OVEFJTkVSX0hPU1ROQU1FIiBcCiAgLS1sb2ctZHJpdmVyIGF3c2xvZ3MgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLXJlZ2lvbj11cy1lYXN0LTEgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLWdyb3VwPS9lYzIvbGFiLW9yY2hlc3RyYXRvciBcCiAgLS1sb2ctb3B0IGF3c2xvZ3MtY3JlYXRlLWdyb3VwPWZhbHNlIFwKICAtLWxvZy1vcHQgYXdzbG9ncy1zdHJlYW09b3JjaGVzdHJhdG9yLSRJTlNUQU5DRV9JRCBcCiAgLWUgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBcCiAgLWUgUFlUSE9OVU5CVUZGRVJFRD0xIFwKICAtZSBOVU1fV09SS0VSUz0yIFwKICAtZSBFTlZfTU9ERT1hd3MgXAogIC1lIFRSQUlOSU5HX01PREU9Y2VudHJhbGl6ZWQgXAogIC1lIEVDMl9JRD1FQzJPcmNoZXN0cmF0b3IgXAogIC1lIE9SQ0hFU1RSQVRPUl9JTkRFWD0kSU5TVEFOQ0VfSUQgXAogIC1lIFJVTk5JTkdfSU5fRE9DS0VSPXRydWUgXAogIC1lIEFXU19ERUZBVUxUX1JFR0lPTj11cy1lYXN0LTEgXAogIC1lIERBVEFTRVRTX0JVQ0tFVF9OQU1FPXJmLWRpc3RyaWJ1dGVkLWRhdGFzZXRzLTc1OTgwNDc3ODE5NC11cy1lYXN0LTEgXAogIC1lIFdPUktFUl9IRUFSVEJFQVRfVElNRU9VVD0xMjAgXAogIC1lIFJQQ19TWU5DX1RJTUVPVVRfU0VDT05EUz0xODAwcyBcCiAgLWUgUlBDX0lORkVSRU5DRV9TWU5DX1RJTUVPVVRfU0VDT05EUz05MDBzIFwKICA3NTk4MDQ3NzgxOTQuZGtyLmVjci51cy1lYXN0LTEuYW1hem9uYXdzLmNvbS9yZi1kaXN0cmlidXRlZDpsYXRlc3QgXAogIHB5dGhvbiAtbSBzcmMub3JjaGVzdHJhdG9yLm1haW4K" -> "IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSBpbnN0YWxsIC15IGRvY2tlcgpzeXN0ZW1jdGwgZW5hYmxlIGRvY2tlcgpzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCgphd3MgZWNyIGdldC1sb2dpbi1wYXNzd29yZCAtLXJlZ2lvbiB1cy1lYXN0LTEgfCBcCiAgZG9ja2VyIGxvZ2luIC0tdXNlcm5hbWUgQVdTIC0tcGFzc3dvcmQtc3RkaW4gNzU5ODA0Nzc4MTk0LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQKClRPS0VOPSQoY3VybCAtcyAtWCBQVVQgImh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L2FwaS90b2tlbiIgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbi10dGwtc2Vjb25kczogMjE2MDAiKQpJTlNUQU5DRV9JRD0kKGN1cmwgLXMgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbjogJFRPS0VOIiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvaW5zdGFuY2UtaWQpClBSSVZBVEVfSVA9JChjdXJsIC1zIC1IICJYLWF3cy1lYzItbWV0YWRhdGEtdG9rZW46ICRUT0tFTiIgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWlwdjQpCkNPTlRBSU5FUl9IT1NUTkFNRT0iaXAtJChlY2hvICRQUklWQVRFX0lQIHwgdHIgJy4nICctJykuZWMyLmludGVybmFsIgoKZG9ja2VyIHJ1biAtZCBcCiAgLS1uYW1lIG9yY2hlc3RyYXRvciBcCiAgLS1yZXN0YXJ0IHVubGVzcy1zdG9wcGVkIFwKICAtLWhvc3RuYW1lICIkQ09OVEFJTkVSX0hPU1ROQU1FIiBcCiAgLS1sb2ctZHJpdmVyIGF3c2xvZ3MgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLXJlZ2lvbj11cy1lYXN0LTEgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLWdyb3VwPS9lYzIvbGFiLW9yY2hlc3RyYXRvciBcCiAgLS1sb2ctb3B0IGF3c2xvZ3MtY3JlYXRlLWdyb3VwPWZhbHNlIFwKICAtLWxvZy1vcHQgYXdzbG9ncy1zdHJlYW09b3JjaGVzdHJhdG9yLSRJTlNUQU5DRV9JRCBcCiAgLWUgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBcCiAgLWUgUFlUSE9OVU5CVUZGRVJFRD0xIFwKICAtZSBOVU1fV09SS0VSUz0xMCBcCiAgLWUgRU5WX01PREU9YXdzIFwKICAtZSBUUkFJTklOR19NT0RFPWNlbnRyYWxpemVkIFwKICAtZSBFQzJfSUQ9RUMyT3JjaGVzdHJhdG9yIFwKICAtZSBPUkNIRVNUUkFUT1JfSU5ERVg9JElOU1RBTkNFX0lEIFwKICAtZSBSVU5OSU5HX0lOX0RPQ0tFUj10cnVlIFwKICAtZSBBV1NfREVGQVVMVF9SRUdJT049dXMtZWFzdC0xIFwKICAtZSBEQVRBU0VUU19CVUNLRVRfTkFNRT1yZi1kaXN0cmlidXRlZC1kYXRhc2V0cy03NTk4MDQ3NzgxOTQtdXMtZWFzdC0xIFwKICAtZSBXT1JLRVJfSEVBUlRCRUFUX1RJTUVPVVQ9MTIwIFwKICAtZSBSUENfU1lOQ19USU1FT1VUX1NFQ09ORFM9MTgwMHMgXAogIC1lIFJQQ19JTkZFUkVOQ0VfU1lOQ19USU1FT1VUX1NFQ09ORFM9OTAwcyBcCiAgNzU5ODA0Nzc4MTk0LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQ6bGF0ZXN0IFwKICBweXRob24gLW0gc3JjLm9yY2hlc3RyYXRvci5tYWluCg=="
+        # (16 unchanged attributes hidden)
+
+        # (3 unchanged blocks hidden)
+    }
+
+  # null_resource.docker_build_push must be replaced
+-/+ resource "null_resource" "docker_build_push" {
+      ~ id       = "9061046980226611234" -> (known after apply)
+      ~ triggers = { # forces replacement
+          ~ "force_rebuild"   = "static" -> (known after apply)
+          ~ "src_hash"        = "02edec48ef06efe56f24094e1a3ce339ee871f20" -> "5e56ce2b387c25dec07e7dba06f26c5a11238cc1"
+            # (1 unchanged element hidden)
+        }
+    }
+
+Plan: 2 to add, 3 to change, 2 to destroy.
+
+Changes to Outputs:
+  ~ next_steps                            = <<-EOT
+        Infrastruttura creata. Prossimi passi:
+        
+        1. Aggiorna il tuo .env locale con:
+             SYS_ENV=aws
+             SYS_MODE=centralized
+             DATASETS_BUCKET_NAME=rf-distributed-datasets-759804778194-us-east-1
+             AWS_DEFAULT_REGION=us-east-1
+      -      NUM_WORKERS=2
+      +      NUM_WORKERS=10
+             API_GATEWAY_URL=https://1y8cm7b35k.execute-api.us-east-1.amazonaws.com
+        
+        2. Se training_mode=federated e non l'hai già fatto, esegui il provisioning
+           degli shard PRIMA di sottomettere un job:
+      -      python -m scripts.provision_federated_shards --num-workers 2
+      +      python -m scripts.provision_federated_shards --num-workers 10
+        
+        3. Avvia il client contro l'infrastruttura:
+             ./run_aws.sh
+        
+        4. Per fermare tutto senza distruggere l'infrastruttura:
+             - Orchestrator (EC2, non più un Service ECS): scala a 0 via Terraform
+               (imposta orchestrator_desired_count = 0 in terraform.tfvars e
+               rilancia 'terraform apply' — le istanze vengono distrutte, non solo
+               messe in pausa), oppure a mano con:
+                 aws ec2 stop-instances --instance-ids <id1> <id2> --region us-east-1
+               (vedi output 'orchestrator_ec2_instance_ids' per gli ID)
+             - Worker (ancora su ECS Fargate):
+                 aws ecs update-service --cluster forest-cluster --service worker-service --desired-count 0 --region us-east-1
+                 (ripeti per ciascun worker-service in modalità federated)
+        
+        5. Per distruggere TUTTA l'infrastruttura creata da Terraform:
+             terraform destroy
+    EOT
 
 ─────────────────────────────────────────────────────────────────────────────
 

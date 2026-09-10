@@ -2,9 +2,9 @@
   "_NOTE_ruolo_di_questo_file": "Configurazione del BANCO DI PROVA: cosa testare, con quali soglie e contro quale infrastruttura. NON descrive più il modello: iperparametri e ricetta del dataset vivono nel manifesto della baseline (outputs_baseline/config_synthetic.json o config_real.json), che è la fonte di verità condivisa fra run_baseline(), il client e il cluster. Vedi BaseTestScenario._resolve_hyperparameters.",
 
   "_NOTE_dataset": "ATTENZIONE ai percorsi: 'dataset_path' viene inviato TALE E QUALE all'orchestratore, che su AWS gira dentro un container Fargate. Un percorso locale (es. 'dataset_cache/') lì non esiste e il job fallisce con FileNotFoundError, viene rimesso in coda da SQS e riparte in loop — dall'esterno sembra che il test sia bloccato. Per 'dataset_type': 'real' su AWS il valore corretto è l'URI S3 ('s3://<bucket>/real/'), la stessa convenzione usata dal client (main.py: default_data_url = f's3://{bucket_name}/real/'). 'dataset_cache/' è valido SOLO in locale/Docker.",
-  "selected_task": "regressor",
+  "selected_task": "classifier",
   "dataset_type": "synthetic",
-  "dataset_path": "synthetic/",
+  "dataset_path": "dataset_cache/",
 
   "_NOTE_selected_task": "Deve coincidere con il 'tree_type' del manifesto della baseline effettivamente in uso, altrimenti _resolve_hyperparameters stampa un [ATTENZIONE] e il run gira con un selected_task incoerente rispetto al modello davvero addestrato. Verifica con: python3 -c \"import json;print(json.load(open('outputs_baseline/config_synthetic.json'))['hyperparameters'])\"",
 
@@ -27,7 +27,7 @@
     "min_samples_split": 2,
     "criterion": "squared_error",
     "bootstrap": true,
-    "max_samples": 0.3,
+    "max_samples": null,
     "max_features": 0.3333333333333333,
     "n_estimators": 100,
     "tree_type": "regressor",
@@ -36,7 +36,7 @@
   },
 
   "scalability_test": {
-    "worker_counts_to_test": [3, 5, 7] 
+    "worker_counts_to_test": [3, 5, 7, 10]
   },
 
   "network_simulation": {
@@ -96,9 +96,11 @@
     "_NOTE_timeouts": "Su AWS l'ETL/RPC reale (S3 più rete tra worker Fargate/leader EC2) e il tempo del comando SSM (docker kill sull'istanza EC2 dell'orchestrator) sono più lenti del kill istantaneo locale/Docker. Questi override vengono applicati AUTOMATICAMENTE quando environment == 'aws' (vedi _merge_aws_overrides nei file degli scenari di guasto): non vanno più copiati a mano sopra i valori locali.",
     "suggested_overrides": {
       "fault_tolerance": {
-        "kill_worker_after_seconds": 45
+        "_NOTE": "45s era tarato per dataset più piccoli. Misurato empiricamente il 10/9/2026 su AWS con il manifesto baseline corrente (synthetic, 1.000.000 campioni, 100 feature): _prepare_data (ETL) impiega da solo ~199s. Con kill_worker_after_seconds=45 il guasto scattava PRIMA che qualunque worker ricevesse un chunk reale (vedi il branch 'signaled=False' in fault.py) - il test misurava 'worker sparito prima dell'assegnazione, ECS lo rimpiazza in silenzio durante l'ETL', non 'worker morto a metà lavoro vero'. 250s lascia margine sopra i 199s osservati.",
+        "kill_worker_after_seconds": 250
       },
       "inference_worker_fault": {
+        "_NOTE": "20s non ancora verificato empiricamente su AWS con il dataset corrente (vedi la nota gemella su fault_tolerance, dove 45s si è rivelato troppo basso). La fase di training preliminare qui non è temporizzata (il kill parte solo prima di _execute_inference_step), quindi il rischio è minore che per lo scenario 4, ma se anche questo scenario mostra 'Timeout... senza che il chunk sia stato inviato' nel log, va alzato allo stesso modo.",
         "kill_worker_after_seconds": 20
       },
       "orchestrator_failover": {
@@ -108,6 +110,8 @@
       },
       "inference_orchestrator_failover": {
     "max_wait_for_training_start_seconds": 1600,
+        "max_wait_for_inference_start_seconds": 250,
+        "_NOTE_wait_inference": "60s (valore locale ereditato prima di questo fix) sembrava troppo stretto per AWS: deve coprire pickup SQS reale + il tempo perché lo standby diventi leader dopo il kill (TTL leadership 180s, dato che il kill avviene a orchestrator_after_seconds=10, prima che un job sia in corso) + dispatch dell'inferenza. 250s lascia margine sopra i 180s del TTL di leadership. NON ancora verificato empiricamente su AWS (a differenza del fix analogo per fault_tolerance, misurato con dati reali) - trattare il primo run come una calibrazione: se compare comunque un warning di timeout nei log, alzare ulteriormente.",
         "kill_orchestrator_after_seconds": 10,
         "docker_kill_delay_seconds": 5,
         "failover_detection_margin_seconds": 120,

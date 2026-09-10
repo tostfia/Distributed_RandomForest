@@ -136,7 +136,12 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             wait_start = time.perf_counter()
             signaled = self.orchestrator.chunk_sent_event.wait(timeout=kill_delay)
             if not signaled:
-                print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. Procedo comunque a simulare il guasto.")
+                print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. "
+                      f"Procedo comunque a simulare il guasto, MA: questo di norma significa che kill_worker_after_seconds "
+                      f"è più basso del tempo reale di dispatch/inferenza per il dataset corrente, non che il worker sia "
+                      f"morto durante lavoro vero — vedi la nota gemella in fault.py (verificato: 10/9/2026, scenario "
+                      f"training con ETL da 199s). Se il guasto scatta sempre qui senza chunk, alza "
+                      f"kill_worker_after_seconds in test_config.json (blocco 'inference_worker_fault').")
             else:
                 elapsed = time.perf_counter() - wait_start
                 remaining = kill_delay - elapsed
