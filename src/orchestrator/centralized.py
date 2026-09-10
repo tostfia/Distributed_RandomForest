@@ -1,6 +1,7 @@
 import pickle
 import os
 import gc
+import ctypes
 import socket
 import time
 import rpyc
@@ -21,7 +22,8 @@ from src.shared.utilities.preprocessing import CICIDSPreprocessor
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import (
-    load_task_trees_from_shared_storage,
+    iter_task_parts_as_tree_lists,
+    save_chunk_in_parts_to_shared_storage,
     save_bytes_to_shared_storage,
 )
 
@@ -383,6 +385,37 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 else:
                     print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                     start_alberi = 0
+
+        # FIX MEMORIA (vedi OOM globale osservato sul container orchestratore/
+        # test-engine con RSS fino a ~3.9GB): 'all_trained_trees' non deve più
+        # restare l'unica fonte di 'n_features_in_'/'classes_' fino alla fine
+        # del round -- li estraiamo qui in modo incrementale (running_*) man
+        # mano che i batch vengono confermati su disco, cosi' gli alberi già
+        # persistiti possono essere sostituiti con None (vedi più sotto) senza
+        # perdere l'informazione che serve per il manifesto finale.
+        # Se stiamo riprendendo da un checkpoint fisico (FAILOVER-RESUME),
+        # 'all_trained_trees' contiene già alberi REALI e già durevoli su
+        # disco per definizione (li abbiamo appena letti da lì): estraiamo
+        # subito i metadati e liberiamo anche questi, invece di lasciarli
+        # materializzati per il resto del round.
+        running_n_features = [None]
+        running_classes = set()
+        if all_trained_trees:
+            first_real = next((t for t in all_trained_trees if t is not None), None)
+            if first_real is not None:
+                running_n_features[0] = int(first_real.n_features_in_)
+            trees_with_classes_resumed = [t for t in all_trained_trees if t is not None and hasattr(t, "classes_")]
+            if trees_with_classes_resumed:
+                resumed_classes = np.unique(np.concatenate(
+                    [np.asarray(t.classes_) for t in trees_with_classes_resumed]))
+                running_classes.update(resumed_classes.tolist())
+            for _idx in range(len(all_trained_trees)):
+                all_trained_trees[_idx] = None
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
                 
         total_step_trees = target_alberi - start_alberi
         print(f"\n [{self.orchestrator_name}] Distribuzione carico: {total_step_trees} alberi da generare...")
@@ -436,7 +469,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             source_info = self.train_data_path 
 
             # 3. CALCOLO DINAMICO DELLA DIMENSIONE DEL CHUNK
-            CHUNK_SIZE = int(np.ceil(total_step_trees /num_workers ))
+            CHUNK_SIZE = int(np.ceil(total_step_trees / num_workers))
             print(f"[{self.orchestrator_name}] Calcolo dinamico: {num_workers} worker rilevati -> CHUNK_SIZE impostata a {CHUNK_SIZE} alberi per task.")
 
             # 4. Configurazione della Coda di Sotto-Task locale
@@ -558,92 +591,187 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                     f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                                 )
 
-                            # 'load_task_trees_from_shared_storage' ritorna gli alberi
-                            # già deserializzati (List[DecisionTree...]), invece del
-                            # blob pickled + un pickle.loads separato qui: quel giro
-                            # extra oggetti->bytes->oggetti duplicava temporaneamente
-                            # in RAM l'intero chunk (una volta come oggetti nel modulo
-                            # di storage, una volta come bytes, una volta come oggetti
-                            # qui) — causa del primo OOM osservato sull'Orchestratore.
-                            #
-                            # 'tree_reconstruction_lock' serializza QUESTA fase tra i
-                            # thread worker: senza di esso, due o tre thread possono
-                            # ricomporre task diversi nello stesso istante, sommando
-                            # temporaneamente in RAM più chunk appena deserializzati
-                            # oltre alla foresta già accumulata -- causa del secondo
-                            # OOM, osservato anche dopo aver alzato la memoria
-                            # dell'Orchestratore a 16GB. Non blocca il training (che
-                            # resta parallelo sui worker), solo questo scaricamento.
-                            with self.tree_reconstruction_lock:
-                                result_trees = load_task_trees_from_shared_storage(
-                                    source_info, chunk_seed, quota_chunk,
-                                    self.environment, self.orchestrator_name
-                                )
-                            if result_trees is None:
-                                raise RuntimeError(
-                                    f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
-                                    f"non è stato trovato nello storage condiviso."
-                                )
-                            
-                            # SEZIONE CRITICA MINIMA: solo l'aggiornamento della
-                            # lista condivisa e uno snapshot immutabile. L'upload
-                            # su S3 e la scrittura su DynamoDB, che prima stavano
-                            # qui dentro, sono stati spostati FUORI: tenerli nel
-                            # lock significava che ogni worker che finiva restava
-                            # bloccato dietro l'upload di un altro solo per poter
-                            # registrare il proprio risultato.
-                            with results_lock:
-                                all_trained_trees.extend(result_trees)
-                                current_total = len(all_trained_trees)
-                                # list(...) crea una copia: la serializzazione fuori
-                                # dal lock non deve poter vedere la lista mutare.
-                                snapshot = list(all_trained_trees)
-
-                            # --- fuori da results_lock ---
-                            with checkpoint_lock:
-                                if current_total > last_checkpointed["count"]:
+                            # FIX: l'Orchestratore ricomponeva l'INTERO task in un
+                            # colpo solo (load_task_trees_from_shared_storage), con
+                            # 'tree_reconstruction_lock' a serializzare la
+                            # ricomposizione tra thread ma senza limite alla
+                            # dimensione del singolo task -- con pochi worker
+                            # attivi CHUNK_SIZE sale (total_step_trees / num_workers)
+                            # e un singolo task può arrivare a pesare oltre 1GB con
+                            # max_depth=None su dataset grandi (misurato: ~72MB per
+                            # albero su Friedman#1 1M righe). Ora leggiamo il task
+                            # UNA PARTE ALLA VOLTA (iter_task_parts_as_tree_lists) e
+                            # persistiamo+liberiamo ogni parte subito, prima di
+                            # caricare la successiva: il picco di ricomposizione
+                            # scende alla dimensione di UN batch worker, costante
+                            # indipendentemente da quanto è grande CHUNK_SIZE.
+                            part_iter = iter_task_parts_as_tree_lists(
+                                source_info, chunk_seed, quota_chunk,
+                                self.environment, self.orchestrator_name
+                            )
+                            received_any_part = False
+                            while True:
+                                with self.tree_reconstruction_lock:
                                     try:
-                                        # Scrive SOLO gli alberi nuovi (alla parte 0
-                                        # l'intero snapshot, per migrare dal formato
-                                        # monolitico). Traffico totale: N invece di N*(W+1)/2.
-                                        self._persist_trees_delta(
-                                            self.current_job_id, snapshot,
-                                            last_checkpointed["count"], last_checkpointed["parts"])
-                                        last_checkpointed["count"] = current_total
-                                        last_checkpointed["parts"] += 1
-                                        # La cache di istanza viene allineata SOLO dopo che il
-                                        # salvataggio fisico è andato a buon fine: così non è mai
-                                        # "più avanti" della fonte di verità persistita, che è
-                                        # ciò che un'altra istanza rileggerebbe in caso di failover.
-                                        self._trees_cache[self.current_job_id] = snapshot
-                                        print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
-                                    except Exception as e_fs:
-                                        # last_checkpointed NON avanza: un writer successivo
-                                        # deve poter riprovare a persistere lo stato.
-                                        print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+                                        part_trees = next(part_iter)
+                                    except StopIteration:
+                                        break
+                                    except FileNotFoundError:
+                                        if received_any_part:
+                                            # Già ricevuta almeno una parte: il task
+                                            # NON è "non ancora pronto", è
+                                            # genuinamente incompleto (una parte
+                                            # attesa dal manifest manca). Errore vero,
+                                            # non un semplice "aspetta ancora".
+                                            #
+                                            # NOTA SU UN CASO LIMITE RESIDUO: qui sotto
+                                            # (except Exception as e, più in basso) il
+                                            # task viene riaccodato PER INTERO come
+                                            # prima di questo fix -- ma a differenza di
+                                            # prima, ora alcune delle sue parti
+                                            # potrebbero essere GIÀ state persistite nel
+                                            # checkpoint dell'Orchestratore (quelle lette
+                                            # con successo prima di questa). Un retry
+                                            # completo del task rigenererebbe quegli
+                                            # stessi alberi da capo, causando un doppio
+                                            # conteggio. Nella pratica questo scenario
+                                            # richiede che una parte manchi DOPO che il
+                                            # manifest (scritto per ultimo, a garanzia
+                                            # che tutte le parti siano già su disco) è
+                                            # stato trovato -- una vera corruzione/
+                                            # cancellazione esterna, non una race del
+                                            # normale percorso di scrittura. Rischio
+                                            # accettato consapevolmente per la modalità
+                                            # 'a batch' richiesta; un hardening completo
+                                            # (retry solo delle parti mancanti, non
+                                            # dell'intero task) richiederebbe propagare
+                                            # l'informazione "quante parti già lette" nella
+                                            # coda dei task, fuori scope per questo fix.
+                                            raise
+                                        raise RuntimeError(
+                                            f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
+                                            f"non è stato trovato nello storage condiviso."
+                                        )
+                                received_any_part = True
 
-                                    # Il contatore logico segue lo stesso ordine monotono del
-                                    # checkpoint fisico, così i due non possono divergere.
-                                    if hasattr(self, 'state_manager') and self.state_manager:
+                                # SEZIONE CRITICA MINIMA: solo l'aggiornamento della
+                                # lista condivisa e uno snapshot immutabile. L'upload
+                                # su S3 e la scrittura su DynamoDB, che prima stavano
+                                # qui dentro, sono stati spostati FUORI: tenerli nel
+                                # lock significava che ogni worker che finiva restava
+                                # bloccato dietro l'upload di un altro solo per poter
+                                # registrare il proprio risultato.
+                                with results_lock:
+                                    all_trained_trees.extend(part_trees)
+                                    current_total = len(all_trained_trees)
+                                    # list(...) crea una copia: la serializzazione fuori
+                                    # dal lock non deve poter vedere la lista mutare.
+                                    snapshot = list(all_trained_trees)
+                                part_trees = None  # non serve più: droppa il riferimento
+
+                                # --- fuori da results_lock ---
+                                with checkpoint_lock:
+                                    if current_total > last_checkpointed["count"]:
                                         try:
-                                            self.state_manager.update_request_status(
-                                                job_id=self.current_job_id,
-                                                status="PROCESSING",
-                                                orchestrator_id=self.orchestrator_name,
-                                                retries=payload.get("retries", 0),
-                                                base_random_state=seed,
-                                                alberi_addestrati=current_total
-                                            )
-                                        except Exception as e_db:
-                                            print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
-                                else:
-                                    # Snapshot superato: sullo storage c'è già uno stato con
-                                    # PIÙ alberi, quindi riscriverlo non aggiungerebbe nulla e
-                                    # anzi farebbe REGREDIRE il punto di ripartenza.
-                                    print(f"   [RPC <- {w_name}] [CHECKPOINT SKIP] Task {task_id}: già persistito uno "
-                                          f"stato più avanzato ({last_checkpointed['count']} alberi >= {current_total}).")
+                                            # Scrive SOLO gli alberi nuovi (alla parte 0
+                                            # l'intero snapshot, per migrare dal formato
+                                            # monolitico). Traffico totale: N invece di N*(W+1)/2.
+                                            prev_checkpointed = last_checkpointed["count"]
+                                            self._persist_trees_delta(
+                                                self.current_job_id, snapshot,
+                                                prev_checkpointed, last_checkpointed["parts"])
+                                            last_checkpointed["count"] = current_total
+                                            last_checkpointed["parts"] += 1
 
-                            print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {len(result_trees)} alberi.")
+                                            # FIX MEMORIA: estraiamo i metadati leggeri
+                                            # (n_features_in_ una sola volta, classes_ per
+                                            # union) dal SOLO batch appena persistito, PRIMA
+                                            # di liberarlo -- non da tutto 'all_trained_trees'
+                                            # (che a questo punto può già contenere molte
+                                            # posizioni azzerate da batch precedenti).
+                                            newly_persisted = snapshot[prev_checkpointed:current_total]
+                                            if running_n_features[0] is None and newly_persisted:
+                                                running_n_features[0] = int(newly_persisted[0].n_features_in_)
+                                            trees_with_classes_batch = [t for t in newly_persisted if hasattr(t, "classes_")]
+                                            if trees_with_classes_batch:
+                                                batch_classes = np.unique(np.concatenate(
+                                                    [np.asarray(t.classes_) for t in trees_with_classes_batch]))
+                                                running_classes.update(batch_classes.tolist())
+
+                                            # Liberiamo gli alberi appena confermati su
+                                            # disco: _persist_trees_delta (vedi
+                                            # BaseOrchestrator.py) per part_index >= 1 usa
+                                            # SOLO 'snapshot[already_persisted:]' -- non
+                                            # tocca mai più il prefisso già scritto, quindi
+                                            # può restare fatto di soli 'None' (stessa
+                                            # LUNGHEZZA, così lo slicing per posizione resta
+                                            # corretto per le scritture successive) senza
+                                            # rompere nulla. Questo è ciò che teneva
+                                            # l'orchestratore a ridosso di diversi GB di RAM
+                                            # con alberi non potati su dataset grandi.
+                                            with results_lock:
+                                                for _idx in range(prev_checkpointed, current_total):
+                                                    all_trained_trees[_idx] = None
+                                            snapshot = None
+
+                                            # FIX MEMORIA (parte 2): 'gc.collect()' da
+                                            # solo non basta -- CPython/glibc spesso NON
+                                            # restituisce al sistema operativo la memoria
+                                            # liberata (la tiene in riserva per riusarla
+                                            # internamente), quindi l'RSS visto da
+                                            # 'docker stats'/cgroup può restare alto anche
+                                            # quando dentro il processo non è rimasto
+                                            # nulla di vivo. 'malloc_trim(0)' (glibc,
+                                            # Linux) chiede esplicitamente all'allocatore
+                                            # di restituire i blocchi liberi all'OS: è
+                                            # quello che chiude il cerchio tra "l'ho
+                                            # liberato in Python" e "il container vede
+                                            # meno RAM usata". Innocuo se non c'è nulla da
+                                            # restituire (no-op), quindi sicuro da
+                                            # chiamare ad ogni batch persistito senza
+                                            # doverlo controllare a monte.
+                                            gc.collect()
+                                            try:
+                                                ctypes.CDLL("libc.so.6").malloc_trim(0)
+                                            except Exception:
+                                                pass  # piattaforme non-glibc (es. macOS): nessun problema, solo nessun effetto
+
+                                            # La cache di istanza ora referenzia la STESSA
+                                            # lista già alleggerita (non una copia piena):
+                                            # la continuazione same-process (STATE-SYNC)
+                                            # resta valida per il conteggio, senza tenere
+                                            # in vita gli alberi già persistiti.
+                                            self._trees_cache[self.current_job_id] = all_trained_trees
+                                            print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Parte di Task {task_id} archiviata. Progressivo in RAM/Storage: {current_total} alberi.")
+                                        except Exception as e_fs:
+                                            # last_checkpointed NON avanza: un writer successivo
+                                            # deve poter riprovare a persistere lo stato.
+                                            print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
+
+                                        # Il contatore logico segue lo stesso ordine monotono del
+                                        # checkpoint fisico, così i due non possono divergere.
+                                        if hasattr(self, 'state_manager') and self.state_manager:
+                                            try:
+                                                self.state_manager.update_request_status(
+                                                    job_id=self.current_job_id,
+                                                    status="PROCESSING",
+                                                    orchestrator_id=self.orchestrator_name,
+                                                    retries=payload.get("retries", 0),
+                                                    base_random_state=seed,
+                                                    alberi_addestrati=current_total
+                                                )
+                                            except Exception as e_db:
+                                                print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
+                                    else:
+                                        # Snapshot superato: sullo storage c'è già uno stato con
+                                        # PIÙ alberi, quindi riscriverlo non aggiungerebbe nulla e
+                                        # anzi farebbe REGREDIRE il punto di ripartenza.
+                                        print(f"   [RPC <- {w_name}] [CHECKPOINT SKIP] Parte di Task {task_id}: già persistito uno "
+                                              f"stato più avanzato ({last_checkpointed['count']} alberi >= {current_total}).")
+
+                            current_total = len(all_trained_trees)
+
+                            print(f"   [RPC <- {w_name}] Task {task_id} completato. Ricevuti {quota_chunk} alberi (in {last_checkpointed['parts']} parti totali).")
                             self._track_task(task_id=task_id, job_id=self.current_job_id, worker_name=w_name, status="COMPLETED")
                             task_queue.task_done()
                             
@@ -676,8 +804,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             pass
 
             # 6. Avvio dei thread
+            # FIX: prima tutti i thread partivano in sequenza stretta, senza
+            # nessuna pausa -- ogni thread, appena avviato, chiama subito
+            # train_subset_forest sul worker, che a sua volta carica l'intero
+            # dataset condiviso (source_info, fino a 1M righe) in _load_data.
+            # Con N worker tutti avviati nello stesso istante, si ottengono N
+            # caricamenti simultanei dello stesso CSV -- un picco di memoria
+            # sincronizzato su tutti i container, causa più probabile degli
+            # OOM quasi-simultanei osservati su quasi tutti i worker nello
+            # scenario di scalabilità col dataset sintetico da 1M campioni.
+            # Una piccola pausa tra un avvio e l'altro spalma questo picco nel
+            # tempo invece di sincronizzarlo: costo totale trascurabile
+            # rispetto al training (con 10 worker, meno di 3s), ma i
+            # caricamenti si accavallano molto meno. Non elimina il problema
+            # se il dataset è enorme o il mem_limit troppo stretto, ma riduce
+            # sensibilmente la probabilità del crash sincronizzato visto nei
+            # test. Vale SOLO per il primo task di ogni worker: dal secondo in
+            # poi il dataset è già in cache locale (self._cached_X/_cached_y
+            # in CentralizedWorker), quindi non ricarica nulla e la pausa non
+            # si ripete.
+            WORKER_START_STAGGER_SECONDS = 0.3
             threads = []
-            for name in worker_names:
+            for i, name in enumerate(worker_names):
+                if i > 0:
+                    time.sleep(WORKER_START_STAGGER_SECONDS)
                 t = threading.Thread(target=worker_thread_consumer, args=(name,))
                 t.start()
                 threads.append(t)
@@ -712,20 +862,27 @@ class CentralizedOrchestrator(BaseOrchestrator):
                   f"(streaming, nessun assemblaggio scikit-learn completo in RAM)...")
             aggregation_start = time.perf_counter()
             try:
-                n_features = all_trained_trees[0].n_features_in_
+                n_features = running_n_features[0]
+                if n_features is None:
+                    # Fallback di sicurezza: non dovrebbe succedere (ogni batch
+                    # persistito con successo aggiorna running_n_features), ma se
+                    # per qualche motivo un albero fosse rimasto materializzato
+                    # (es. un salvataggio fallito, mai liberato) lo recuperiamo
+                    # da lì come ultima spiaggia.
+                    first_real_tree = next((t for t in all_trained_trees if t is not None), None)
+                    n_features = int(first_real_tree.n_features_in_) if first_real_tree is not None else None
                 n_estimators = len(all_trained_trees)
 
                 classes_list = None
                 n_classes = None
                 if tree_type == "classifier":
-                    # Deriviamo le classi reali dagli alberi già addestrati (ogni DecisionTree
-                    # fittato conserva il proprio attributo classes_), invece di assumere
-                    # staticamente un problema binario con etichette {0, 1}. Con classi diverse
-                    # (es. {1, 2} o multi-classe) l'assunzione fissa avrebbe silenziosamente
-                    # etichettato male le predizioni finali.
-                    trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
-                    if trees_with_classes:
-                        detected_classes = np.unique(np.concatenate([np.asarray(t.classes_) for t in trees_with_classes]))
+                    # Classi accumulate in modo incrementale (running_classes)
+                    # man mano che ogni batch veniva persistito e liberato,
+                    # invece di rileggerle qui da 'all_trained_trees' (che a
+                    # questo punto contiene quasi solo None -- vedi fix
+                    # memoria più sopra nel ciclo di dispatch).
+                    if running_classes:
+                        detected_classes = np.array(sorted(running_classes), dtype=np.int64)
                     else:
                         print(f"   [{self.orchestrator_name}] [WARN] Nessun albero espone 'classes_'. Fallback su {{0, 1}}.")
                         detected_classes = np.array([0, 1])
@@ -905,15 +1062,24 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
         for tree_start, tree_end, chunk_estimators in self._iter_checkpoint_tree_ranges(job_id, CHUNK_SIZE):
             if tree_start not in already_done_ranges:
-                serialized_chunk_trees = pickle.dumps(chunk_estimators)
-                # Il chunk di alberi NON viaggia più come argomento della RPC
-                # (fino a 1+ GB con pochi worker attivi, stesso problema già
-                # risolto in training - vedi hang/timeout SSM osservato in
-                # Scenario 2): lo carichiamo una volta sullo storage condiviso
-                # e passiamo al worker solo la chiave, che lo riscarica da sé.
-                chunk_key = f"inference_chunks/{job_id}/chunk_{tree_start}_{tree_end}.pkl"
-                save_bytes_to_shared_storage(chunk_key, serialized_chunk_trees, self.environment, self.orchestrator_name)
-                task_queue.put((task_id_counter, tree_start, tree_end, chunk_key))
+                # FIX: prima l'intero chunk (fino a CHUNK_SIZE alberi, oltre
+                # 1GB con pochi worker attivi) veniva serializzato e scritto
+                # come UN blob unico -- il worker doveva poi scaricarlo e
+                # deserializzarlo tutto insieme (vedi
+                # exposed_predict_subset_forest in BaseWorker.py), tenendo
+                # contemporaneamente in RAM sia i byte grezzi sia gli oggetti
+                # albero appena decodificati: causa dell'OOM osservato sui
+                # worker in fase di inferenza dopo aver ridotto NUM_WORKERS
+                # (stesso identico problema già risolto lato Orchestratore
+                # per la ricomposizione dei task di training, qui speculare
+                # sul lato worker). Scriviamo ora il chunk a piccole parti
+                # (stesso pattern manifest+parti del training): il worker
+                # legge, predice e libera una parte alla volta.
+                chunk_key_prefix = f"inference_chunks/{job_id}/chunk_{tree_start}_{tree_end}"
+                save_chunk_in_parts_to_shared_storage(
+                    chunk_key_prefix, chunk_estimators, self.environment, self.orchestrator_name
+                )
+                task_queue.put((task_id_counter, tree_start, tree_end, chunk_key_prefix))
                 task_id_counter += 1
             else: 
                 print(f"[SHORT-CIRCUIT] Chunk {tree_start}-{tree_end} già completato. Skip.")
@@ -945,7 +1111,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 
                 while True:
                     try:
-                        task_id, start_idx, end_idx, chunk_key = task_queue.get(timeout=2)
+                        task_id, start_idx, end_idx, chunk_key_prefix = task_queue.get(timeout=2)
                         rounds_done += 1
                     except queue.Empty:
                         break
@@ -957,10 +1123,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         self.chunk_sent_event.set()
                         
                         # Invocazione remota sul metodo esposto dal BaseWorker:
-                        # 'chunk_key' è solo il riferimento allo storage condiviso,
-                        # non il blob — il worker lo scarica direttamente da lì.
+                        # 'chunk_key_prefix' non è più la chiave di UN blob, ma il
+                        # prefisso di un manifest+parti (vedi
+                        # save_chunk_in_parts_to_shared_storage sopra e
+                        # iter_chunk_parts_from_shared_storage lato worker): il
+                        # worker legge, predice e libera una parte alla volta,
+                        # invece di scaricare e deserializzare l'intero chunk in
+                        # un colpo solo.
                         raw_response = worker_conn.root.predict_subset_forest(
-                            chunk_key, 
+                            chunk_key_prefix,
                             X_test_key,
                             tree_type,
                             global_classes
@@ -994,7 +1165,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         else:
                             # FAILOVER: Inserimento immediato del task interrotto nuovamente in coda
                             self._track_task(task_id=task_id, job_id=job_id, worker_name=w_name, status="REQUEUED")
-                            task_queue.put((task_id, start_idx, end_idx, chunk_key))
+                            task_queue.put((task_id, start_idx, end_idx, chunk_key_prefix))
                             print(f"[{self.orchestrator_name}-InfThread] Task {task_id} riaccodato per il failover.")
                         
                         with results_lock:

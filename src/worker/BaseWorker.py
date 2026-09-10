@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import os
 import gc
+import ctypes
 import signal
 import socket
 import numpy as np
@@ -20,6 +21,7 @@ from src.shared.utilities.task_storage import (
     load_task_from_shared_storage,
     save_task_part_to_shared_storage,
     save_task_manifest,
+    iter_chunk_parts_from_shared_storage,
 )
 
 # Timeout (in secondi) per il completamento di un singolo batch di alberi nel
@@ -30,6 +32,25 @@ RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 600))
 
 _child_X = None
 _child_y = None
+
+
+def _release_memory_to_os():
+    """gc.collect() da solo libera gli oggetti Python non più referenziati,
+    ma CPython/glibc spesso NON restituisce quella memoria al sistema
+    operativo -- la tiene in riserva per riusarla internamente. L'RSS visto
+    da 'docker stats'/cgroup può quindi restare alto anche quando dentro il
+    processo non è rimasto nulla di vivo. 'malloc_trim(0)' (glibc, Linux)
+    chiede esplicitamente all'allocatore di restituire i blocchi liberi
+    all'OS: è quello che chiude il cerchio tra "l'ho liberato in Python" e
+    "il container vede meno RAM usata". No-op innocuo se non c'è nulla da
+    restituire, e silenziosamente ignorato su piattaforme non-glibc (es.
+    macOS in sviluppo locale) tramite l'except sotto.
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 # Addestramento di un singolo albero, eseguito da un thread del ThreadPool.
 # A differenza della precedente versione a processi (multiprocessing.Pool),
@@ -397,7 +418,30 @@ class BaseWorker(Service, ABC):
             print(f"[WORKER] Istanziazione ThreadPool locale con {pool_size} thread "
                   f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
 
-            BATCH_SIZE = max(1, min(pool_size * 4, num_trees))
+            # FIX MEMORIA: il moltiplicatore 'x4' teneva in RAM, tra un
+            # salvataggio incrementale e l'altro, fino a 4 alberi per ogni
+            # thread del pool contemporaneamente. Con max_depth=None su
+            # dataset grandi (es. 1M righe) un singolo albero non potato può
+            # pesare centinaia di MB: con pool_size=1 (comune quando molti
+            # worker girano sulla stessa macchina e si dividono pochi core,
+            # vedi 'allocated_cores' sopra) questo significava comunque 4
+            # alberi "pesanti" vivi insieme, oltre a X/y. Osservato in pratica
+            # come causa di OOM sia a livello di singolo container (cgroup)
+            # sia, sommando più worker contemporanei, a livello dell'intera
+            # macchina host (constraint=CONSTRAINT_NONE / global_oom in
+            # dmesg -- quello NON si risolve alzando il mem_limit di un
+            # container, perché non è un limite di container ad essere
+            # sforato ma la RAM fisica totale). Moltiplicatore configurabile
+            # via env (default 1,= un batch grande quanto il parallelismo
+            # reale, non un multiplo arbitrario di esso): a parità di
+            # 'pool_size' il picco di alberi-in-RAM-insieme scende fino a 4x,
+            # al costo di scritture su storage condiviso più frequenti (più
+            # batch, ciascuno più piccolo) -- overhead trascurabile per I/O
+            # locale/S3 rispetto al rischio di OOM. Alzabile con
+            # WORKER_BATCH_MULTIPLIER se la macchina ha RAM abbondante e si
+            # preferisce l'I/O più raro.
+            batch_multiplier = int(os.environ.get("WORKER_BATCH_MULTIPLIER", 1))
+            BATCH_SIZE = max(1, min(pool_size * batch_multiplier, num_trees))
             with ThreadPoolExecutor(max_workers=pool_size) as executor:
                 for part_idx, batch_start in enumerate(range(0, len(worker_tasks), BATCH_SIZE)):
                     batch = worker_tasks[batch_start: batch_start + BATCH_SIZE]
@@ -426,7 +470,7 @@ class BaseWorker(Service, ABC):
                     # FederatedWorker.exposed_train_local_federated_forest per
                     # il pattern di crash osservato empiricamente che ha
                     # motivato questa correzione).
-                    gc.collect()
+                    _release_memory_to_os()
 
         # Il manifest viene scritto per ULTIMO, dopo che TUTTE le parti sono
         # sul disco/S3: la sua presenza è ciò che segnala all'Orchestratore
@@ -445,7 +489,7 @@ class BaseWorker(Service, ABC):
             raise
         print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
               f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
-        gc.collect()
+        _release_memory_to_os()
         # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
         # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
         # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
@@ -477,23 +521,8 @@ class BaseWorker(Service, ABC):
         """
         print(f"\n[WORKER RPC] Ricevuta richiesta di inferenza parziale...")
 
-        # 1. Ricostruiamo gli alberi: se è una chiave (str), li scarichiamo
-        #    dallo storage condiviso; se sono già byte, li usiamo direttamente.
-        if isinstance(serialized_trees_or_key, str):
-            serialized_trees = load_bytes_from_shared_storage(
-                serialized_trees_or_key, self.environment, self.worker_name
-            )
-            if serialized_trees is None:
-                raise RuntimeError(
-                    f"[{self.worker_name}] Impossibile scaricare il chunk di alberi "
-                    f"dalla chiave '{serialized_trees_or_key}' nello storage condiviso."
-                )
-        else:
-            serialized_trees = serialized_trees_or_key
-        trees = pickle.loads(serialized_trees)
-        print(f"[{self.worker_name}] Decodificati {len(trees)} alberi per il calcolo.")
-
-        # 2. Gestione asimmetrica Centralizzato vs Federato
+        # 1. Risolviamo il testing set PRIMA degli alberi: serve per predire
+        #    sia nel percorso a streaming sia in quello retrocompatibile.
         if serialized_X_test is not None:
             # 'serialized_X_test' può essere:
             #  - una stringa: chiave nello storage condiviso, da scaricare da sé
@@ -532,30 +561,74 @@ class BaseWorker(Service, ABC):
             print(f"[{self.worker_name}] Utilizzo del testing set federato locale (Shape: {X_eval.shape}).")
 
         is_classifier = (tree_type == "classifier") if tree_type is not None else self.is_regression() is False
+        global_classes_arr = np.asarray(global_classes) if (is_classifier and global_classes is not None) else None
+        n_global_classes = len(global_classes_arr) if global_classes_arr is not None else None
 
-        if is_classifier and global_classes is not None:
-            global_classes_arr = np.asarray(global_classes)
-            n_global_classes = len(global_classes_arr)
-            print(f"[{self.worker_name}] Avvio inferenza soft-voting (predict_proba) su {len(trees)} alberi "
-                  f"({n_global_classes} classi globali)...")
+        def _predict_batch(trees_batch):
+            """Predice su un batch di alberi già deserializzati. Ritorna la
+            lista di array di predizione (uno per albero) -- MOLTO più
+            piccoli degli alberi stessi (un array (n_samples,) o
+            (n_samples, n_classi) contro un DecisionTree non potato che può
+            pesare decine di MB), quindi accumularli per tutta la chiamata
+            costa poco anche su chunk grandi."""
+            if global_classes_arr is not None:
+                # Per la classificazione: probabilità per-albero (soft voting),
+                # non etichette dure -- stesso meccanismo che sklearn usa
+                # internamente in RandomForestClassifier.predict/predict_proba,
+                # più informativo (soprattutto per l'AUC) di un conteggio di
+                # voti maggioritari con granularità 1/n_alberi. Un singolo
+                # albero, se addestrato su un campione bootstrap che per caso
+                # non conteneva tutte le classi, espone tree.classes_ come
+                # sottoinsieme di global_classes: rimappiamo le sue colonne di
+                # probabilità nello spazio delle classi GLOBALE (0 per le
+                # classi non viste da quell'albero) invece di assumere
+                # ciecamente che l'ordine coincida.
+                batch_predictions = []
+                for tree in trees_batch:
+                    raw_proba = tree.predict_proba(X_eval)
+                    aligned_proba = np.zeros((X_eval.shape[0], n_global_classes), dtype=np.float64)
+                    tree_classes = np.asarray(tree.classes_)
+                    col_positions = np.searchsorted(global_classes_arr, tree_classes)
+                    aligned_proba[:, col_positions] = raw_proba
+                    batch_predictions.append(aligned_proba)
+                return batch_predictions
+            return [tree.predict(X_eval) for tree in trees_batch]
+
+        # 2. Ricostruiamo gli alberi e prediciamo.
+        #
+        # 'serialized_trees_or_key' può essere:
+        #  - una stringa: il PREFISSO di un manifest+parti nello storage
+        #    condiviso (vedi save_chunk_in_parts_to_shared_storage lato
+        #    Orchestratore). È il caso normale ora: leggiamo, prediciamo e
+        #    liberiamo una parte di alberi alla volta, invece di scaricare e
+        #    deserializzare l'intero chunk (fino a 1+ GB con pochi worker
+        #    attivi) in un colpo solo -- che teneva contemporaneamente in RAM
+        #    sia i byte grezzi sia gli oggetti albero appena decodificati, ed
+        #    era la causa più probabile dell'OOM osservato sui worker in fase
+        #    di inferenza dopo aver ridotto il numero di worker attivi.
+        #  - bytes: il blob già serializzato per intero, per retrocompatibilità
+        #    con eventuali chiamanti che lo passano ancora così (nessuna
+        #    struttura a parti da sfruttare in quel caso: si deserializza e si
+        #    predice tutto insieme, come avveniva prima di questo fix).
+        if isinstance(serialized_trees_or_key, str):
             sub_predictions = []
-            for tree in trees:
-                # Un singolo albero, se addestrato su un campione bootstrap che per caso
-                # non conteneva tutte le classi, espone tree.classes_ come sottoinsieme
-                # di global_classes: rimappiamo le sue colonne di probabilità nello
-                # spazio delle classi GLOBALE (0 per le classi non viste da quell'albero)
-                # invece di assumere ciecamente che l'ordine coincida.
-                raw_proba = tree.predict_proba(X_eval)
-                aligned_proba = np.zeros((X_eval.shape[0], n_global_classes), dtype=np.float64)
-                tree_classes = np.asarray(tree.classes_)
-                col_positions = np.searchsorted(global_classes_arr, tree_classes)
-                aligned_proba[:, col_positions] = raw_proba
-                sub_predictions.append(aligned_proba)
+            n_trees_total = 0
+            for part_trees in iter_chunk_parts_from_shared_storage(
+                serialized_trees_or_key, self.environment, self.worker_name
+            ):
+                n_trees_total += len(part_trees)
+                sub_predictions.extend(_predict_batch(part_trees))
+                # 'part_trees' esce di scope alla prossima iterazione: gli
+                # alberi di questa parte non restano referenziati da nessuna
+                # struttura dati del worker una volta predetto su di essi.
+            print(f"[{self.worker_name}] Predetto in streaming su {n_trees_total} alberi "
+                  f"(chunk '{serialized_trees_or_key}', a parti).")
         else:
-            print(f"[{self.worker_name}] Avvio inferenza nativa lineare (hard predict) su {len(trees)} alberi...")
-            sub_predictions = [tree.predict(X_eval) for tree in trees]
+            trees = pickle.loads(serialized_trees_or_key)
+            print(f"[{self.worker_name}] Decodificati {len(trees)} alberi per il calcolo (blob diretto, non a parti).")
+            sub_predictions = _predict_batch(trees)
 
-        print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(trees)} alberi.")
+        print(f"[+] [{self.worker_name}] Calcolo predizioni completato per {len(sub_predictions)} alberi.")
         return pickle.dumps(sub_predictions)
 
 

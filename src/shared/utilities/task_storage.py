@@ -178,6 +178,110 @@ def save_task_manifest(source_info: str, base_seed: int, num_trees: int,
     )
 
 
+def save_chunk_in_parts_to_shared_storage(chunk_key_prefix: str, trees: list, environment: str,
+                                           node_name: str = "", part_size: int = 2):
+    """
+    Salva una lista di alberi (tipicamente un chunk di inferenza
+    centralizzata) come più parti piccole invece che come un unico blob,
+    con un manifest che ne elenca il numero -- stessa logica di
+    save_task_part_to_shared_storage/save_task_manifest ma per chunk con
+    chiave arbitraria (non legata a job_id/base_seed/num_trees). Chi legge
+    (vedi iter_chunk_parts_from_shared_storage) può deserializzare e
+    liberare una parte alla volta invece di materializzare l'intero chunk
+    (fino a 1+ GB con pochi worker attivi) in un colpo solo.
+    """
+    num_parts = 0
+    for i in range(0, len(trees), part_size):
+        part = trees[i:i + part_size]
+        part_key = f"{chunk_key_prefix}_part_{num_parts}.pkl"
+        save_bytes_to_shared_storage(part_key, pickle.dumps(part), environment, node_name)
+        num_parts += 1
+    manifest_key = f"{chunk_key_prefix}.manifest.json"
+    save_bytes_to_shared_storage(
+        manifest_key, json.dumps({"num_parts": num_parts}).encode("utf-8"), environment, node_name
+    )
+
+
+def iter_chunk_parts_from_shared_storage(chunk_key_prefix: str, environment: str, node_name: str = ""):
+    """
+    Controparte in lettura di save_chunk_in_parts_to_shared_storage: un
+    GENERATORE che produce una parte (lista di alberi) alla volta invece di
+    ricomporre l'intero chunk in un'unica lista. Il chiamante può usare e
+    liberare ogni parte prima di caricare la successiva, tenendo il picco di
+    RAM legato alla dimensione di UNA parte, non dell'intero chunk.
+
+    Solleva FileNotFoundError se il manifest o una parte attesa mancano.
+    """
+    manifest_key = f"{chunk_key_prefix}.manifest.json"
+    manifest_bytes = load_bytes_from_shared_storage(manifest_key, environment, node_name)
+    if manifest_bytes is None:
+        raise FileNotFoundError(f"Manifest '{manifest_key}' non trovato.")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Manifest '{manifest_key}' illeggibile: {e}") from e
+
+    for i in range(manifest["num_parts"]):
+        part_key = f"{chunk_key_prefix}_part_{i}.pkl"
+        part_bytes = load_bytes_from_shared_storage(part_key, environment, node_name)
+        if part_bytes is None:
+            raise FileNotFoundError(f"Parte {i} ('{part_key}') mancante.")
+        yield pickle.loads(part_bytes)
+        # 'part_bytes' e la parte appena prodotta escono di scope alla
+        # ripresa dell'iterazione: mai più di UNA parte viva in RAM qui
+        # dentro -- il chiamante decide se e quanto tenerla viva dopo.
+
+
+def iter_task_parts_as_tree_lists(source_info: str, base_seed: int, num_trees: int,
+                                   environment: str, node_name: str = ""):
+    """
+    Come load_task_parts_as_tree_list, ma è un GENERATORE: produce una parte
+    alla volta (la lista di alberi di UN batch worker), invece di accumulare
+    l'intero task in un'unica lista prima di restituirlo.
+
+    Perché serve: con pochi worker attivi, CHUNK_SIZE (alberi per task) sale
+    (total_step_trees / num_workers), e load_task_parts_as_tree_list
+    materializza l'INTERO task in un colpo solo -- con max_depth=None su
+    dataset grandi un singolo albero può pesare decine di MB, quindi un
+    task da 15 alberi può costare oltre 1GB da ricomporre in un colpo solo.
+    Qui il chiamante processa (tipicamente: persiste nel proprio checkpoint
+    e libera) una parte alla volta, tenendo il picco di RAM legato alla
+    dimensione di UN batch worker, non dell'intero task, indipendentemente
+    da quanto è grande CHUNK_SIZE.
+
+    Solleva FileNotFoundError se il manifest non esiste (task non ancora
+    pronto) o se manca anche una sola parte attesa dal manifest (task
+    considerato incompleto) -- un generatore non può segnalare "niente da
+    iterare" con un semplice 'return None' come fa la funzione non-streaming,
+    quindi qui l'assenza diventa un'eccezione esplicita che il chiamante può
+    intercettare.
+    """
+    manifest_key = get_task_manifest_key(source_info, base_seed, num_trees)
+    manifest_bytes = load_bytes_from_shared_storage(manifest_key, environment, node_name)
+    if manifest_bytes is None:
+        raise FileNotFoundError(f"Manifest '{manifest_key}' non trovato: task non ancora pronto.")
+
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Manifest '{manifest_key}' illeggibile: {e}") from e
+
+    for part_idx in range(manifest["num_parts"]):
+        part_key = get_task_part_key(source_info, base_seed, num_trees, part_idx)
+        part_bytes = load_bytes_from_shared_storage(part_key, environment, node_name)
+        if part_bytes is None:
+            raise FileNotFoundError(
+                f"Manifest presente ma parte {part_idx} ('{part_key}') mancante: "
+                f"task considerato incompleto."
+            )
+        yield pickle.loads(part_bytes)
+        # 'part_bytes' e la lista di alberi appena prodotta escono di scope
+        # quando il chiamante riprende l'iterazione (chiamata successiva a
+        # next(), implicita nel 'for'): mai più di UNA parte viva in RAM
+        # contemporaneamente qui dentro -- il chiamante decide se e quanto
+        # a lungo tenerla viva dopo averla ricevuta.
+
+
 def load_task_parts_as_tree_list(source_info: str, base_seed: int, num_trees: int,
                                   environment: str, node_name: str = ""):
     """

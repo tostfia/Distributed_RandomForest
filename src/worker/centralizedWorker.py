@@ -83,14 +83,32 @@ class CentralizedWorker(BaseWorker):
         y_df = df[actual_target]
         X_df = df[feature_cols]
 
-        X = X_df.to_numpy(dtype=np.float64)
+        # FIX MEMORIA (vedi OOM osservato con 10 worker che caricano
+        # simultaneamente l'intero dataset centralizzato da 1M righe):
+        # 1) float32 invece di float64 per X -- dimezza il picco di RAM
+        #    (1M x 100 x 4 byte invece di 8) SENZA perdita di precisione
+        #    reale: sklearn.tree lavora internamente in float32
+        #    (tree._tree.DTYPE) e a fit-time avrebbe comunque ricopiato/
+        #    convertito X in float32, tenendo per un istante ENTRAMBE le
+        #    copie in RAM. Costruirlo già in float32 elimina questa
+        #    doppia copia invece di limitarsi ad approssimare i dati.
+        # 2) 'del df' subito dopo aver estratto X/y: 'df' e le sue view
+        #    (X_df/y_df) restano altrimenti vive fino al return della
+        #    funzione, quindi per tutta la costruzione di X/y convivono in
+        #    RAM sia il DataFrame originale sia gli array numpy appena
+        #    copiati -- un picco transitorio di 2-3x la dimensione finale
+        #    dei dati, proprio nell'istante più delicato (10 worker che
+        #    lo fanno tutti insieme).
+        X = X_df.to_numpy(dtype=np.float32)
         if y_df.dtype == 'object' or y_df.nunique() > 20:
             y = y_df.to_numpy(dtype=np.float64)
             self.tree_type = "regressor"
         else:
             y = y_df.to_numpy(dtype=np.int64)
             self.tree_type = "classifier"
-                
+
+        del df, X_df, y_df
+
         self._cached_source = source_info
         self._cached_X = X
         self._cached_y = y

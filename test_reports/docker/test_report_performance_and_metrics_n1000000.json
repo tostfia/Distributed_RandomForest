@@ -1,25 +1,25 @@
 {
   "performance_and_metrics": {
     "scenario_description": "Valutazione delle prestazioni pure di addestramento in esecuzione local.",
-    "status": "SUCCESS",
+    "status": "FAILED",
     "execution_mode": "local",
-    "duration_seconds": 145.403,
+    "duration_seconds": 96.0232,
     "timing_breakdown": {
       "etl_seconds": 0.0,
-      "training_only_seconds": 142.0782,
-      "aggregation_seconds": 1.0699,
+      "training_only_seconds": 94.9222,
+      "aggregation_seconds": 1.0415,
       "oob_estimation_seconds": 0.0,
       "_NOTA": "training_only_seconds e' il termine confrontabile con la baseline (T_seq monocore / T_1node multicore). duration_seconds include anche ETL, aggregazione e stima OOB, che la baseline non esegue.",
-      "unaccounted_seconds": 2.2549
+      "unaccounted_seconds": 0.0595
     },
-    "trees_built": 100,
-    "throughput_trees_per_sec": 0.6877,
-    "throughput_trees_per_sec_training_only": 0.7038,
+    "trees_built": 82,
+    "throughput_trees_per_sec": 0.854,
+    "throughput_trees_per_sec_training_only": 0.8639,
     "model_accuracy_metrics": {
-      "mse": 7.224833865078067,
-      "rmse": 2.687905107156513,
-      "mae": 2.1442739229962924,
-      "r2": 0.7594035373182597,
+      "mse": 7.248033188791219,
+      "rmse": 2.6922171511212127,
+      "mae": 2.148234398078547,
+      "r2": 0.7586309693497459,
       "testing_set_size": 333340
     }
   }

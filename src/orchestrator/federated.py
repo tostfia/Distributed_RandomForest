@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import traceback
+import json
 from botocore.exceptions import ClientError
 import boto3
 import rpyc
@@ -184,6 +185,72 @@ class FederatedOrchestrator(BaseOrchestrator):
         if dataset_type:
             return str(dataset_type).strip().lower()
         return "real"
+
+    def _read_synthetic_total_n_samples(self) -> int:
+        """
+        Legge 'n_samples' (il TOTALE concettuale del dataset sintetico, non
+        la quota di un singolo worker) da outputs_baseline/config_synthetic.json
+        -- stesso file/pattern di lettura di
+        BaseOrchestrator.read_decision_threshold_from_config, qui riusato per
+        lo stesso scopo: allineare il federato allo stesso "spazio
+        campionario" del centralizzato, invece di un fallback fisso
+        indipendente dal numero di worker (vedi _load_synthetic_data in
+        federatedWorker.py, che genera 166666 campioni per worker a
+        prescindere da quanti worker sono attivi -- coincidenza numerica con
+        1.000.000/6, non un calcolo dinamico: con un numero di worker diverso
+        da 6 il dataset "federato" smetteva di corrispondere, come TOTALE
+        aggregato, a quello centralizzato).
+
+        Ritorna None (mai un'eccezione) se il file non esiste, non contiene
+        'n_samples', o è malformato: in quel caso il chiamante deve ricadere
+        sul comportamento precedente (nessun override esplicito, il worker
+        usa il proprio fallback fisso).
+        """
+        config_filename = "config_synthetic.json"
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
+            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
+
+        if not os.path.exists(config_path):
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato: "
+                  f"nessun totale campioni sintetici da ripartire tra i worker, ogni worker "
+                  f"userà il proprio fallback fisso.")
+            return None
+
+        try:
+            with open(config_path, "r") as f:
+                config_dati = json.load(f)
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_filename} fallita: {e}")
+            return None
+
+        total_n_samples = config_dati.get("n_samples")
+        if total_n_samples is None:
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] 'n_samples' assente in "
+                  f"{config_filename}: ogni worker userà il proprio fallback fisso.")
+            return None
+
+        return int(total_n_samples)
+
+    def _allocate_synthetic_samples(self, worker_names: list, total_n_samples: int) -> dict:
+        """
+        Ripartisce 'total_n_samples' in quote il più possibile uguali tra i
+        worker forniti (divisione intera + resto distribuito ai primi worker
+        nell'ordine di 'worker_names', così la somma delle quote torna
+        ESATTAMENTE 'total_n_samples' indipendentemente da quanti worker sono
+        attivi -- a differenza del fallback fisso precedente, la dimensione
+        totale del dataset sintetico federato ora corrisponde sempre a quella
+        del centralizzato, qualunque sia NUM_WORKERS.
+        """
+        num_workers = len(worker_names)
+        base_quota, remainder = divmod(total_n_samples, num_workers)
+        quotas = {}
+        for i, w_name in enumerate(worker_names):
+            quotas[w_name] = base_quota + (1 if i < remainder else 0)
+        return quotas
 
     def _fetch_worker_shard_sizes(self, worker_names: list, available_workers: dict, job_id: str = None) -> dict:
         """
@@ -421,6 +488,33 @@ class FederatedOrchestrator(BaseOrchestrator):
             # regressione (class_weight non ha senso lì).
             class_weight = hp.get("class_weight", "balanced" if tree_type == "classifier" else None)
 
+            # FIX: con dataset_type='synthetic', ogni worker generava un
+            # numero FISSO di campioni (166666, il fallback hardcoded in
+            # _load_synthetic_data quando 'n_samples' non è tra gli
+            # hyperparameters ricevuti) indipendentemente da quanti worker
+            # sono effettivamente attivi -- coincidenza numerica con
+            # 1.000.000/6, non un calcolo dinamico: con un numero di worker
+            # diverso da 6, la somma dei dati "visti" dal federato smetteva
+            # di corrispondere al totale usato dal centralizzato, rendendo i
+            # due esperimenti non più confrontabili sullo stesso volume dati.
+            # Qui leggiamo il totale da config_synthetic.json (stesso valore
+            # che il centralizzato usa per intero) e lo ripartiamo in quote
+            # il più possibile uguali tra i worker REALMENTE attivi in questo
+            # round: la somma torna sempre 'total_n_samples' esatto,
+            # qualunque sia NUM_WORKERS. None (nessuna riga 'n_samples' nel
+            # config, o config assente) -> nessun override esplicito, ogni
+            # worker ricade sul proprio fallback fisso come accadeva prima.
+            synthetic_n_samples_by_worker = {}
+            if self._resolve_dataset_type(payload) == "synthetic":
+                total_synthetic_n_samples = self._read_synthetic_total_n_samples()
+                if total_synthetic_n_samples is not None:
+                    synthetic_n_samples_by_worker = self._allocate_synthetic_samples(
+                        worker_names, total_synthetic_n_samples
+                    )
+                    print(f"[{self.orchestrator_name}] Dataset sintetico: {total_synthetic_n_samples} campioni "
+                          f"totali ripartiti tra {num_workers} worker attivi "
+                          f"(~{total_synthetic_n_samples // num_workers} campioni/worker).")
+
             # Iperparametro dell'ESPERIMENTO (non del modello): come sono stati
             # ripartiti i dati tra i worker in fase di provisioning. Letto qui
             # solo per tracciabilità nei log/nelle metriche — la ripartizione
@@ -432,10 +526,12 @@ class FederatedOrchestrator(BaseOrchestrator):
             # sopravvivono al giro completo client -> SQS -> qui.
             partitioning_info = {
                 "strategy": payload.get("partition_strategy", "iid"),
+                "alpha": payload.get("partition_alpha"),
                 "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
             }
             print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
                   f"strategy='{partitioning_info.get('strategy', 'iid')}'"
+                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "")
                   + f" | tree_allocation='{partitioning_info.get('tree_allocation')}'.")
 
             # Allocazione del budget di alberi tra i worker, secondo la strategia
@@ -557,6 +653,13 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 "dataset_random_state": seed,
                                 "feature_selezionate": feature_selezionate,
                                 "class_weight": class_weight,
+                                # Presente solo per dataset_type='synthetic' e solo
+                                # se config_synthetic.json aveva 'n_samples' (vedi
+                                # sopra): quota di QUESTO worker sul totale
+                                # sintetico condiviso, invece del fallback fisso
+                                # indipendente dal numero di worker.
+                                **({"n_samples": synthetic_n_samples_by_worker[w_name]}
+                                   if w_name in synthetic_n_samples_by_worker else {}),
 
                             },
                         )
@@ -763,6 +866,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         # storico locale del job di training corrispondente.
         partitioning_info = {
             "strategy": payload.get("partition_strategy", "iid"),
+            "alpha": payload.get("partition_alpha"),
             "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
         }
 

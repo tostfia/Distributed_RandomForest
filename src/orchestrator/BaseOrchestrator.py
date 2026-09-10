@@ -104,9 +104,7 @@ def normalize_job_meta_numerics(meta: dict) -> dict:
 
     normalized = dict(meta)
 
-    for key in _JOB_META_FLOAT_KEYS:
-        if key in normalized:
-            normalized[key] = _as_float_if_integral(normalized[key])
+   
 
     hp = normalized.get("hyperparameters")
     if isinstance(hp, dict):
@@ -764,7 +762,7 @@ class BaseOrchestrator(ABC):
         """
         Persiste i metadati originali del job (dataset_path, dataset_type,
         hyperparameters, request_type, e — per il federato — partition_strategy/
-        tree_allocation_strategy). Lo state_manager (DynamoDB
+        partition_alpha/tree_allocation_strategy). Lo state_manager (DynamoDB
         reale o mock) NON conserva questi campi: senza questo sidecar,
         _perform_active_recovery non potrebbe ricostruire un payload valido
         dopo un failover dell'orchestratore, e ripartirebbe con i default
@@ -958,6 +956,7 @@ class BaseOrchestrator(ABC):
                         # ripreso dopo un failover perderebbe la strategia di
                         # partizionamento/allocazione originale.
                         "partition_strategy": job_meta.get("partition_strategy", "iid"),
+
                         "tree_allocation_strategy": job_meta.get("tree_allocation_strategy", "proportional"),
                     }
 

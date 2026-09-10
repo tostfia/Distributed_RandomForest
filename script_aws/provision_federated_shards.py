@@ -42,13 +42,7 @@ OUTPUTS_BASELINE_DIR = "outputs_baseline"
 # (gemello locale di questo script, deve restare allineato).
 TARGET_ROWS_PER_DAY = 100_000
 
-# Default storico: partizionamento IID, invariato rispetto a prima. "dirichlet" e
-# "by_day" sono opt-in via CLI/env, gemelle di quelle esposte da
-# script_local/provision_local_shards.py (vedi lì per il significato di alpha).
-# Se li usi, ricordati di tenerli coerenti con quanto eventualmente registrato
-# nel manifesto (config_real.json/config_synthetic.json prodotto da
-# src/baseline/run_baseline.py), così com'è già richiesto per gli altri
-# parametri di generazione (sample_fraction, seed, ecc.).
+
 DEFAULT_PARTITION_STRATEGY = "iid"
 
 
