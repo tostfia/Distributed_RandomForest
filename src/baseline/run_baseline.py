@@ -31,7 +31,7 @@ REGRESSOR_DEFAULT_HP = {
     "min_samples_split": 2,
     "criterion": "squared_error",
     "bootstrap": True,
-    "max_samples": None,  # None = bootstrap sample_size = n_samples (default sklearn)
+    "max_samples": 0.3,  # None = bootstrap sample_size = n_samples (default sklearn)
     "max_features": 1 / 3,
 }
 
