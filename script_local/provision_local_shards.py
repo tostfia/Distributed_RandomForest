@@ -72,7 +72,7 @@ RANDOM_STATE = 123
 # configurazione dell'esperimento (es. nel config JSON prodotto da run_baseline.py),
 # non hard-codato qui come gli altri parametri sopra.
 DEFAULT_PARTITION_STRATEGY = "per_day"
-DEFAULT_ALPHA = 0.5
+
 
 BASE_CACHE_DIR = "./workers_cache"
 DEFAULT_DATA_FOLDER = "./dataset_cache"
@@ -136,14 +136,14 @@ def _resolve_data_folder(data_folder: str) -> str:
 
 
 def provision(num_workers: int, data_folder: str, dataset_type: str = "real", force: bool = False,
-              partition_strategy: str = DEFAULT_PARTITION_STRATEGY, alpha: float = DEFAULT_ALPHA,
+              partition_strategy: str = DEFAULT_PARTITION_STRATEGY,
               day_column: str = None) -> None:
     print("=====================================================")
     print("   PROVISIONING FEDERATO IN LOCALE (offline, one-shot)")
     print("=====================================================")
     print(f" • Worker target:  {num_workers}")
     print(f" • Dataset type:   {dataset_type}")
-    print(f" • Strategia part.:{partition_strategy}" + (f" (alpha={alpha})" if partition_strategy == "dirichlet" else ""))
+    print(f" • Strategia part.:{partition_strategy}" )
     print(f" • Destinazione:   {os.path.abspath(BASE_CACHE_DIR)}")
 
     if dataset_type == "synthetic":
@@ -192,7 +192,6 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
         num_workers=num_workers,
         environment="local",
         partition_strategy=partition_strategy,
-        alpha=alpha,
         day_column=resolved_day_column,
     )
     print(f"\n[PROVISIONING OK] Shard reali distribuiti nelle cartelle locali dei worker "
@@ -209,7 +208,6 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
     # un'assunzione non verificata.
     manifest = {
         "partition_strategy": partition_strategy,
-        "alpha": alpha if partition_strategy == "dirichlet" else None,
         "day_column": resolved_day_column if partition_strategy == "by_day" else None,
         "num_workers": num_workers,
     }
@@ -217,7 +215,7 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"[PROVISIONING] Manifesto scritto in '{manifest_path}' (letto dal client per popolare "
-          f"automaticamente partition_strategy/alpha nella richiesta di training).")
+          f"automaticamente partition_strategy nella richiesta di training).")
 
 
 def main() -> None:
@@ -237,12 +235,7 @@ def main() -> None:
                         default=os.environ.get("PARTITION_STRATEGY", DEFAULT_PARTITION_STRATEGY),
                         choices=["iid", "dirichlet", "by_day"],
                         help="Strategia di partizionamento tra i worker: 'iid' (default, storica), "
-                             "'dirichlet' (eterogeneità sintetica controllata da --alpha), "
                              "'by_day' (partizionamento naturale per file/giorno di origine).")
-    parser.add_argument("--alpha", type=float, default=float(os.environ.get("ALPHA", DEFAULT_ALPHA)),
-                        help="Iperparametro di eterogeneità per partition_strategy='dirichlet'. "
-                             "Valori piccoli (es. 0.1) = eterogeneità estrema; valori grandi "
-                             "(es. 10+) tendono all'IID.")
     parser.add_argument("--day-column", type=str, default=os.environ.get("DAY_COLUMN"),
                         help="Nome della colonna che identifica il giorno/file di origine, "
                              "richiesta solo con partition_strategy='by_day'.")
@@ -254,7 +247,6 @@ def main() -> None:
         dataset_type=args.dataset_type,
         force=args.force,
         partition_strategy=args.partition_strategy,
-        alpha=args.alpha,
         day_column=args.day_column,
     )
 

@@ -432,12 +432,10 @@ class FederatedOrchestrator(BaseOrchestrator):
             # sopravvivono al giro completo client -> SQS -> qui.
             partitioning_info = {
                 "strategy": payload.get("partition_strategy", "iid"),
-                "alpha": payload.get("partition_alpha"),
                 "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
             }
             print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
                   f"strategy='{partitioning_info.get('strategy', 'iid')}'"
-                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "")
                   + f" | tree_allocation='{partitioning_info.get('tree_allocation')}'.")
 
             # Allocazione del budget di alberi tra i worker, secondo la strategia
@@ -765,7 +763,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         # storico locale del job di training corrispondente.
         partitioning_info = {
             "strategy": payload.get("partition_strategy", "iid"),
-            "alpha": payload.get("partition_alpha"),
             "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
         }
 

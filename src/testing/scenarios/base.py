@@ -150,27 +150,8 @@ class BaseTestScenario(ABC):
         return dict(self._resolved_hp)
 
     def _resolve_federated_partitioning(self) -> dict:
-        """
-        Strategia/alpha di partizionamento e allocazione alberi dichiarati nel
-        manifesto della baseline ('federated_partitioning', vedi
-        run_baseline.py e main.py::load_federated_partitioning) — STESSA fonte
-        di verità già usata da _resolve_hyperparameters.
-
-        Irrilevante per il centralizzato (non partiziona mai i dati) e per il
-        dataset sintetico (nessun manifesto di partizionamento). In quei casi,
-        e in generale se il manifesto manca/è illeggibile, ritorna il default
-        sicuro {"strategy": "iid", "alpha": None, "tree_allocation": "proportional"}.
-
-        Senza questo, i payload costruiti direttamente dagli scenari (che
-        bypassano TrainingRequest/InferenceRequest e quindi main.py) non
-        porterebbero mai questi campi: federated.py userebbe comunque i propri
-        fallback sicuri e NON andrebbe in errore, ma le metriche/i log
-        etichetterebbero sempre "iid"/"proportional" anche quando gli shard
-        sul disco sono stati provisionati con Dirichlet/equal — un
-        disallineamento silenzioso tra ciò che è stato davvero testato e ciò
-        che viene riportato.
-        """
-        default = {"strategy": "iid", "alpha": None, "tree_allocation": "proportional"}
+        
+        default = {"strategy": "iid","tree_allocation": "proportional"}
 
         dataset_type = self.config.get("dataset_type", "real")
         if dataset_type != "real":
@@ -182,7 +163,7 @@ class BaseTestScenario(ABC):
             # così quella probe inutile viene saltata del tutto (vedi
             # tree_allocation_strategy == "equal" in
             # FederatedOrchestrator._execute_training_step).
-            return {"strategy": "iid", "alpha": None, "tree_allocation": "equal"}
+            return {"strategy": "iid",  "tree_allocation": "equal"}
 
         manifest_path = os.path.join(BASELINE_MANIFEST_DIR, "config_real.json")
         if not os.path.exists(manifest_path):
@@ -196,23 +177,13 @@ class BaseTestScenario(ABC):
         partitioning = manifest.get("federated_partitioning") or {}
         return {
             "strategy": partitioning.get("strategy", "iid"),
-            "alpha": partitioning.get("alpha"),
             "tree_allocation": partitioning.get("tree_allocation", "proportional"),
         }
 
     def _augment_payload_with_partitioning(self, payload: dict) -> dict:
-        """
-        Da chiamare all'interno di ogni _build_payload() PRIMA di ritornare il
-        dizionario, per i soli scenari in modalità federata: aggiunge i tre
-        campi piatti che federated.py legge davvero (partition_strategy,
-        partition_alpha, tree_allocation_strategy — vedi
-        FederatedOrchestrator._execute_training_step/_execute_inference_step),
-        speculare a come main.py li ricava con load_federated_partitioning()
-        prima di costruire una TrainingRequest/InferenceRequest.
-        """
+       
         info = self._resolve_federated_partitioning()
         payload["partition_strategy"] = info["strategy"]
-        payload["partition_alpha"] = info["alpha"]
         payload["tree_allocation_strategy"] = info["tree_allocation"]
         return payload
 
@@ -228,7 +199,7 @@ class BaseTestScenario(ABC):
         Perché non "sempre worker 1" (comportamento storico): con
         l'allocazione proporzionale (FederatedOrchestrator._allocate_tree_quotas,
         strategy="proportional", il default), un worker con uno shard piccolo
-        o vuoto — tipico con partizionamento Dirichlet ad alpha basso — può
+        o vuoto può
         ricevere pochissimi alberi o addirittura zero in un dato round.
         Ucciderlo non eserciterebbe alcuna redistribuzione di lavoro reale: il
         test dichiarerebbe SUCCESS senza aver davvero testato il path di

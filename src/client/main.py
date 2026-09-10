@@ -314,9 +314,6 @@ def handle_inference():
     inference_partition_strategy = (
         training_entry_for_job.get("partition_strategy", "iid") if training_entry_for_job else "iid"
     )
-    inference_partition_alpha = (
-        training_entry_for_job.get("partition_alpha") if training_entry_for_job else None
-    )
     inference_tree_allocation_strategy = (
         training_entry_for_job.get("tree_allocation_strategy", "proportional") if training_entry_for_job else "proportional"
     )
@@ -336,7 +333,6 @@ def handle_inference():
             dataset_type=inference_dataset_type,
             hyperparameters=hp_obj,
             partition_strategy=inference_partition_strategy,
-            partition_alpha=inference_partition_alpha,
             tree_allocation_strategy=inference_tree_allocation_strategy
         )
     except Exception as e:
@@ -360,7 +356,6 @@ def handle_inference():
             "dataset_type": inference_dataset_type,
             "tree_type": hp_obj.tree_type,
             "partition_strategy": inference_request.partition_strategy,
-            "partition_alpha": inference_request.partition_alpha,
             "tree_allocation_strategy": inference_request.tree_allocation_strategy,
         })
     except Exception as e:
@@ -654,10 +649,8 @@ def handle_training():
         manifest = _read_partitioning_manifest(environment)
         if manifest:
             partition_strategy = manifest.get("partition_strategy", "iid")
-            partition_alpha = manifest.get("alpha")
             print(f"\n  [INFO] Partizionamento federato rilevato dal provisioning: "
                   f"{partition_strategy.upper()}"
-                  + (f" (alpha={partition_alpha})" if partition_strategy == "dirichlet" else "")
                   + f" — {manifest.get('num_workers', '?')} worker. "
                   f"(Letto automaticamente: non è più richiesto dichiararlo a mano, "
                   f"evita disallineamenti col provisioning reale.)")
@@ -668,7 +661,6 @@ def handle_training():
                   "federato su dataset reale, per un risultato affidabile e tracciato "
                   "correttamente.")
             partition_strategy = "iid"
-            partition_alpha = None
 
         print("\n  Allocazione del budget di alberi tra i worker federati:")
         print("    [1] Proporzionale alla dimensione dello shard (default, formula FedAvg n_k/n)")
@@ -678,7 +670,6 @@ def handle_training():
         print(f"  [INFO] Allocazione alberi: {tree_allocation_strategy.upper()}")
     else:
         partition_strategy = "iid"
-        partition_alpha = None
         tree_allocation_strategy = "proportional"
             
     # 5. Validazione Pydantic
@@ -690,7 +681,6 @@ def handle_training():
             dataset_type=dataset_type,
             hyperparameters=hp_obj,
             partition_strategy=partition_strategy,
-            partition_alpha=partition_alpha,
             tree_allocation_strategy=tree_allocation_strategy
         )
     except Exception as e:
@@ -734,7 +724,6 @@ def handle_training():
             "tree_type": request.hyperparameters.tree_type,
             "hyperparameters": request.hyperparameters.model_dump(),
             "partition_strategy": request.partition_strategy,
-            "partition_alpha": request.partition_alpha,
             "tree_allocation_strategy": request.tree_allocation_strategy,
         })
         

@@ -74,11 +74,7 @@ JOB_META_TABLE = "JobMetadata"
 # ('sqrt', 'log2'), che non sono numeri.
 _JOB_META_FLOAT_HP_KEYS = ("max_samples", "max_features")
 
-# Campi float di primo livello nei metadati. partition_alpha è l'iperparametro
-# di eterogeneità della partizione Dirichlet: numericamente 1 e 1.0 sono
-# equivalenti per numpy, ma tenerlo float mantiene coerente ciò che finisce
-# nelle metriche dell'esperimento.
-_JOB_META_FLOAT_KEYS = ("partition_alpha",)
+
 
 
 def _as_float_if_integral(value):
@@ -710,7 +706,6 @@ class BaseOrchestrator(ABC):
                 self._clean_checkpoint(job_id)
                 partitioning_info = {
                     "strategy": payload.get("partition_strategy", "iid"),
-                    "alpha": payload.get("partition_alpha"),
                     "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
                 }
                 self._generate_performance_report(job_id, t_dist, current_alberi, partitioning_info=partitioning_info)
@@ -769,7 +764,7 @@ class BaseOrchestrator(ABC):
         """
         Persiste i metadati originali del job (dataset_path, dataset_type,
         hyperparameters, request_type, e — per il federato — partition_strategy/
-        partition_alpha/tree_allocation_strategy). Lo state_manager (DynamoDB
+        tree_allocation_strategy). Lo state_manager (DynamoDB
         reale o mock) NON conserva questi campi: senza questo sidecar,
         _perform_active_recovery non potrebbe ricostruire un payload valido
         dopo un failover dell'orchestratore, e ripartirebbe con i default
@@ -795,7 +790,6 @@ class BaseOrchestrator(ABC):
             # il job vero era, ad esempio, Dirichlet con allocazione equa —
             # etichettando le metriche del run recuperato in modo scorretto.
             "partition_strategy": payload.get("partition_strategy", "iid"),
-            "partition_alpha": payload.get("partition_alpha"),
             "tree_allocation_strategy": payload.get("tree_allocation_strategy", "proportional"),
         }
         if self.environment == "local":
@@ -964,7 +958,6 @@ class BaseOrchestrator(ABC):
                         # ripreso dopo un failover perderebbe la strategia di
                         # partizionamento/allocazione originale.
                         "partition_strategy": job_meta.get("partition_strategy", "iid"),
-                        "partition_alpha": job_meta.get("partition_alpha"),
                         "tree_allocation_strategy": job_meta.get("tree_allocation_strategy", "proportional"),
                     }
 

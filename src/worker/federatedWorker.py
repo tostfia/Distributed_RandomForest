@@ -666,21 +666,7 @@ class FederatedWorker(BaseWorker):
                 # validation set che l'Orchestratore userà per calibrare
                 # decision_threshold specificamente sul modello federato.
                 #
-                # BUG CORRETTO (7/9/2026): n_minority > 0 non garantisce che lo
-                # split stratificato riesca -- con partizionamento Dirichlet
-                # molto eterogeneo (es. alpha=0.1) uno shard può avere 1-2
-                # righe di classe minoritaria: troppo poche perché
-                # StratifiedDataSplitter possa mettere almeno un esempio in
-                # entrambi i lati dello split (solleva ValueError "resta al
-                # massimo 1 classe stratificabile"), ma comunque troppe per
-                # far scattare la guardia n_minority==0 sopra. Prima di questo
-                # fix il ValueError risaliva non gestito fino al chiamante RPC,
-                # mandando il worker in errore e bloccando l'intero round
-                # (nessun riassegnamento automatico del task con
-                # FED_SUPERVISOR_MAX_RESTARTS=0). Stesso fallback già usato per
-                # n_minority==0: split/undersampling saltati, training sullo
-                # shard così com'è, invece di far fallire l'intero job per un
-                # singolo worker con dati troppo esigui.
+               
                 try:
                     validation_splitter = StratifiedDataSplitter(
                         target_column=self.target_column, test_size=VALIDATION_SIZE_FOR_THRESHOLD,
@@ -1080,8 +1066,7 @@ class FederatedWorker(BaseWorker):
            una volta sola, al primo training vero.
 
            Se la classe minoritaria (Attacco) è del tutto assente in questo
-           shard (possibile con Dirichlet ad alpha molto basso, o con
-           by_day e più worker che giorni disponibili), ritorna
+           shard, ritorna
            ESPLICITAMENTE 0: la quota alberi risultante per questo worker
            sarà 0, l'Orchestratore lo salta per questo round -- evitando
            così il crash che si avrebbe più avanti in

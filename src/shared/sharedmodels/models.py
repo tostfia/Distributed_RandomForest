@@ -66,8 +66,7 @@ class TrainingRequest(BaseModel):
     dataset_type: DatasetType
     hyperparameters: Hyperparameters
     seed: int = 123
-    partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
-    partition_alpha: Optional[float] = None
+    partition_strategy: Literal["iid","by_day"] = "iid"
     tree_allocation_strategy: Literal["proportional", "equal"] = "proportional"
 
 
@@ -88,6 +87,5 @@ class InferenceRequest(BaseModel):
     environment: Environment
     dataset_type: DatasetType = "real"
     hyperparameters: Hyperparameters
-    partition_strategy: Literal["iid", "dirichlet", "by_day"] = "iid"
-    partition_alpha: Optional[float] = None
+    partition_strategy: Literal["iid" ,"by_day"] = "iid"
     tree_allocation_strategy: Literal["proportional", "equal"] = "proportional"

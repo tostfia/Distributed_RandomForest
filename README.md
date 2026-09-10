@@ -272,8 +272,8 @@ Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tf
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **PARTITION_STRATEGY** | `by_day/dirichlet/iid` | Strategia di partizionamento dello shard federato. |
-| **ALPHA** | float | Iperparametro di eterogeneità per la strategia dirichlet (valori piccoli = Non-IID, valori grandi = IID). |
+| **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
+
 
 
 La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
