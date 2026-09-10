@@ -980,6 +980,60 @@ class FederatedWorker(BaseWorker):
 
         return pickle.dumps(response)
 
+    def exposed_get_validation_predictions(self, payload: bytes) -> bytes:
+        """
+        Calcola le probabilità del modello GLOBALE (aggregato, voto pesato
+        per foglia) sul validation fold LOCALE di questo worker
+        (self._cached_X_val/_cached_y_val, popolato in
+        _load_and_preprocess_real_shard: dati mai visti né in training né
+        nel test finale). Usato da
+        FederatedOrchestrator._calibrate_federated_threshold per calibrare
+        decision_threshold specificamente sul modello federato, invece di
+        riusare quella calibrata sulla baseline centralizzata (che può non
+        essere valida qui: il partizionamento non-IID -- es. 'by_day' --
+        e il voto pesato per foglia cambiano la distribuzione delle
+        probabilità restituite rispetto al modello centralizzato).
+
+        Non solleva errore se questo worker non ha un validation set locale
+        (shard senza, o con troppo poca, classe minoritaria): ritorna
+        y_true/y_probs vuoti, e l'Orchestratore lo esclude semplicemente dal
+        pool di calibrazione (stesso comportamento già previsto lato
+        chiamante per qualunque worker che fallisca la probe).
+        """
+        payload = pickle.loads(payload)
+        model_dir = payload.get("model_dir")
+        num_trees = payload.get("num_trees")
+        global_classes = np.array(payload.get("global_classes", [0, 1]), dtype=np.int64)
+
+        if self._cached_X_val is None or self._cached_y_val is None or len(self._cached_X_val) == 0:
+            return pickle.dumps({"y_true": [], "y_probs": []})
+
+        if model_dir is None or num_trees is None:
+            raise ValueError(
+                f"[{self.worker_name}] exposed_get_validation_predictions richiede "
+                f"'model_dir' e 'num_trees' (il modello globale è salvato come alberi "
+                f"separati, non più come blob monolitico); payload ricevuto: {list(payload.keys())}."
+            )
+
+        from src.dataset.checkpoint_dao import CheckpointDAOFactory
+        checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
+
+        # Stesso streaming a batch usato in exposed_predict_subset_forest:
+        # non materializza mai l'intera foresta in RAM in un colpo solo.
+        proba_matrix = _weighted_forest_predict_proba_streaming(
+            model_dir, num_trees, checkpoint_dao, self._cached_X_val, global_classes, batch_size=10
+        )
+
+        # Convenzione condivisa col resto del file: etichetta maggiore = positiva.
+        positive_label = global_classes[-1]
+        positive_idx = int(np.where(global_classes == positive_label)[0][0])
+        y_probs = proba_matrix[:, positive_idx]
+
+        return pickle.dumps({
+            "y_true": self._cached_y_val.tolist(),
+            "y_probs": y_probs.tolist(),
+        })
+
     def exposed_get_local_y_test(self) -> bytes:
         if self._cached_y_test is None:
             raise ValueError(f"[{self.worker_name}] Errore: Nessun target vector locale y_test in RAM.")

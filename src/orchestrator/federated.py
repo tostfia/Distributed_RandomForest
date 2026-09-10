@@ -14,7 +14,7 @@ import re
 
 from rpyc.utils.classic import obtain
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import precision_recall_curve, roc_auc_score
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
 from src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seconds
@@ -403,6 +403,23 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             hp = payload.get("hyperparameters", {})
             tree_type = hp.get("tree_type", "classifier")
+            # FIX: 'class_weight' era già supportato lato worker
+            # (exposed_train_local_federated_forest / build_single_tree in
+            # federatedWorker.py: se presente negli hyperparameters, viene
+            # passato al DecisionTreeClassifier), ma non veniva MAI impostato
+            # qui -- restava sempre None, cioè nessun bilanciamento per
+            # nessun albero. Rilevante soprattutto con partition_strategy
+            # non-IID come 'by_day', dove il rapporto Benign/Attacco di un
+            # singolo shard può essere molto diverso da quello globale (es.
+            # worker con 13 o 7 soli campioni della classe minoritaria):
+            # 'balanced' pesa ogni classe in proporzione inversa alla sua
+            # frequenza LOCALE, così anche gli alberi di un worker con shard
+            # fortemente sbilanciato non collassano semplicemente sulla
+            # classe locale maggioritaria. Rispetta comunque un valore
+            # esplicito nel manifesto (hp), se presente; il default
+            # 'balanced' si applica solo ai classificatori, mai alla
+            # regressione (class_weight non ha senso lì).
+            class_weight = hp.get("class_weight", "balanced" if tree_type == "classifier" else None)
 
             # Iperparametro dell'ESPERIMENTO (non del modello): come sono stati
             # ripartiti i dati tra i worker in fase di provisioning. Letto qui
@@ -541,6 +558,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                                 "random_state": effective_seed,
                                 "dataset_random_state": seed,
                                 "feature_selezionate": feature_selezionate,
+                                "class_weight": class_weight,
 
                             },
                         )
@@ -701,7 +719,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # host/porta nel frattempo, e la calibrazione non è così urgente
                         # da giustificare il rischio di contattare un endpoint stantio.
                         calibration_workers = ServiceRegistry.get_available_workers(self.environment)
-                        self._calibrate_federated_threshold(self.current_job_id, global_classes, calibration_workers)
+                        self._calibrate_federated_threshold(self.current_job_id, global_classes, calibration_workers, final_count)
                 except Exception as e_thr:
                     print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia federata fallita "
                           f"(non bloccante, l'inferenza ricadrà sulla soglia della baseline): {e_thr}")
@@ -876,6 +894,27 @@ class FederatedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] [FALLBACK] Nessuna soglia federata calibrata "
                       f"disponibile per questo job: uso quella della baseline ({decision_threshold}).")
 
+        # SOGLIE PER-WORKER (vedi _calibrate_federated_threshold): con
+        # partizionamento non-IID la soglia unica sopra può essere lontana
+        # dall'ottimo per un worker la cui distribuzione locale delle
+        # probabilità è spostata rispetto al pool. Se disponibili, ogni
+        # worker riceve la PROPRIA soglia invece di quella broadcast a tutti
+        # -- fallback su 'decision_threshold' (sopra) per qualunque worker
+        # senza una soglia individuale salvata (validation locale
+        # insufficiente, o job addestrato prima di questa modifica).
+        per_worker_thresholds = {}
+        per_worker_threshold_path = self._resolve_per_worker_threshold_path(job_id)
+        if self.checkpoint_dao.exists(per_worker_threshold_path):
+            try:
+                per_worker_thresholds = self.checkpoint_dao.load(per_worker_threshold_path)
+                print(f"[{self.orchestrator_name}] Soglie per-worker trovate per {len(per_worker_thresholds)} "
+                      f"worker: {sorted(per_worker_thresholds.keys())}. Gli altri useranno la soglia globale "
+                      f"({decision_threshold}).")
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [WARN] Soglie per-worker presenti ma illeggibili "
+                      f"({e}): tutti i worker useranno la soglia globale.")
+                per_worker_thresholds = {}
+
         # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
         # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
         # dopo un failover sa esattamente quali worker sono già stati validati e
@@ -941,7 +980,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                         "dataset_type": self._resolve_dataset_type(payload),
                         "feature_selezionate": feature_selezionate,
                         "tree_type": tree_type,
-                        "decision_threshold": decision_threshold,
+                        # Soglia individuale se calibrata per QUESTO worker
+                        # (vedi per_worker_thresholds sopra), altrimenti quella
+                        # globale broadcast a tutti come prima di questa modifica.
+                        "decision_threshold": per_worker_thresholds.get(idx, {}).get(
+                            "decision_threshold", decision_threshold
+                        ),
                         "num_trees": total_trees,
                     }
                     if tree_type == "classifier" and global_classes is not None:
@@ -1229,7 +1273,19 @@ class FederatedOrchestrator(BaseOrchestrator):
             return f"s3://{BUCKET_NAME}/saved_models/federated/threshold_{job_id}.pkl"
         return os.path.join("./saved_models", f"threshold_{job_id}.pkl")
 
-    def _calibrate_federated_threshold(self, job_id: str, global_classes, available_workers: dict) -> float:
+    def _resolve_per_worker_threshold_path(self, job_id: str) -> str:
+        """Path del dizionario {stable_worker_idx: {decision_threshold, ...}}
+        con le soglie calibrate individualmente per ciascun worker (vedi
+        _calibrate_federated_threshold). Assente per i job su cui non è stato
+        possibile calibrare NESSUN worker individualmente (validation set
+        locale insufficiente ovunque): in quel caso _execute_inference_step
+        usa la soglia globale per tutti, come già avveniva prima di questa
+        modifica."""
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/saved_models/federated/per_worker_threshold_{job_id}.pkl"
+        return os.path.join("./saved_models", f"per_worker_threshold_{job_id}.pkl")
+
+    def _calibrate_federated_threshold(self, job_id: str, global_classes, available_workers: dict, num_trees: int = None) -> float:
         """
         Calibra la soglia di decisione sul validation set FEDERATO (pool dei
         fold locali di ciascun worker -- self._cached_X_val/_y_val lato
@@ -1253,11 +1309,32 @@ class FederatedOrchestrator(BaseOrchestrator):
                   f"Nessuna soglia federata calcolata.")
             return None
 
-        model_path = self._resolve_model_path(job_id)
+        # FIX: prima si passava 'model_path' (il vecchio blob monolitico),
+        # ma da quando il training salva un file per albero in 'model_dir'
+        # (vedi _reconstruct_and_save_global_model), 'model_path' non viene
+        # più scritto su disco -- il worker lo avrebbe cercato invano. Il
+        # caricamento va fatto in streaming da model_dir/num_trees, come già
+        # avviene per l'inferenza vera e propria (exposed_predict_subset_forest).
+        model_dir = self._resolve_model_dir(job_id)
+        if num_trees is None:
+            # Fallback: se il chiamante non lo passa esplicitamente (es. in
+            # futuro venisse invocata da un altro punto del codice), lo
+            # leggiamo dai metadati appena scritti.
+            try:
+                meta = self.checkpoint_dao.load(self._resolve_model_meta_path(job_id))
+                num_trees = meta.get("num_trees")
+            except Exception:
+                num_trees = None
+        if not num_trees:
+            print(f"[{self.orchestrator_name}] [CALIBRAZIONE SOGLIA] Impossibile determinare 'num_trees' "
+                  f"per il job '{job_id}'. Nessuna soglia federata calcolata.")
+            return None
+
         all_y_true, all_y_probs = [], []
+        per_worker_val = {}  # stable_idx -> (y_true list, y_probs list)
         results_lock = threading.Lock()
 
-        def _probe(w_name, w_info):
+        def _probe(w_name, w_info, idx):
             conn = None
             try:
                 conn = rpyc.connect(
@@ -1265,7 +1342,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                     config={"allow_pickle": True, "sync_request_timeout": 120}
                 )
                 raw = conn.root.exposed_get_validation_predictions(pickle.dumps({
-                    "model_path": model_path,
+                    "model_dir": model_dir,
+                    "num_trees": num_trees,
                     "global_classes": np.asarray(global_classes).tolist(),
                 }))
                 result = pickle.loads(obtain(raw))
@@ -1273,6 +1351,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     with results_lock:
                         all_y_true.extend(result["y_true"])
                         all_y_probs.extend(result["y_probs"])
+                        per_worker_val[idx] = (result["y_true"], result["y_probs"])
             except Exception as e:
                 print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia: worker '{w_name}' "
                       f"non ha fornito il validation set ({e}). Escluso dal pool.")
@@ -1283,7 +1362,10 @@ class FederatedOrchestrator(BaseOrchestrator):
                     except Exception:
                         pass
 
-        threads = [threading.Thread(target=_probe, args=(w, info)) for w, info in available_workers.items()]
+        threads = [
+            threading.Thread(target=_probe, args=(w, info, self._infer_worker_index(w, i)))
+            for i, (w, info) in enumerate(available_workers.items(), start=1)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -1319,6 +1401,78 @@ class FederatedOrchestrator(BaseOrchestrator):
             print(f"[{self.orchestrator_name}] [WARN] Soglia federata calcolata ma non salvata "
                   f"({e_save}): l'inferenza ricadrà sulla soglia della baseline.")
             return None
+
+        # SOGLIE PER-WORKER: con partizionamento non-IID (es. 'by_day') la
+        # soglia unica calibrata sul pool cross-worker può essere lontana
+        # dall'ottimo per un singolo worker la cui distribuzione locale delle
+        # probabilità è sistematicamente diversa dal resto (vedi analisi sui
+        # worker 5/10: non un problema di bilanciamento per-albero, ma di
+        # soglia globale applicata a una distribuzione locale spostata).
+        # Calcoliamo quindi, in aggiunta a quella globale, una soglia
+        # ottimizzata per F1 SOLO sui dati di validation locali di ciascun
+        # worker (stessa curva precision-recall, stesso criterio, ma sample
+        # ristretto a quel worker). Se un worker non ha abbastanza campioni
+        # locali (stesso MIN_VAL_SAMPLES della soglia globale) o ha una sola
+        # classe nel proprio validation set, non gli si assegna una soglia
+        # propria: in inferenza ricadrà sulla soglia globale per quel worker
+        # (vedi uso di questo dizionario in _execute_inference_step).
+        #
+        # GUARDIA AUC (aggiunta dopo il caso worker 5/10): un modello globale
+        # può semplicemente non avere segnale discriminante sui dati locali
+        # di un worker (giorno con pattern di traffico/attacco strutturalmente
+        # diverso da quelli su cui il resto dell'ensemble è stato allenato --
+        # concept shift, non un problema di soglia). In quel caso l'AUC locale
+        # è vicino a 0.5 (ranking ~casuale), e la soglia "ottima per F1" degenera
+        # matematicamente nel predire sempre la classe locale maggioritaria: su
+        # worker 5 (91% classe 1) e worker 10 (68% classe 1) questo significava
+        # "predici sempre attacco", con F1 aggregato migliore sulla carta ma un
+        # sistema operativamente inutile su quei giorni specifici (falsi
+        # positivi costanti). Sotto MIN_LOCAL_AUC non assegniamo una soglia
+        # individuale: quel worker ricade sulla soglia globale, che pur non
+        # essendo ottima per lui almeno non sfrutta ciecamente lo sbilanciamento
+        # locale delle classi.
+        MIN_LOCAL_AUC = 0.65
+        per_worker_thresholds = {}
+        for w_idx, (y_true_w, y_probs_w) in per_worker_val.items():
+            if len(y_true_w) < MIN_VAL_SAMPLES or len(set(y_true_w)) < 2:
+                continue
+            try:
+                local_auc = roc_auc_score(y_true_w, y_probs_w)
+                if local_auc < MIN_LOCAL_AUC:
+                    print(f"[{self.orchestrator_name}] [CALIBRAZIONE SOGLIA PER-WORKER] Worker {w_idx}: "
+                          f"AUC locale {local_auc:.4f} sotto la soglia minima ({MIN_LOCAL_AUC}) -- probabile "
+                          f"concept shift rispetto al resto dell'ensemble, non un problema di soglia. "
+                          f"Nessuna soglia individuale assegnata: userà quella globale.")
+                    continue
+
+                p_w, r_w, t_w = precision_recall_curve(y_true_w, y_probs_w)
+                denom_w = p_w + r_w
+                f1_w = np.where(denom_w == 0, 0.0, 2 * p_w * r_w / np.where(denom_w == 0, 1, denom_w))
+                best_w = int(np.nanargmax(f1_w[:-1]))
+                per_worker_thresholds[w_idx] = {
+                    "decision_threshold": float(t_w[best_w]),
+                    "n_val_samples": len(y_true_w),
+                    "f1_score": float(f1_w[best_w]),
+                    "precision": float(p_w[best_w]),
+                    "recall": float(r_w[best_w]),
+                    "local_auc": float(local_auc),
+                }
+            except Exception as e_w:
+                print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia per-worker fallita per "
+                      f"il worker {w_idx} ({e_w}): quel worker userà la soglia globale in inferenza.")
+
+        if per_worker_thresholds:
+            try:
+                self.checkpoint_dao.save(self._resolve_per_worker_threshold_path(job_id), per_worker_thresholds)
+                riepilogo = ", ".join(
+                    f"{idx}={v['decision_threshold']:.4f}" for idx, v in sorted(per_worker_thresholds.items())
+                )
+                print(f"[{self.orchestrator_name}] [CALIBRAZIONE SOGLIA PER-WORKER] Soglie individuali "
+                      f"calcolate per {len(per_worker_thresholds)}/{len(per_worker_val)} worker: {riepilogo}. "
+                      f"Gli altri useranno la soglia globale ({best_threshold:.4f}).")
+            except Exception as e_save_w:
+                print(f"[{self.orchestrator_name}] [WARN] Soglie per-worker calcolate ma non salvate "
+                      f"({e_save_w}): l'inferenza userà solo la soglia globale per tutti i worker.")
 
         return best_threshold
 
