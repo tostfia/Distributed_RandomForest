@@ -29,7 +29,7 @@ variable "training_mode" {
 variable "num_workers" {
   description = "Numero di worker da avviare (desired-count in centralized, numero di indici fissi 1..N in federated)."
   type        = number
-  default     = 3
+  default     = 10
 }
 
 variable "orchestrator_desired_count" {
