@@ -1,0 +1,31 @@
+{
+  "family": "lab-worker-task",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "4096",
+  "memory": "8192",
+  "taskRoleArn": "arn:aws:iam::759804778194:role/LabRole",
+  "executionRoleArn": "arn:aws:iam::759804778194:role/LabRole",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "759804778194.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest",
+      "essential": true,
+      "environment": [
+        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        {"name": "PYTHONUNBUFFERED", "value": "1"},
+        {"name": "ENV_MODE", "value": "aws"},
+        {"name": "TRAINING_MODE", "value": "centralized"}
+      ],
+      "command": ["sh", "-c", "echo test"],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/lab-worker",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "worker"
+        }
+      }
+    }
+  ]
+}

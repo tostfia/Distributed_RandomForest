@@ -72,6 +72,15 @@ resource "aws_ecs_task_definition" "worker_centralized" {
     }
   ])
 
+  # ESPLICITO, non solo default_tags del provider: verificato empiricamente
+  # (10/9/2026) che un tag presente SOLO in default_tags non soddisfa la
+  # condizione SCP su ecs:RegisterTaskDefinition - la SCP valuta il tag
+  # nella chiamata stessa, e Terraform non garantisce che default_tags
+  # venga incluso in quella specifica API call per questo tipo di risorsa.
+  # Un tag esplicito qui lo forza dentro la richiesta, come confermato dal
+  # test 'aws ecs register-task-definition --tags key=Project,value=...'.
+  tags = { Project = var.project_name }
+
   depends_on = [null_resource.docker_build_push]
 }
 
@@ -116,6 +125,11 @@ resource "aws_ecs_task_definition" "worker_federated" {
       }
     }
   ])
+
+  # Vedi la nota gemella su worker_centralized: tag esplicito richiesto
+  # nella chiamata stessa, default_tags da solo non basta per questa
+  # risorsa (verificato empiricamente il 10/9/2026).
+  tags = { Project = var.project_name }
 
   depends_on = [null_resource.docker_build_push]
 }

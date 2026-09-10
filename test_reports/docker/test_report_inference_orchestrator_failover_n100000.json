@@ -1,7 +1,0 @@
-{
-  "inference_orchestrator_failover": {
-    "status": "FAILED",
-    "duration_seconds": 0,
-    "error": "Training di preparazione non completato entro il timeout."
-  }
-}

@@ -168,18 +168,22 @@ resource "aws_launch_template" "orchestrator" {
     name = "LabInstanceProfile"
   }
 
-  vpc_security_group_ids = [aws_security_group.rf_distributed.id]
+  # I security group vanno SOLO qui dentro (non anche in
+  # vpc_security_group_ids a livello root): con network_interfaces esplicito
+  # (richiesto per associate_public_ip_address), AWS rifiuta la richiesta se
+  # entrambi sono presenti - errore visto in pratica su CreateAutoScalingGroup:
+  # "When a network interface is provided, the security groups must be a
+  # part of it".
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.rf_distributed.id]
+  }
 
   # Un cambio allo user-data crea una nuova versione del Launch Template;
   # è l'ASG (instance_refresh, sotto) a decidere se e come propagarlo alle
   # istanze esistenti — sostituisce il vecchio 'user_data_replace_on_change'
   # che operava direttamente su aws_instance.
   user_data = base64encode(local.orchestrator_user_data)
-
-  network_interfaces {
-    associate_public_ip_address = true
-    security_groups             = [aws_security_group.rf_distributed.id]
-  }
 
   tag_specifications {
     resource_type = "instance"

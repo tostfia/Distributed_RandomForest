@@ -15,9 +15,16 @@ provider "aws" {
   # default_tags applica questo tag automaticamente a ogni risorsa AWS
   # creata da Terraform che supporta il tagging, senza doverlo scrivere
   # a mano su ogni resource block.
+  #
+  # ATTENZIONE: il valore DEVE combaciare con var.project_name
+  # ("rf-distributed", vedi variables.tf) - è lo stesso usato in ogni
+  # filtro "tag:Project" del progetto (run_test_engine.sh,
+  # orchestrator_fault.py, orchestrator_asg_replacement.py, README). Un
+  # valore diverso qui non rompe la creazione delle risorse via Terraform,
+  # ma le rende invisibili a quei filtri.
   default_tags {
     tags = {
-      Project = "SDCC-ML"
+      Project = "rf-distributed"
     }
   }
 }
