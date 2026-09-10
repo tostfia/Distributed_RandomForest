@@ -1,5 +1,6 @@
 import pickle
 import os
+import gc
 import random
 import socket
 import threading
@@ -680,16 +681,21 @@ class FederatedOrchestrator(BaseOrchestrator):
                 collected_trees = all_trained_trees
 
             aggregation_start = time.perf_counter()
-            final_count = self._reconstruct_and_save_global_model(collected_trees, tree_type)
+            # NB: 'collected_trees' viene svuotata (elementi -> None) DENTRO
+            # questa chiamata, man mano che ogni albero viene persistito su
+            # disco, per liberare RAM il prima possibile invece di aspettare
+            # la fine dell'intero ciclo (vedi il commento nel corpo della
+            # funzione). Per questo 'detected_classes' viene ora restituita
+            # da qui invece di essere ricalcolata dopo da 'collected_trees'
+            # (che a quel punto sarebbe vuota, e la calibrazione sotto
+            # sarebbe silenziosamente saltata per ogni classificatore).
+            final_count, detected_classes = self._reconstruct_and_save_global_model(collected_trees, tree_type)
             self.last_aggregation_seconds = time.perf_counter() - aggregation_start
 
             if tree_type == "classifier":
                 try:
-                    trees_with_classes = [t for t in collected_trees if hasattr(t, "classes_")]
-                    if trees_with_classes:
-                        global_classes = np.unique(np.concatenate(
-                            [np.asarray(t.classes_) for t in trees_with_classes]
-                        ))
+                    if detected_classes is not None and len(detected_classes) > 0:
+                        global_classes = detected_classes
                         # Ri-query fresca (invece di riusare 'available_workers' catturato
                         # prima del dispatch di training): un worker può aver cambiato
                         # host/porta nel frattempo, e la calibrazione non è così urgente
@@ -700,7 +706,32 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia federata fallita "
                           f"(non bloccante, l'inferenza ricadrà sulla soglia della baseline): {e_thr}")
 
-            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed, alberi_reali=collected_trees)
+            # FIX MEMORIA: NON passare più 'alberi_reali=collected_trees' qui.
+            # Il commento originale in _save_checkpoint diceva esplicitamente che
+            # quel ramo era pensato per non essere MAI esercitato in condizioni
+            # normali ("BaseOrchestrator chiama _save_checkpoint senza
+            # 'alberi_reali'") -- ma passandolo qui veniva invece eseguito ad
+            # OGNI round completato con successo, ri-serializzando l'INTERA
+            # foresta un'altra volta (dopo che era già stata scritta un albero
+            # alla volta in model_dir da _reconstruct_and_save_global_model, e
+            # dopo che era già stata salvata incrementalmente durante il round
+            # da _persist_trees_delta ad ogni task completato). Tre copie
+            # ridondanti dello stesso lavoro, proprio nel momento in cui
+            # 'collected_trees' occupa già il picco di RAM del round: è una
+            # delle cause dell'OOM osservato sull'orchestratore. Il checkpoint
+            # leggero (stato/contatori, senza gli alberi) resta comunque
+            # salvato da super()._save_checkpoint(...) dentro _save_checkpoint.
+            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
+
+            # Libera subito la cache in-memoria di questo job: serviva solo per
+            # evitare un reload da storage se lo STESSO processo gestisce il
+            # round successivo (vedi 'STATE-SYNC' più sopra), ma il round è
+            # appena terminato con successo e il modello è già durevolmente su
+            # model_dir -- non c'è motivo di tenere ~100 alberi vivi in RAM
+            # per il resto della vita del processo (es. mentre parte
+            # l'inferenza subito dopo, come nei test).
+            self._trees_cache.pop(self.current_job_id, None)
+
             return final_count
 
     def _execute_inference_step(self, payload: dict) -> dict:
@@ -1120,10 +1151,19 @@ class FederatedOrchestrator(BaseOrchestrator):
             "metrics": metrics
         }
 
-    def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> int:
+    def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> tuple:
+        """Ritorna (numero_alberi_salvati, classi_rilevate).
+
+        NB: per liberare RAM il prima possibile, questa funzione SVUOTA
+        (imposta a None) gli elementi di 'all_trained_trees' non appena li ha
+        persistiti su disco -- vedi commento più sotto. Il chiamante NON deve
+        quindi rileggere gli alberi da questa stessa lista dopo la chiamata
+        (es. per le classi del classificatore): per questo la funzione
+        restituisce già 'detected_classes', calcolate PRIMA dello svuotamento.
+        """
         if not all_trained_trees:
             print(f"[{self.orchestrator_name}] Nessun albero collezionato.")
-            return 0
+            return 0, np.array([0, 1])
         try:
             trees_with_classes = [t for t in all_trained_trees if hasattr(t, "classes_")]
             if trees_with_classes:
@@ -1136,24 +1176,42 @@ class FederatedOrchestrator(BaseOrchestrator):
             # in inferenza si può caricarne un sottoinsieme alla volta senza mai
             # materializzare tutti i 100 alberi insieme in RAM.
             model_dir = self._resolve_model_dir(self.current_job_id)
-            for i, tree in enumerate(all_trained_trees):
+            total_trees = len(all_trained_trees)
+            # FIX MEMORIA: prima questo ciclo scriveva ogni albero su disco ma
+            # lasciava TUTTI i riferimenti vivi nella lista 'all_trained_trees'
+            # fino alla fine -- quindi per tutta la durata del ciclo la RAM
+            # doveva comunque contenere l'intera foresta (100 alberi in
+            # questo test), proprio nel momento di picco. Sostituendo ogni
+            # elemento con None non appena è stato persistito, il refcount
+            # dell'albero scende a zero e il garbage collector di CPython può
+            # liberarlo subito, invece che solo all'uscita dalla funzione.
+            # gc.collect() periodico (ogni 10 alberi, stesso batch_size usato
+            # per lo streaming in inferenza in federatedWorker.py) forza il
+            # rilascio effettivo della memoria invece di aspettare che il GC
+            # generazionale ci arrivi da solo.
+            for i in range(total_trees):
+                tree = all_trained_trees[i]
                 tree_path = os.path.join(model_dir, f"tree_{i:04d}.pkl")
                 self.checkpoint_dao.save(tree_path, tree)
+                all_trained_trees[i] = None
+                if (i + 1) % 10 == 0:
+                    gc.collect()
+            gc.collect()
 
             meta = {
-                "num_trees": len(all_trained_trees),
+                "num_trees": total_trees,
                 "tree_type": tree_type,
                 "classes": detected_classes.astype(np.int64).tolist(),
                 "model_dir": model_dir,   # esplicito, invece che dedurlo da job_id lato worker
             }
             self.checkpoint_dao.save(self._resolve_model_meta_path(self.current_job_id), meta)
-            print(f"[{self.orchestrator_name}] Modello Globale salvato come {len(all_trained_trees)} "
+            print(f"[{self.orchestrator_name}] Modello Globale salvato come {total_trees} "
                 f"file separati in '{model_dir}'.")
-            return len(all_trained_trees)
+            return total_trees, detected_classes
         except Exception as e:
             print(f"[{self.orchestrator_name}] [ERRORE AGGREGAZIONE] {e}")
             traceback.print_exc()
-            return len(all_trained_trees)
+            return len([t for t in all_trained_trees if t is not None]), np.array([0, 1])
 
     def _resolve_model_dir(self, job_id: str) -> str:
         if self.environment == "aws":
