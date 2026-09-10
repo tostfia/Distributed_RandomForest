@@ -52,7 +52,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         self.chunk_sent_event = threading.Event()
         self.current_job_id = None
         self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
-        self.worker_wait_timeout = float(os.environ.get("FED_WORKER_WAIT_TIMEOUT_SECONDS", 0))
+        self.worker_wait_timeout = float(os.environ.get("FED_WORKER_WAIT_TIMEOUT_SECONDS", 60))
 
         # Cache in-memoria (solo per QUESTA istanza di processo) degli alberi
         # già addestrati per un dato job. Serve esclusivamente a evitare una
