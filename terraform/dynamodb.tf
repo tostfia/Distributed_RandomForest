@@ -70,19 +70,7 @@ resource "aws_dynamodb_table" "orchestrator_locks" {
   tags = { Project = var.project_name }
 }
 
-resource "aws_dynamodb_table" "worker_index_locks" {
-  name         = "WorkerIndexLocks"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "lock_key"
-
-  attribute {
-    name = "lock_key"
-    type = "S"
-  }
-
-  tags = { Project = var.project_name }
-}
-resource "aws_dynamodb_table" "job_meta_data"{
+resource "aws_dynamodb_table" "job_meta_data" {
   name         = "JobMetadata"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "job_id"
