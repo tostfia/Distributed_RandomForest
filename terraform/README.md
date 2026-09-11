@@ -138,6 +138,12 @@ e avviare un test.
 
 Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 
+> ⚠️ **L'apply crea l'infrastruttura ma la lascia ferma** (vedi sezione 6):
+> nessun worker né istanza orchestrator è in esecuzione subito dopo un
+> `apply` pulito. Avvia entrambi prima di lanciare qualunque test — un job
+> inviato a un'infrastruttura ferma resta semplicemente in coda SQS senza
+> che nessuno lo reclami, senza un errore esplicito che lo segnali.
+
 > ⚠️ **Prima di lanciare qualunque script, aggiorna `API_GATEWAY_URL` nel
 > `.env`** con il valore mostrato nell'output `next_steps` dell'apply appena
 > fatto. Questo endpoint **cambia a ogni ricreazione dello stack** (nuovo
@@ -155,39 +161,75 @@ Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 ./script_aws/run_test_engine_ecs.sh   # oppure: sessione di test interattiva
 ```
 
-## 6. Fermare l'esecuzione senza distruggere l'infrastruttura
+## 6. Avviare e fermare l'esecuzione senza distruggere l'infrastruttura
 
-Creare un `aws_ecs_service` con `desired_count > 0` fa sì che **ECS avvii
-subito i task e li mantenga attivi in autonomia** (non serve un comando
-separato per "avviare": succede appena il Service viene creato). Per non
-consumare crediti quando non stai facendo un run attivo, scala i Service a
-zero invece di distruggere tutta l'infrastruttura:
+Dalla versione corrente, **un `apply` pulito crea tutte le risorse ma le
+lascia ferme**: sia `orchestrator_desired_count` sia `worker_desired_count`
+hanno default `0` in `variables.tf`. Nessun task Fargate né istanza EC2
+dell'orchestrator parte da sola subito dopo l'apply — un passo esplicito è
+sempre richiesto, in entrambe le modalità.
 
+> Se vieni da una versione precedente del progetto: `num_workers` ora
+> controlla **solo** quante risorse esistono (task definition/service, per
+> federated anche gli indici) — non più quante sono avviate. Per quello
+> serve `worker_desired_count` (vedi sotto). Vedi anche la sezione
+> [8. Passare tra centralized e federated](#8-passare-tra-centralized-e-federated).
+
+### 6.1 Avviare
+
+**Orchestrator** (2 istanze EC2, sempre uguale in entrambe le modalità):
 ```bash
-aws ecs update-service --cluster forest-cluster --service orchestrator-service --desired-count 0 --region us-east-1
-aws ecs update-service --cluster forest-cluster --service worker-service --desired-count 0 --region us-east-1
+aws autoscaling update-auto-scaling-group --auto-scaling-group-name orchestrator-asg \
+  --min-size 2 --max-size 2 --desired-capacity 2 --region us-east-1
 ```
 
-Per rendere lo stop persistente anche attraverso un futuro `terraform apply`
-(altrimenti Terraform riporterebbe i contatori ai valori dichiarati nel
-codice), imposta in `terraform.tfvars`:
+**Worker, modalità `centralized`** (un solo service):
+```bash
+aws ecs update-service --cluster forest-cluster --service worker-service \
+  --desired-count 10 --region us-east-1   # 10 = quanti vuoi avviare, fino a num_workers
+```
+
+**Worker, modalità `federated`** (N service separati, uno per indice — ognuno
+ospita al massimo un solo task, quindi qui non "quanti" ma "tutti o nessuno"):
+```bash
+for i in $(seq 1 10); do   # 10 = num_workers
+  aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
+    --desired-count 1 --region us-east-1 > /dev/null
+done
+```
+
+Aspetta qualche minuto dopo l'avvio prima di lanciare un test (boot EC2,
+pull immagine, avvio container) — vedi le verifiche già usate altrove in
+questo progetto (`storedBytes` su CloudWatch Logs, `docker ps` via SSM).
+
+### 6.2 Fermare
+
+Stessi comandi di sopra con `--desired-count 0` / `--min-size 0 --max-size 0
+--desired-capacity 0` (loop identico per i worker federated).
+
+**Verifica rapida che non ci sia nulla in esecuzione** (task Fargate e
+istanze EC2 sono le uniche risorse di questo stack che fatturano per tempo,
+non per richiesta):
+```bash
+aws ecs list-tasks --cluster forest-cluster --region us-east-1
+# {"taskArns": []}  → nessun task Fargate attivo
+aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names orchestrator-asg \
+  --query 'AutoScalingGroups[0].Instances' --region us-east-1
+# []  → nessuna istanza orchestrator attiva
+```
+
+### 6.3 Rendere lo stop persistente attraverso un futuro `apply`
+
+I comandi sopra agiscono solo sullo stato attuale in AWS — un successivo
+`terraform apply` riporterebbe i contatori ai valori dichiarati in
+`terraform.tfvars`. Per farlo restare fermo anche dopo un apply:
 
 ```hcl
 orchestrator_desired_count = 0
-num_workers                = 0
+worker_desired_count       = 0   # NON num_workers: quello controlla solo
+                                  # quante risorse esistono, non quante girano
 ```
-
-Per riavviare un run, rimetti i valori desiderati (es. `orchestrator_desired_count = 2`,
-`num_workers = 2`) e rilancia `terraform apply`: le task definition esistono
-già, verranno solo referenziate di nuovo dai Service.
-
-**Verifica rapida che non ci sia nulla in esecuzione** (task Fargate è
-l'unica risorsa di questo stack che fattura per tempo, non per richiesta):
-
-```bash
-aws ecs list-tasks --cluster forest-cluster --region us-east-1
-# {"taskArns": []}  → nessun task attivo, nessun consumo di calcolo in corso
-```
+(sono già i default se non li specifichi affatto in `terraform.tfvars`.)
 
 ## 7. Distruggere tutto
 
@@ -200,7 +242,7 @@ Distrugge le risorse gestite da Terraform (ECS, ECR con l'immagine,
 DynamoDB, SQS, Security Group). Da lanciare a fine sessione di valutazione
 per non lasciare nulla attivo nel Learner Lab.
 
-> Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
+> ⚠️ Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
 > CloudWatch del punto 3.2) sono referenziati da Terraform come risorse
 > esistenti, non creati da esso — `terraform destroy` **non li elimina**.
 > Se vuoi ripulirli del tutto:
@@ -223,7 +265,7 @@ vero e proprio, non solo una modifica al `.env` locale.
 training_mode = "federated"   # o "centralized"
 ```
 
-> **Modificare `TRAINING_MODE` nel `.env` locale da solo NON è
+> ⚠️ **Modificare `TRAINING_MODE` nel `.env` locale da solo NON è
 > sufficiente.** Il `.env` controlla solo il client e il test-engine (le
 > istanze EC2 usa-e-getta, che leggono la variabile a ogni lancio) — ma i
 > worker ECS già deployati hanno `TRAINING_MODE` **cablato staticamente**
@@ -248,26 +290,19 @@ terraform apply "tfplan"
 | | `centralized` | `federated` |
 |---|---|---|
 | Task definition worker | 1 (`lab-worker-task`) | N, una per indice (`lab-worker-task-1` … `lab-worker-task-N`) |
-| Service ECS worker | 1 solo (`worker-service`), `desired_count = num_workers` | N service separati (`worker-service-1` … `worker-service-N`), ciascuno `desired_count = 1` |
+| Service ECS worker | 1 solo (`worker-service`), `desired_count = worker_desired_count` | N service separati (`worker-service-1` … `worker-service-N`), ciascuno `desired_count = worker_desired_count > 0 ? 1 : 0` (avvio tutto-o-niente, non parziale per indice) |
 | Ruolo dei worker | anonimi, intercambiabili | indice fisso 1..N, legato al proprio shard (`WORKER_INDEX` iniettato staticamente da Terraform) |
-| `num_workers` significa | quanti worker anonimi avviare | quanti indici/shard fissi creare |
+| `num_workers` significa | quante risorse esistono (non più quante sono avviate — vedi sezione 6) | quanti indici/shard fissi creare |
 
-La differenza sul Service **non è solo interna**: cambia anche come
-verifichi/fermi i worker da riga di comando. I comandi della sezione 6 sopra
-(pensati per il Service singolo di `centralized`) vanno adattati per N
-Service quando sei in `federated`, ad esempio:
+Per avviare/fermare i worker in entrambe le modalità, vedi la sezione
+[6. Avviare e fermare l'esecuzione](#6-avviare-e-fermare-lesecuzione-senza-distruggere-linfrastruttura),
+che copre già sia `centralized` sia `federated`. Un comando utile solo per
+`federated`, per vedere lo stato di tutti gli indici in un colpo solo:
 
 ```bash
-# Stato di tutti i worker federated in un colpo solo
 aws ecs describe-services --cluster forest-cluster \
   --services $(for i in $(seq 1 10); do echo -n "worker-service-$i "; done) \
   --region us-east-1 --query 'services[].[serviceName,status,runningCount,desiredCount]' --output table
-
-# Fermarli tutti (sostituisce il singolo comando 'worker-service' della sezione 6)
-for i in $(seq 1 10); do
-  aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
-    --desired-count 0 --region us-east-1 > /dev/null
-done
 ```
 
 ### 8.3 Provisioning dati: solo per il dataset reale
