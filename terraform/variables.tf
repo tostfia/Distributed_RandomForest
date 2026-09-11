@@ -32,6 +32,12 @@ variable "num_workers" {
   default     = 10
 }
 
+variable "worker_desired_count" {
+  description = "Quanti worker sono EFFETTIVAMENTE avviati (desired_count reale), disaccoppiato da num_workers. Default 0: l'apply crea tutte le risorse (task definition, N service in federated) ma le lascia ferme - nessun task Fargate parte, nessun costo di calcolo, finché non alzi questo valore (via un nuovo apply, o direttamente con 'aws ecs update-service --desired-count' sui service già creati, come già fai oggi). In centralized, un valore diverso da 0 o num_workers permette anche un avvio parziale (es. 5 worker attivi su 10 provisionati). In federated ogni service ha comunque al massimo 1 task (un worker per indice/shard): qualunque valore > 0 qui porta TUTTI i service federated a desired_count=1, 0 li lascia tutti fermi - non esiste un avvio parziale per indice via questa variabile (per quello, resta il comando aws ecs update-service mirato su un singolo worker-service-N)."
+  type        = number
+  default     = 0
+}
+
 variable "orchestrator_desired_count" {
   description = "Numero di istanze EC2 dell'orchestrator (>=2 per testare la leader election / failover). Non più un desired-count ECS: l'orchestrator gira su istanze EC2 dedicate, vedi orchestrator_ec2.tf (la SCP del Learner Lab nega task definition ECS con memoria > 8192 MiB, insufficiente per gli scenari di scalabilità pesanti)."
   type        = number

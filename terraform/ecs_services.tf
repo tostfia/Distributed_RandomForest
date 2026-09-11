@@ -19,7 +19,10 @@ resource "aws_ecs_service" "worker_centralized" {
   name            = "worker-service"
   cluster         = aws_ecs_cluster.forest_cluster.id
   task_definition = aws_ecs_task_definition.worker_centralized[0].arn
-  desired_count   = var.num_workers
+  # Disaccoppiato da num_workers (che ora controlla solo quante risorse
+  # ESISTONO, non quante sono avviate): default 0, l'apply crea il service
+  # ma non fa partire nessun task Fargate finché non alzi questa variabile.
+  desired_count   = var.worker_desired_count
   launch_type     = "FARGATE"
 
   deployment_minimum_healthy_percent = 0
@@ -48,7 +51,13 @@ resource "aws_ecs_service" "worker_federated" {
   name            = "worker-service-${count.index + 1}"
   cluster         = aws_ecs_cluster.forest_cluster.id
   task_definition = aws_ecs_task_definition.worker_federated[count.index].arn
-  desired_count   = 1
+  # Non più fisso a 1: gated su worker_desired_count (default 0), stessa
+  # logica di worker_centralized sopra. Ogni service federated ospita
+  # comunque al massimo un solo task (un worker per indice/shard fisso),
+  # quindi qualunque valore > 0 qui equivale a "avviato" per TUTTI i 
+  # service insieme - non esiste un avvio parziale per singolo indice
+  # tramite questa variabile (vedi variables.tf per il dettaglio).
+  desired_count   = var.worker_desired_count > 0 ? 1 : 0
   launch_type     = "FARGATE"
 
   deployment_minimum_healthy_percent = 0
