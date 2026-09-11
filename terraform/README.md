@@ -84,16 +84,23 @@ Il nome deve corrispondere **esattamente** a quello atteso da Terraform:
 > quindi se te lo dimentichi il fallimento si presenta più avanti, al primo
 > salvataggio di un dataset, non durante l'apply stesso.
 
-### 3.2 Log group CloudWatch per ECS
+### 3.2 Log group CloudWatch
 
-I task definition di orchestrator e worker scrivono i log su CloudWatch
-tramite `awslogs`, ma **non impostano `awslogs-create-group`** (creare un
-log group al volo dal container va anch'esso in conflitto con la SCP).
-Vanno quindi creati a mano, una sola volta:
+I task/istanze di orchestrator, worker e test-engine scrivono i log su
+CloudWatch tramite `awslogs`, ma **non impostano `awslogs-create-group`**
+(creare un log group al volo va anch'esso in conflitto con la SCP).
+Vanno quindi creati a mano, una sola volta per account:
 
 ```bash
+# Worker (ECS Fargate) e log storico dell'orchestrator quando era su ECS
 aws logs create-log-group --log-group-name "/ecs/lab-orchestrator" --region us-east-1
 aws logs create-log-group --log-group-name "/ecs/lab-worker" --region us-east-1
+
+# Orchestrator EC2 (vedi orchestrator_ec2.tf) e test-engine EC2 on-demand
+# (vedi run_test_engine.sh) - entrambi mancanti in una versione precedente
+# di questa sezione, scoperti solo al primo setup su un account nuovo.
+aws logs create-log-group --log-group-name "/ec2/lab-orchestrator" --region us-east-1
+aws logs create-log-group --log-group-name "/ec2/rf-test-engine" --region us-east-1
 ```
 
 Se il gruppo esiste già, il comando restituisce un errore innocuo
