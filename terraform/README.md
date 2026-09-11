@@ -200,7 +200,7 @@ Distrugge le risorse gestite da Terraform (ECS, ECR con l'immagine,
 DynamoDB, SQS, Security Group). Da lanciare a fine sessione di valutazione
 per non lasciare nulla attivo nel Learner Lab.
 
-> ⚠️ Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
+> Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
 > CloudWatch del punto 3.2) sono referenziati da Terraform come risorse
 > esistenti, non creati da esso — `terraform destroy` **non li elimina**.
 > Se vuoi ripulirli del tutto:
@@ -210,6 +210,83 @@ per non lasciare nulla attivo nel Learner Lab.
 > aws logs delete-log-group --log-group-name "/ecs/lab-worker" --region us-east-1
 > ```
 
+## 8. Passare tra `centralized` e `federated`
+
+Le due modalità **non sono intercambiabili a runtime**: cambiano quali
+risorse Terraform crea, quindi il passaggio richiede un `terraform apply`
+vero e proprio, non solo una modifica al `.env` locale.
+
+### 8.1 Cosa modificare, e cosa NON basta
+
+```hcl
+# terraform.tfvars
+training_mode = "federated"   # o "centralized"
+```
+
+> **Modificare `TRAINING_MODE` nel `.env` locale da solo NON è
+> sufficiente.** Il `.env` controlla solo il client e il test-engine (le
+> istanze EC2 usa-e-getta, che leggono la variabile a ogni lancio) — ma i
+> worker ECS già deployati hanno `TRAINING_MODE` **cablato staticamente**
+> nella loro `container_definitions` (vedi `ecs_task_definitions.tf`,
+> `local.common_env`), fissato al valore di `var.training_mode` al momento
+> dell'ultimo `apply`. Senza rifare l'`apply`, il test-engine proverebbe a
+> orchestrare l'altra modalità parlando con worker che si aspettano ancora
+> quella vecchia — protocollo/logica di partizionamento incompatibili.
+
+Dopo aver cambiato `training_mode`:
+
+```bash
+cd terraform
+terraform plan -out=tfplan     # controlla il piano PRIMA di applicare:
+                                # cambiare modalità distrugge il service/le
+                                # task definition della modalità precedente
+terraform apply "tfplan"
+```
+
+### 8.2 Cosa cambia concretamente nell'infrastruttura
+
+| | `centralized` | `federated` |
+|---|---|---|
+| Task definition worker | 1 (`lab-worker-task`) | N, una per indice (`lab-worker-task-1` … `lab-worker-task-N`) |
+| Service ECS worker | 1 solo (`worker-service`), `desired_count = num_workers` | N service separati (`worker-service-1` … `worker-service-N`), ciascuno `desired_count = 1` |
+| Ruolo dei worker | anonimi, intercambiabili | indice fisso 1..N, legato al proprio shard (`WORKER_INDEX` iniettato staticamente da Terraform) |
+| `num_workers` significa | quanti worker anonimi avviare | quanti indici/shard fissi creare |
+
+La differenza sul Service **non è solo interna**: cambia anche come
+verifichi/fermi i worker da riga di comando. I comandi della sezione 6 sopra
+(pensati per il Service singolo di `centralized`) vanno adattati per N
+Service quando sei in `federated`, ad esempio:
+
+```bash
+# Stato di tutti i worker federated in un colpo solo
+aws ecs describe-services --cluster forest-cluster \
+  --services $(for i in $(seq 1 10); do echo -n "worker-service-$i "; done) \
+  --region us-east-1 --query 'services[].[serviceName,status,runningCount,desiredCount]' --output table
+
+# Fermarli tutti (sostituisce il singolo comando 'worker-service' della sezione 6)
+for i in $(seq 1 10); do
+  aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
+    --desired-count 0 --region us-east-1 > /dev/null
+done
+```
+
+### 8.3 Provisioning dati: solo per il dataset reale
+
+Se lavori con `dataset_type=synthetic`, **salta questo passo**: i dati
+vengono generati al volo al primo training, nessun file va pre-caricato.
+
+Solo per `dataset_type=real` (partizionamento `by_day` su CICIDS), esegui
+**prima** di sottomettere un job:
+
+```bash
+python -m scripts.provision_federated_shards --num-workers N
+```
+
+con lo stesso `N` di `num_workers` in `terraform.tfvars` — un disallineamento
+tra i due lascerebbe worker senza shard assegnato (vedi il fallback a
+"dimensione 0, worker saltato nel round" descritto in
+`federatedWorker.py::exposed_get_local_shard_size`).
+
 ## Note di design
 
 - **Nessuna risorsa IAM viene creata**: il modulo referenzia il ruolo
@@ -218,9 +295,14 @@ per non lasciare nulla attivo nel Learner Lab.
   con un `aws_iam_role` equivalente.
 - **VPC**: viene riusata quella di default dell'account/regione (sempre
   presente), non ne viene creata una nuova.
-- **Modalità `federated`**: prima di sottomettere un job, va eseguito
-  `provision_federated_shards.py` per popolare gli shard su S3 (vedi
-  output `next_steps` dopo l'apply).
+- **Modalità `federated`**: il provisioning degli shard
+  (`provision_federated_shards.py`) serve **solo** per `dataset_type=real`
+  (partizionamento `by_day` su S3, letto da ogni worker al boot). Per
+  `dataset_type=synthetic` **non va eseguito**: i dati vengono generati
+  pigramente al primo training, non richiedono nulla pre-caricato su S3
+  (vedi `federatedWorker.py::exposed_get_local_shard_size`, che gestisce
+  esplicitamente l'assenza dello shard file per il sintetico). Vedi anche
+  la sezione [8. Passare tra centralized e federated](#8-passare-tra-centralized-e-federated).
 - **Rebuild dell'immagine**: avviene automaticamente solo se cambiano
   `Dockerfile` o file sotto `src/` (hash calcolato nei `triggers` di
   `docker_build.tf`). Per forzare sempre il rebuild, imposta

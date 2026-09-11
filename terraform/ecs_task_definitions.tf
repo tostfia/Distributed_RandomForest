@@ -90,10 +90,17 @@ resource "aws_ecs_task_definition" "worker_centralized" {
 resource "aws_ecs_task_definition" "worker_federated" {
   count = var.training_mode == "federated" ? var.num_workers : 0
 
-  # Stessa family per ogni indice, distinta da quella dell'orchestrator
-  # (coerente col worker centralized sopra): vedi la nota lì per il motivo
-  # del cambio rispetto alla versione precedente.
-  family                   = "lab-worker-task"
+  # BUGFIX (11/9/2026): family UNICA per indice, non condivisa. Con
+  # num_workers > 1 Terraform crea N istanze di questa risorsa IN PARALLELO
+  # (nessun depends_on tra loro): se condividessero la stessa family,
+  # tenterebbero N 'register-task-definition' concorrenti sulla stessa
+  # family - esattamente l'errore "Too many concurrent attempts to create
+  # a new revision of the specified family" che il commento su
+  # worker_centralized descrive per il caso orchestrator/worker (due
+  # risorse, non N in parallelo come qui). Una family per indice elimina
+  # la contesa alla radice, invece di doverla gestire con un depends_on
+  # sequenziale artificiale tra i worker.
+  family                   = "lab-worker-task-${count.index + 1}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.worker_cpu
