@@ -150,13 +150,30 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region 
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 echo "    OK, credenziali valide."
 
-echo "==> [2/4] Verifica che worker-service sia stabile e l'orchestrator (EC2) sia pronto..."
-if ! aws ecs describe-services --cluster "$CLUSTER_NAME" --services worker-service --region "$REGION" \
-     --query "services[0].status" --output text 2>/dev/null | grep -q ACTIVE; then
-  echo "[ERRORE] worker-service non trovato/attivo sul cluster '$CLUSTER_NAME'. Hai lanciato 'terraform apply'?"
-  exit 1
+echo "==> [2/4] Verifica che i worker siano stabili e l'orchestrator (EC2) sia pronto..."
+# BUGFIX (11/9/2026): 'worker-service' esiste SOLO in modalità centralized.
+# In federated esistono N service separati (worker-service-1..N, uno per
+# indice/shard fisso - vedi ecs_services.tf), 'worker-service' non esiste
+# affatto (o e' un residuo INACTIVE di un deploy centralized precedente,
+# che 'aws ecs wait services-stable' non raggiungerebbe mai).
+if [ "$TRAINING_MODE" == "federated" ]; then
+  WORKER_SERVICES=()
+  for ((i=1; i<=NUM_WORKERS; i++)); do
+    WORKER_SERVICES+=("worker-service-$i")
+  done
+else
+  WORKER_SERVICES=("worker-service")
 fi
-aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services worker-service --region "$REGION"
+
+for svc in "${WORKER_SERVICES[@]}"; do
+  if ! aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$svc" --region "$REGION" \
+       --query "services[0].status" --output text 2>/dev/null | grep -q ACTIVE; then
+    echo "[ERRORE] Service '$svc' non trovato/attivo sul cluster '$CLUSTER_NAME'. Hai lanciato 'terraform apply'"
+    echo "         e avviato i worker (desired_count > 0, vedi README sezione 6)?"
+    exit 1
+  fi
+done
+aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "${WORKER_SERVICES[@]}" --region "$REGION"
 
 ORCH_RUNNING=$(aws ec2 describe-instances --region "$REGION" \
   --filters "Name=tag:Project,Values=rf-distributed" "Name=instance-state-name,Values=running" \
