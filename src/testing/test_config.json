@@ -100,8 +100,8 @@
         "kill_worker_after_seconds": 250
       },
       "inference_worker_fault": {
-        "_NOTE": "20s non ancora verificato empiricamente su AWS con il dataset corrente (vedi la nota gemella su fault_tolerance, dove 45s si è rivelato troppo basso). La fase di training preliminare qui non è temporizzata (il kill parte solo prima di _execute_inference_step), quindi il rischio è minore che per lo scenario 4, ma se anche questo scenario mostra 'Timeout... senza che il chunk sia stato inviato' nel log, va alzato allo stesso modo.",
-        "kill_worker_after_seconds": 20
+        "_NOTE": "MISURATO EMPIRICAMENTE su AWS l'11/9/2026 (federated, 10 worker, 10 alberi/worker): l'inferenza intera completa in 8.61s totali (primo chunk inviato dopo 0.3s, tutti i worker validati entro ~7.5s da li'). Con kill_worker_after_seconds=20 (valore precedente) il guasto non scattava MAI in tempo: il sistema rileva l'inferenza gia' completata e annulla il guasto per non contaminare lo scenario successivo (vedi log '[TEST] L'inferenza e' gia' COMPLETATA... guasto ANNULLATO') - risultato SUCCESS ma fault_actually_triggered=false, un test che non ha testato nulla di reale. 3s lascia margine sopra lo 0.3s di primo dispatch osservato, restando ben sotto il completamento totale (~7.5-8.6s) - ma e' calibrato su UNA sola misurazione: se scatta ancora 'gia' completata', abbassare ulteriormente; se scatta un timeout 'nessun chunk inviato', alzare leggermente verso 1-2s.",
+        "kill_worker_after_seconds": 3
       },
       "orchestrator_failover": {
         "max_wait_for_training_start_seconds": 500,

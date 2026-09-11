@@ -1,467 +1,77 @@
 data.archive_file.rf_gateway_lambda: Reading...
 data.archive_file.rf_gateway_lambda: Read complete after 0s [id=c536cdf52a06e7ccabfd7caef5a0b2455060fa3f]
-data.aws_vpc.default: Reading...
-data.aws_caller_identity.current: Reading...
 data.aws_iam_role.lab_role: Reading...
+aws_ecs_cluster.forest_cluster: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster]
+aws_apigatewayv2_api.mljobs: Refreshing state... [id=hh0ipkpnud]
+aws_dynamodb_table.model_status: Refreshing state... [id=ModelStatus]
+aws_sqs_queue.federated_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/378857401407/federated_queue.fifo]
+aws_dynamodb_table.job_meta_data: Refreshing state... [id=JobMetadata]
+aws_ecr_repository.rf_distributed: Refreshing state... [id=rf-distributed]
+aws_dynamodb_table.worker_tasks: Refreshing state... [id=WorkerTasks]
+aws_dynamodb_table.orchestrators_registry: Refreshing state... [id=orchestrators_registry]
+aws_dynamodb_table.orchestrator_locks: Refreshing state... [id=OrchestratorLocks]
+data.aws_iam_role.lab_role: Read complete after 1s [id=LabRole]
+data.aws_vpc.default: Reading...
+aws_dynamodb_table.job_locks: Refreshing state... [id=JobLocks]
+aws_dynamodb_table.workers_registry: Refreshing state... [id=workers_registry]
+data.aws_caller_identity.current: Reading...
+aws_sqs_queue.centralized_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/378857401407/centralized_queue.fifo]
+data.aws_caller_identity.current: Read complete after 0s [id=378857401407]
 data.aws_region.current: Reading...
 data.aws_region.current: Read complete after 0s [id=us-east-1]
-data.aws_caller_identity.current: Read complete after 0s [id=378857401407]
-data.aws_iam_role.lab_role: Read complete after 0s [id=LabRole]
+aws_apigatewayv2_stage.default: Refreshing state... [id=$default]
+null_resource.docker_build_push: Refreshing state... [id=150603316169189730]
+aws_ecs_task_definition.worker_federated[4]: Refreshing state... [id=lab-worker-task-5]
+aws_ecs_task_definition.worker_federated[2]: Refreshing state... [id=lab-worker-task-3]
+aws_ecs_task_definition.worker_federated[0]: Refreshing state... [id=lab-worker-task-1]
+aws_ecs_task_definition.worker_federated[9]: Refreshing state... [id=lab-worker-task-10]
+aws_ecs_task_definition.worker_federated[1]: Refreshing state... [id=lab-worker-task-2]
+aws_ecs_task_definition.worker_federated[3]: Refreshing state... [id=lab-worker-task-4]
+aws_ecs_task_definition.worker_federated[8]: Refreshing state... [id=lab-worker-task-9]
+aws_ecs_task_definition.worker_federated[5]: Refreshing state... [id=lab-worker-task-6]
+aws_ecs_task_definition.worker_federated[6]: Refreshing state... [id=lab-worker-task-7]
+aws_ecs_task_definition.worker_federated[7]: Refreshing state... [id=lab-worker-task-8]
+aws_lambda_function.rf_gateway: Refreshing state... [id=RFGatewayLambda]
 data.aws_vpc.default: Read complete after 1s [id=vpc-02f38477e9134942b]
 data.aws_subnets.public: Reading...
 data.aws_subnets.orchestrator_capable: Reading...
-data.aws_subnets.public: Read complete after 0s [id=us-east-1]
-data.aws_subnets.orchestrator_capable: Read complete after 0s [id=us-east-1]
+aws_security_group.rf_distributed: Refreshing state... [id=sg-0e30c2aef57ecfdcf]
+data.aws_subnets.public: Read complete after 1s [id=us-east-1]
+data.aws_subnets.orchestrator_capable: Read complete after 1s [id=us-east-1]
+aws_lambda_permission.apigw_invoke: Refreshing state... [id=AllowAPIGatewayInvoke]
+aws_apigatewayv2_integration.rf_gateway: Refreshing state... [id=3hxud6e]
+aws_security_group_rule.egress_all: Refreshing state... [id=sgrule-1278358264]
+aws_security_group_rule.rpc_self_ingress: Refreshing state... [id=sgrule-989227365]
+aws_launch_template.orchestrator: Refreshing state... [id=lt-0c581352d174903bb]
+aws_ecs_service.worker_federated[5]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-6]
+aws_ecs_service.worker_federated[8]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-9]
+aws_ecs_service.worker_federated[6]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-7]
+aws_ecs_service.worker_federated[0]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-1]
+aws_ecs_service.worker_federated[4]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-5]
+aws_ecs_service.worker_federated[3]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-4]
+aws_ecs_service.worker_federated[9]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-10]
+aws_ecs_service.worker_federated[1]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-2]
+aws_apigatewayv2_route.get_details: Refreshing state... [id=w8w7yfd]
+aws_ecs_service.worker_federated[2]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-3]
+aws_ecs_service.worker_federated[7]: Refreshing state... [id=arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-8]
+aws_apigatewayv2_route.get_status: Refreshing state... [id=lsdzvzt]
+aws_apigatewayv2_route.post_federated: Refreshing state... [id=fe174d2]
+aws_apigatewayv2_route.post_centralized: Refreshing state... [id=jm1ngom]
+aws_autoscaling_group.orchestrator: Refreshing state... [id=orchestrator-asg]
 
 Terraform used the selected providers to generate the following execution
 plan. Resource actions are indicated with the following symbols:
   + create
+  ~ update in-place
+  - destroy
+-/+ destroy and then create replacement
 
 Terraform will perform the following actions:
 
-  # aws_apigatewayv2_api.mljobs will be created
-  + resource "aws_apigatewayv2_api" "mljobs" {
-      + api_endpoint                 = (known after apply)
-      + api_key_selection_expression = "$request.header.x-api-key"
-      + arn                          = (known after apply)
-      + execution_arn                = (known after apply)
-      + id                           = (known after apply)
-      + ip_address_type              = (known after apply)
-      + name                         = "MLJobsAPI"
-      + protocol_type                = "HTTP"
-      + route_selection_expression   = "$request.method $request.path"
-      + tags                         = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                     = {
-          + "Project" = "rf-distributed"
-        }
-    }
-
-  # aws_apigatewayv2_integration.rf_gateway will be created
-  + resource "aws_apigatewayv2_integration" "rf_gateway" {
-      + api_id                                    = (known after apply)
-      + connection_type                           = "INTERNET"
-      + id                                        = (known after apply)
-      + integration_method                        = "POST"
-      + integration_response_selection_expression = (known after apply)
-      + integration_type                          = "AWS_PROXY"
-      + integration_uri                           = (known after apply)
-      + payload_format_version                    = "2.0"
-      + timeout_milliseconds                      = 30000
-    }
-
-  # aws_apigatewayv2_route.get_details will be created
-  + resource "aws_apigatewayv2_route" "get_details" {
-      + api_id             = (known after apply)
-      + api_key_required   = false
-      + authorization_type = "NONE"
-      + id                 = (known after apply)
-      + route_key          = "GET /jobs/{job_id}/details"
-      + target             = (known after apply)
-    }
-
-  # aws_apigatewayv2_route.get_status will be created
-  + resource "aws_apigatewayv2_route" "get_status" {
-      + api_id             = (known after apply)
-      + api_key_required   = false
-      + authorization_type = "NONE"
-      + id                 = (known after apply)
-      + route_key          = "GET /jobs/{job_id}/status"
-      + target             = (known after apply)
-    }
-
-  # aws_apigatewayv2_route.post_centralized will be created
-  + resource "aws_apigatewayv2_route" "post_centralized" {
-      + api_id             = (known after apply)
-      + api_key_required   = false
-      + authorization_type = "NONE"
-      + id                 = (known after apply)
-      + route_key          = "POST /jobs/centralized"
-      + target             = (known after apply)
-    }
-
-  # aws_apigatewayv2_route.post_federated will be created
-  + resource "aws_apigatewayv2_route" "post_federated" {
-      + api_id             = (known after apply)
-      + api_key_required   = false
-      + authorization_type = "NONE"
-      + id                 = (known after apply)
-      + route_key          = "POST /jobs/federated"
-      + target             = (known after apply)
-    }
-
-  # aws_apigatewayv2_stage.default will be created
-  + resource "aws_apigatewayv2_stage" "default" {
-      + api_id        = (known after apply)
-      + arn           = (known after apply)
-      + auto_deploy   = true
-      + deployment_id = (known after apply)
-      + execution_arn = (known after apply)
-      + id            = (known after apply)
-      + invoke_url    = (known after apply)
-      + name          = "$default"
-      + tags          = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all      = {
-          + "Project" = "rf-distributed"
-        }
-    }
-
-  # aws_autoscaling_group.orchestrator will be created
-  + resource "aws_autoscaling_group" "orchestrator" {
-      + arn                              = (known after apply)
-      + availability_zones               = (known after apply)
-      + default_cooldown                 = (known after apply)
-      + desired_capacity                 = 0
-      + force_delete                     = false
-      + force_delete_warm_pool           = false
-      + health_check_grace_period        = 300
-      + health_check_type                = "EC2"
-      + id                               = (known after apply)
-      + ignore_failed_scaling_activities = false
-      + load_balancers                   = (known after apply)
-      + max_size                         = 0
-      + metrics_granularity              = "1Minute"
-      + min_size                         = 0
-      + name                             = "orchestrator-asg"
-      + name_prefix                      = (known after apply)
-      + predicted_capacity               = (known after apply)
-      + protect_from_scale_in            = false
-      + service_linked_role_arn          = (known after apply)
-      + target_group_arns                = (known after apply)
-      + vpc_zone_identifier              = [
-          + "subnet-03d1ac8201ec12aea",
-          + "subnet-0623abafc12ecb413",
-          + "subnet-089f490d140549b09",
-          + "subnet-0c3f4651f6b149406",
-          + "subnet-0f51cdaef4dd5af60",
-        ]
-      + wait_for_capacity_timeout        = "10m"
-      + warm_pool_size                   = (known after apply)
-
-      + availability_zone_distribution (known after apply)
-
-      + capacity_reservation_specification (known after apply)
-
-      + instance_refresh {
-          + strategy = "Rolling"
-
-          + preferences {
-              + max_healthy_percentage       = 100
-              + min_healthy_percentage       = 50
-              + scale_in_protected_instances = "Ignore"
-              + skip_matching                = false
-              + standby_instances            = "Ignore"
-            }
-        }
-
-      + launch_template {
-          + id      = (known after apply)
-          + name    = (known after apply)
-          + version = "$Latest"
-        }
-
-      + mixed_instances_policy (known after apply)
-
-      + tag {
-          + key                 = "Project"
-          + propagate_at_launch = true
-          + value               = "rf-distributed"
-        }
-      + tag {
-          + key                 = "Role"
-          + propagate_at_launch = true
-          + value               = "orchestrator-ec2"
-        }
-
-      + traffic_source (known after apply)
-    }
-
-  # aws_dynamodb_table.job_locks will be created
-  + resource "aws_dynamodb_table" "job_locks" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "lock_key"
-      + id               = (known after apply)
-      + name             = "JobLocks"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "lock_key"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.job_meta_data will be created
-  + resource "aws_dynamodb_table" "job_meta_data" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "job_id"
-      + id               = (known after apply)
-      + name             = "JobMetadata"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "job_id"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.model_status will be created
-  + resource "aws_dynamodb_table" "model_status" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "job_id"
-      + id               = (known after apply)
-      + name             = "ModelStatus"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "job_id"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.orchestrator_locks will be created
-  + resource "aws_dynamodb_table" "orchestrator_locks" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "lock_key"
-      + id               = (known after apply)
-      + name             = "OrchestratorLocks"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "lock_key"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.orchestrators_registry will be created
-  + resource "aws_dynamodb_table" "orchestrators_registry" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "orchestrator_name"
-      + id               = (known after apply)
-      + name             = "orchestrators_registry"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "orchestrator_name"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.worker_tasks will be created
-  + resource "aws_dynamodb_table" "worker_tasks" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "task_id"
-      + id               = (known after apply)
-      + name             = "WorkerTasks"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "job_id"
-          + type = "S"
-        }
-      + attribute {
-          + name = "task_id"
-          + type = "S"
-        }
-      + attribute {
-          + name = "worker_name"
-          + type = "S"
-        }
-
-      + global_secondary_index {
-          + hash_key           = "job_id"
-          + name               = "job_id-index"
-          + non_key_attributes = []
-          + projection_type    = "ALL"
-          + read_capacity      = (known after apply)
-          + write_capacity     = (known after apply)
-            # (1 unchanged attribute hidden)
-        }
-      + global_secondary_index {
-          + hash_key           = "worker_name"
-          + name               = "worker_name-index"
-          + non_key_attributes = []
-          + projection_type    = "ALL"
-          + read_capacity      = (known after apply)
-          + write_capacity     = (known after apply)
-            # (1 unchanged attribute hidden)
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_dynamodb_table.workers_registry will be created
-  + resource "aws_dynamodb_table" "workers_registry" {
-      + arn              = (known after apply)
-      + billing_mode     = "PAY_PER_REQUEST"
-      + hash_key         = "worker_name"
-      + id               = (known after apply)
-      + name             = "workers_registry"
-      + read_capacity    = (known after apply)
-      + stream_arn       = (known after apply)
-      + stream_label     = (known after apply)
-      + stream_view_type = (known after apply)
-      + tags             = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all         = {
-          + "Project" = "rf-distributed"
-        }
-      + write_capacity   = (known after apply)
-
-      + attribute {
-          + name = "worker_name"
-          + type = "S"
-        }
-
-      + point_in_time_recovery (known after apply)
-
-      + server_side_encryption (known after apply)
-
-      + ttl (known after apply)
-    }
-
-  # aws_ecr_repository.rf_distributed will be created
-  + resource "aws_ecr_repository" "rf_distributed" {
-      + arn                  = (known after apply)
-      + id                   = (known after apply)
-      + image_tag_mutability = "MUTABLE"
-      + name                 = "rf-distributed"
-      + registry_id          = (known after apply)
-      + repository_url       = (known after apply)
-      + tags                 = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all             = {
-          + "Project" = "rf-distributed"
-        }
-
-      + image_scanning_configuration {
-          + scan_on_push = true
-        }
-    }
-
-  # aws_ecs_cluster.forest_cluster will be created
-  + resource "aws_ecs_cluster" "forest_cluster" {
-      + arn      = (known after apply)
-      + id       = (known after apply)
-      + name     = "forest-cluster"
-      + tags     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all = {
-          + "Project" = "rf-distributed"
-        }
-
-      + setting (known after apply)
-    }
-
-  # aws_ecs_service.worker_federated[0] will be created
-  + resource "aws_ecs_service" "worker_federated" {
+  # aws_ecs_service.worker_centralized[0] will be created
+  + resource "aws_ecs_service" "worker_centralized" {
       + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
+      + cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster"
       + deployment_maximum_percent         = 100
       + deployment_minimum_healthy_percent = 0
       + desired_count                      = 0
@@ -471,7 +81,7 @@ Terraform will perform the following actions:
       + iam_role                           = (known after apply)
       + id                                 = (known after apply)
       + launch_type                        = "FARGATE"
-      + name                               = "worker-service-1"
+      + name                               = "worker-service"
       + platform_version                   = (known after apply)
       + scheduling_strategy                = "REPLICA"
       + tags                               = {
@@ -486,7 +96,9 @@ Terraform will perform the following actions:
 
       + network_configuration {
           + assign_public_ip = true
-          + security_groups  = (known after apply)
+          + security_groups  = [
+              + "sg-0e30c2aef57ecfdcf",
+            ]
           + subnets          = [
               + "subnet-03d1ac8201ec12aea",
               + "subnet-0623abafc12ecb413",
@@ -498,375 +110,634 @@ Terraform will perform the following actions:
         }
     }
 
-  # aws_ecs_service.worker_federated[1] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-2"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[0] will be destroyed
+  # (because index [0] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-1" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-1" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-1:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[2] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-3"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[1] will be destroyed
+  # (because index [1] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-2" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-2" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-2:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[3] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-4"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-3" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-3" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-3:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[4] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-5"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[3] will be destroyed
+  # (because index [3] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-4" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-4" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-4:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[5] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-6"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[4] will be destroyed
+  # (because index [4] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-5" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-5" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-5:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[6] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-7"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[5] will be destroyed
+  # (because index [5] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-6" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-6" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-6:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[7] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-8"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[6] will be destroyed
+  # (because index [6] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-7" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-7" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-7:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[8] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-9"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[7] will be destroyed
+  # (because index [7] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-8" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-8" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-8:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_service.worker_federated[9] will be created
-  + resource "aws_ecs_service" "worker_federated" {
-      + availability_zone_rebalancing      = "DISABLED"
-      + cluster                            = (known after apply)
-      + deployment_maximum_percent         = 100
-      + deployment_minimum_healthy_percent = 0
-      + desired_count                      = 0
-      + enable_ecs_managed_tags            = false
-      + enable_execute_command             = false
-      + force_new_deployment               = true
-      + iam_role                           = (known after apply)
-      + id                                 = (known after apply)
-      + launch_type                        = "FARGATE"
-      + name                               = "worker-service-10"
-      + platform_version                   = (known after apply)
-      + scheduling_strategy                = "REPLICA"
-      + tags                               = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                           = {
-          + "Project" = "rf-distributed"
-        }
-      + task_definition                    = (known after apply)
-      + triggers                           = (known after apply)
-      + wait_for_steady_state              = false
+  # aws_ecs_service.worker_federated[8] will be destroyed
+  # (because index [8] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-9" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-9" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-9:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
 
-      + network_configuration {
-          + assign_public_ip = true
-          + security_groups  = (known after apply)
-          + subnets          = [
-              + "subnet-03d1ac8201ec12aea",
-              + "subnet-0623abafc12ecb413",
-              + "subnet-089f490d140549b09",
-              + "subnet-0a55ed18e9e3f3129",
-              + "subnet-0c3f4651f6b149406",
-              + "subnet-0f51cdaef4dd5af60",
-            ]
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
         }
     }
 
-  # aws_ecs_task_definition.worker_federated[0] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
+  # aws_ecs_service.worker_federated[9] will be destroyed
+  # (because index [9] is out of range for count)
+  - resource "aws_ecs_service" "worker_federated" {
+      - availability_zone_rebalancing      = "DISABLED" -> null
+      - cluster                            = "arn:aws:ecs:us-east-1:378857401407:cluster/forest-cluster" -> null
+      - deployment_maximum_percent         = 100 -> null
+      - deployment_minimum_healthy_percent = 0 -> null
+      - desired_count                      = 0 -> null
+      - enable_ecs_managed_tags            = false -> null
+      - enable_execute_command             = false -> null
+      - force_new_deployment               = true -> null
+      - health_check_grace_period_seconds  = 0 -> null
+      - iam_role                           = "/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" -> null
+      - id                                 = "arn:aws:ecs:us-east-1:378857401407:service/forest-cluster/worker-service-10" -> null
+      - launch_type                        = "FARGATE" -> null
+      - name                               = "worker-service-10" -> null
+      - platform_version                   = "LATEST" -> null
+      - propagate_tags                     = "NONE" -> null
+      - scheduling_strategy                = "REPLICA" -> null
+      - tags                               = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                           = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_definition                    = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-10:1" -> null
+      - triggers                           = {} -> null
+      - wait_for_steady_state              = false -> null
+
+      - deployment_circuit_breaker {
+          - enable   = false -> null
+          - rollback = false -> null
+        }
+
+      - deployment_controller {
+          - type = "ECS" -> null
+        }
+
+      - network_configuration {
+          - assign_public_ip = true -> null
+          - security_groups  = [
+              - "sg-0e30c2aef57ecfdcf",
+            ] -> null
+          - subnets          = [
+              - "subnet-03d1ac8201ec12aea",
+              - "subnet-0623abafc12ecb413",
+              - "subnet-089f490d140549b09",
+              - "subnet-0a55ed18e9e3f3129",
+              - "subnet-0c3f4651f6b149406",
+              - "subnet-0f51cdaef4dd5af60",
+            ] -> null
+        }
+    }
+
+  # aws_ecs_task_definition.worker_centralized[0] will be created
+  + resource "aws_ecs_task_definition" "worker_centralized" {
       + arn                      = (known after apply)
       + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
+      + container_definitions    = jsonencode(
+            [
+              + {
+                  + command          = [
+                      + "sh",
+                      + "-c",
+                      + "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 centralized aws",
+                    ]
+                  + environment      = [
+                      + {
+                          + name  = "AWS_DEFAULT_REGION"
+                          + value = "us-east-1"
+                        },
+                      + {
+                          + name  = "DATASETS_BUCKET_NAME"
+                          + value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      + {
+                          + name  = "DATASET_TYPE"
+                          + value = "synthetic"
+                        },
+                      + {
+                          + name  = "EC2_ID"
+                          + value = "Fargate"
+                        },
+                      + {
+                          + name  = "ENV_MODE"
+                          + value = "aws"
+                        },
+                      + {
+                          + name  = "NUM_WORKERS"
+                          + value = "10"
+                        },
+                      + {
+                          + name  = "PYTHONDONTWRITEBYTECODE"
+                          + value = "1"
+                        },
+                      + {
+                          + name  = "PYTHONUNBUFFERED"
+                          + value = "1"
+                        },
+                      + {
+                          + name  = "RPC_PORT"
+                          + value = "18861"
+                        },
+                      + {
+                          + name  = "RUNNING_IN_DOCKER"
+                          + value = "true"
+                        },
+                      + {
+                          + name  = "SYS_ENV"
+                          + value = "aws"
+                        },
+                      + {
+                          + name  = "SYS_MODE"
+                          + value = "centralized"
+                        },
+                      + {
+                          + name  = "TRAINING_MODE"
+                          + value = "centralized"
+                        },
+                      + {
+                          + name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          + value = "120"
+                        },
+                    ]
+                  + essential        = true
+                  + image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  + logConfiguration = {
+                      + logDriver = "awslogs"
+                      + options   = {
+                          + awslogs-group         = "/ecs/lab-worker"
+                          + awslogs-region        = "us-east-1"
+                          + awslogs-stream-prefix = "worker"
+                        }
+                    }
+                  + name             = "worker"
+                },
+            ]
+        )
       + cpu                      = "4096"
       + enable_fault_injection   = (known after apply)
       + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-1"
+      + family                   = "lab-worker-task"
       + id                       = (known after apply)
       + memory                   = "8192"
       + network_mode             = "awsvpc"
@@ -885,481 +756,1266 @@ Terraform will perform the following actions:
       + track_latest             = false
     }
 
-  # aws_ecs_task_definition.worker_federated[1] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-2"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[0] will be destroyed
+  # (because index [0] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-1:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-1" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=1)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "1"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-1"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-1" -> null
+      - id                       = "lab-worker-task-1" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[2] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-3"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[1] will be destroyed
+  # (because index [1] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-2:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-2" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=2)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "2"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-2"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-2" -> null
+      - id                       = "lab-worker-task-2" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[3] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-4"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-3:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-3" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=3)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "3"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-3"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-3" -> null
+      - id                       = "lab-worker-task-3" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[4] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-5"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[3] will be destroyed
+  # (because index [3] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-4:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-4" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=4)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "4"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-4"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-4" -> null
+      - id                       = "lab-worker-task-4" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[5] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-6"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[4] will be destroyed
+  # (because index [4] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-5:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-5" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=5)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "5"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-5"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-5" -> null
+      - id                       = "lab-worker-task-5" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[6] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-7"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[5] will be destroyed
+  # (because index [5] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-6:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-6" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=6)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "6"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-6"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-6" -> null
+      - id                       = "lab-worker-task-6" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[7] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-8"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[6] will be destroyed
+  # (because index [6] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-7:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-7" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=7)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "7"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-7"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-7" -> null
+      - id                       = "lab-worker-task-7" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[8] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-9"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[7] will be destroyed
+  # (because index [7] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-8:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-8" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=8)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "8"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-8"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-8" -> null
+      - id                       = "lab-worker-task-8" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_ecs_task_definition.worker_federated[9] will be created
-  + resource "aws_ecs_task_definition" "worker_federated" {
-      + arn                      = (known after apply)
-      + arn_without_revision     = (known after apply)
-      + container_definitions    = (known after apply)
-      + cpu                      = "4096"
-      + enable_fault_injection   = (known after apply)
-      + execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole"
-      + family                   = "lab-worker-task-10"
-      + id                       = (known after apply)
-      + memory                   = "8192"
-      + network_mode             = "awsvpc"
-      + requires_compatibilities = [
-          + "FARGATE",
-        ]
-      + revision                 = (known after apply)
-      + skip_destroy             = false
-      + tags                     = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                 = {
-          + "Project" = "rf-distributed"
-        }
-      + task_role_arn            = "arn:aws:iam::378857401407:role/LabRole"
-      + track_latest             = false
+  # aws_ecs_task_definition.worker_federated[8] will be destroyed
+  # (because index [8] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-9:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-9" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=9)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "9"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-9"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-9" -> null
+      - id                       = "lab-worker-task-9" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_lambda_function.rf_gateway will be created
-  + resource "aws_lambda_function" "rf_gateway" {
-      + architectures                  = (known after apply)
-      + arn                            = (known after apply)
-      + code_sha256                    = (known after apply)
-      + filename                       = "./lambda/lambda_function.zip"
-      + function_name                  = "RFGatewayLambda"
-      + handler                        = "lambda_function.lambda_handler"
-      + id                             = (known after apply)
-      + invoke_arn                     = (known after apply)
-      + last_modified                  = (known after apply)
-      + memory_size                    = 128
-      + package_type                   = "Zip"
-      + publish                        = false
-      + qualified_arn                  = (known after apply)
-      + qualified_invoke_arn           = (known after apply)
-      + reserved_concurrent_executions = -1
-      + role                           = "arn:aws:iam::378857401407:role/LabRole"
-      + runtime                        = "python3.12"
-      + signing_job_arn                = (known after apply)
-      + signing_profile_version_arn    = (known after apply)
-      + skip_destroy                   = false
-      + source_code_hash               = "pBufBv9QPkMFN9Sh4wT4mTJhF6DKOkcvy7tjexXsLS4="
-      + source_code_size               = (known after apply)
-      + tags                           = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                       = {
-          + "Project" = "rf-distributed"
-        }
-      + timeout                        = 15
-      + version                        = (known after apply)
-
-      + environment {
-          + variables = (known after apply)
-        }
-
-      + ephemeral_storage (known after apply)
-
-      + logging_config (known after apply)
-
-      + tracing_config (known after apply)
+  # aws_ecs_task_definition.worker_federated[9] will be destroyed
+  # (because index [9] is out of range for count)
+  - resource "aws_ecs_task_definition" "worker_federated" {
+      - arn                      = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-10:1" -> null
+      - arn_without_revision     = "arn:aws:ecs:us-east-1:378857401407:task-definition/lab-worker-task-10" -> null
+      - container_definitions    = jsonencode(
+            [
+              - {
+                  - command          = [
+                      - "sh",
+                      - "-c",
+                      - "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST (WORKER_INDEX=10)\"; exec python -m src.worker.main Worker-${EC2_ID}-${TRAINING_MODE}-$(hostname) 18861 federated aws",
+                    ]
+                  - environment      = [
+                      - {
+                          - name  = "AWS_DEFAULT_REGION"
+                          - value = "us-east-1"
+                        },
+                      - {
+                          - name  = "DATASETS_BUCKET_NAME"
+                          - value = "rf-distributed-datasets-378857401407-us-east-1"
+                        },
+                      - {
+                          - name  = "DATASET_TYPE"
+                          - value = "synthetic"
+                        },
+                      - {
+                          - name  = "EC2_ID"
+                          - value = "Fargate"
+                        },
+                      - {
+                          - name  = "ENV_MODE"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "NUM_WORKERS"
+                          - value = "10"
+                        },
+                      - {
+                          - name  = "PYTHONDONTWRITEBYTECODE"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "PYTHONUNBUFFERED"
+                          - value = "1"
+                        },
+                      - {
+                          - name  = "RPC_PORT"
+                          - value = "18861"
+                        },
+                      - {
+                          - name  = "RUNNING_IN_DOCKER"
+                          - value = "true"
+                        },
+                      - {
+                          - name  = "SYS_ENV"
+                          - value = "aws"
+                        },
+                      - {
+                          - name  = "SYS_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "TRAINING_MODE"
+                          - value = "federated"
+                        },
+                      - {
+                          - name  = "WORKER_HEARTBEAT_TIMEOUT"
+                          - value = "120"
+                        },
+                      - {
+                          - name  = "WORKER_INDEX"
+                          - value = "10"
+                        },
+                    ]
+                  - essential        = true
+                  - image            = "378857401407.dkr.ecr.us-east-1.amazonaws.com/rf-distributed:latest"
+                  - logConfiguration = {
+                      - logDriver = "awslogs"
+                      - options   = {
+                          - awslogs-group         = "/ecs/lab-worker"
+                          - awslogs-region        = "us-east-1"
+                          - awslogs-stream-prefix = "worker-10"
+                        }
+                    }
+                  - mountPoints      = []
+                  - name             = "worker"
+                  - portMappings     = []
+                  - systemControls   = []
+                  - volumesFrom      = []
+                },
+            ]
+        ) -> null
+      - cpu                      = "4096" -> null
+      - enable_fault_injection   = false -> null
+      - execution_role_arn       = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - family                   = "lab-worker-task-10" -> null
+      - id                       = "lab-worker-task-10" -> null
+      - memory                   = "8192" -> null
+      - network_mode             = "awsvpc" -> null
+      - requires_compatibilities = [
+          - "FARGATE",
+        ] -> null
+      - revision                 = 1 -> null
+      - skip_destroy             = false -> null
+      - tags                     = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - tags_all                 = {
+          - "Project" = "rf-distributed"
+        } -> null
+      - task_role_arn            = "arn:aws:iam::378857401407:role/LabRole" -> null
+      - track_latest             = false -> null
+        # (2 unchanged attributes hidden)
     }
 
-  # aws_lambda_permission.apigw_invoke will be created
-  + resource "aws_lambda_permission" "apigw_invoke" {
-      + action              = "lambda:InvokeFunction"
-      + function_name       = "RFGatewayLambda"
-      + id                  = (known after apply)
-      + principal           = "apigateway.amazonaws.com"
-      + source_arn          = (known after apply)
-      + statement_id        = "AllowAPIGatewayInvoke"
-      + statement_id_prefix = (known after apply)
+  # aws_launch_template.orchestrator will be updated in-place
+  ~ resource "aws_launch_template" "orchestrator" {
+        id                                   = "lt-0c581352d174903bb"
+      ~ latest_version                       = 1 -> (known after apply)
+        name                                 = "orchestrator-lt-20260911152108500600000001"
+        tags                                 = {}
+      ~ user_data                            = "IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSBpbnN0YWxsIC15IGRvY2tlcgpzeXN0ZW1jdGwgZW5hYmxlIGRvY2tlcgpzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCgphd3MgZWNyIGdldC1sb2dpbi1wYXNzd29yZCAtLXJlZ2lvbiB1cy1lYXN0LTEgfCBcCiAgZG9ja2VyIGxvZ2luIC0tdXNlcm5hbWUgQVdTIC0tcGFzc3dvcmQtc3RkaW4gMzc4ODU3NDAxNDA3LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQKClRPS0VOPSQoY3VybCAtcyAtWCBQVVQgImh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L2FwaS90b2tlbiIgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbi10dGwtc2Vjb25kczogMjE2MDAiKQpJTlNUQU5DRV9JRD0kKGN1cmwgLXMgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbjogJFRPS0VOIiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvaW5zdGFuY2UtaWQpClBSSVZBVEVfSVA9JChjdXJsIC1zIC1IICJYLWF3cy1lYzItbWV0YWRhdGEtdG9rZW46ICRUT0tFTiIgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWlwdjQpCkNPTlRBSU5FUl9IT1NUTkFNRT0iaXAtJChlY2hvICRQUklWQVRFX0lQIHwgdHIgJy4nICctJykuZWMyLmludGVybmFsIgoKZG9ja2VyIHJ1biAtZCBcCiAgLS1uYW1lIG9yY2hlc3RyYXRvciBcCiAgLS1yZXN0YXJ0IHVubGVzcy1zdG9wcGVkIFwKICAtLWhvc3RuYW1lICIkQ09OVEFJTkVSX0hPU1ROQU1FIiBcCiAgLS1sb2ctZHJpdmVyIGF3c2xvZ3MgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLXJlZ2lvbj11cy1lYXN0LTEgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLWdyb3VwPS9lYzIvbGFiLW9yY2hlc3RyYXRvciBcCiAgLS1sb2ctb3B0IGF3c2xvZ3MtY3JlYXRlLWdyb3VwPWZhbHNlIFwKICAtLWxvZy1vcHQgYXdzbG9ncy1zdHJlYW09b3JjaGVzdHJhdG9yLSRJTlNUQU5DRV9JRCBcCiAgLWUgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBcCiAgLWUgUFlUSE9OVU5CVUZGRVJFRD0xIFwKICAtZSBOVU1fV09SS0VSUz0xMCBcCiAgLWUgRU5WX01PREU9YXdzIFwKICAtZSBUUkFJTklOR19NT0RFPWZlZGVyYXRlZCBcCiAgLWUgRUMyX0lEPUVDMk9yY2hlc3RyYXRvciBcCiAgLWUgT1JDSEVTVFJBVE9SX0lOREVYPSRJTlNUQU5DRV9JRCBcCiAgLWUgUlVOTklOR19JTl9ET0NLRVI9dHJ1ZSBcCiAgLWUgQVdTX0RFRkFVTFRfUkVHSU9OPXVzLWVhc3QtMSBcCiAgLWUgREFUQVNFVFNfQlVDS0VUX05BTUU9cmYtZGlzdHJpYnV0ZWQtZGF0YXNldHMtMzc4ODU3NDAxNDA3LXVzLWVhc3QtMSBcCiAgLWUgV09SS0VSX0hFQVJUQkVBVF9USU1FT1VUPTEyMCBcCiAgLWUgUlBDX1NZTkNfVElNRU9VVF9TRUNPTkRTPTE4MDBzIFwKICAtZSBSUENfSU5GRVJFTkNFX1NZTkNfVElNRU9VVF9TRUNPTkRTPTkwMHMgXAogIDM3ODg1NzQwMTQwNy5ka3IuZWNyLnVzLWVhc3QtMS5hbWF6b25hd3MuY29tL3JmLWRpc3RyaWJ1dGVkOmxhdGVzdCBcCiAgcHl0aG9uIC1tIHNyYy5vcmNoZXN0cmF0b3IubWFpbgo=" -> "IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSBpbnN0YWxsIC15IGRvY2tlcgpzeXN0ZW1jdGwgZW5hYmxlIGRvY2tlcgpzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCgphd3MgZWNyIGdldC1sb2dpbi1wYXNzd29yZCAtLXJlZ2lvbiB1cy1lYXN0LTEgfCBcCiAgZG9ja2VyIGxvZ2luIC0tdXNlcm5hbWUgQVdTIC0tcGFzc3dvcmQtc3RkaW4gMzc4ODU3NDAxNDA3LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQKClRPS0VOPSQoY3VybCAtcyAtWCBQVVQgImh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L2FwaS90b2tlbiIgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbi10dGwtc2Vjb25kczogMjE2MDAiKQpJTlNUQU5DRV9JRD0kKGN1cmwgLXMgLUggIlgtYXdzLWVjMi1tZXRhZGF0YS10b2tlbjogJFRPS0VOIiBodHRwOi8vMTY5LjI1NC4xNjkuMjU0L2xhdGVzdC9tZXRhLWRhdGEvaW5zdGFuY2UtaWQpClBSSVZBVEVfSVA9JChjdXJsIC1zIC1IICJYLWF3cy1lYzItbWV0YWRhdGEtdG9rZW46ICRUT0tFTiIgaHR0cDovLzE2OS4yNTQuMTY5LjI1NC9sYXRlc3QvbWV0YS1kYXRhL2xvY2FsLWlwdjQpCkNPTlRBSU5FUl9IT1NUTkFNRT0iaXAtJChlY2hvICRQUklWQVRFX0lQIHwgdHIgJy4nICctJykuZWMyLmludGVybmFsIgoKZG9ja2VyIHJ1biAtZCBcCiAgLS1uYW1lIG9yY2hlc3RyYXRvciBcCiAgLS1yZXN0YXJ0IHVubGVzcy1zdG9wcGVkIFwKICAtLWhvc3RuYW1lICIkQ09OVEFJTkVSX0hPU1ROQU1FIiBcCiAgLS1sb2ctZHJpdmVyIGF3c2xvZ3MgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLXJlZ2lvbj11cy1lYXN0LTEgXAogIC0tbG9nLW9wdCBhd3Nsb2dzLWdyb3VwPS9lYzIvbGFiLW9yY2hlc3RyYXRvciBcCiAgLS1sb2ctb3B0IGF3c2xvZ3MtY3JlYXRlLWdyb3VwPWZhbHNlIFwKICAtLWxvZy1vcHQgYXdzbG9ncy1zdHJlYW09b3JjaGVzdHJhdG9yLSRJTlNUQU5DRV9JRCBcCiAgLWUgUFlUSE9ORE9OVFdSSVRFQllURUNPREU9MSBcCiAgLWUgUFlUSE9OVU5CVUZGRVJFRD0xIFwKICAtZSBOVU1fV09SS0VSUz0xMCBcCiAgLWUgRU5WX01PREU9YXdzIFwKICAtZSBUUkFJTklOR19NT0RFPWNlbnRyYWxpemVkIFwKICAtZSBFQzJfSUQ9RUMyT3JjaGVzdHJhdG9yIFwKICAtZSBPUkNIRVNUUkFUT1JfSU5ERVg9JElOU1RBTkNFX0lEIFwKICAtZSBSVU5OSU5HX0lOX0RPQ0tFUj10cnVlIFwKICAtZSBBV1NfREVGQVVMVF9SRUdJT049dXMtZWFzdC0xIFwKICAtZSBEQVRBU0VUU19CVUNLRVRfTkFNRT1yZi1kaXN0cmlidXRlZC1kYXRhc2V0cy0zNzg4NTc0MDE0MDctdXMtZWFzdC0xIFwKICAtZSBXT1JLRVJfSEVBUlRCRUFUX1RJTUVPVVQ9MTIwIFwKICAtZSBSUENfU1lOQ19USU1FT1VUX1NFQ09ORFM9MTgwMHMgXAogIC1lIFJQQ19JTkZFUkVOQ0VfU1lOQ19USU1FT1VUX1NFQ09ORFM9OTAwcyBcCiAgMzc4ODU3NDAxNDA3LmRrci5lY3IudXMtZWFzdC0xLmFtYXpvbmF3cy5jb20vcmYtZGlzdHJpYnV0ZWQ6bGF0ZXN0IFwKICBweXRob24gLW0gc3JjLm9yY2hlc3RyYXRvci5tYWluCg=="
+        # (16 unchanged attributes hidden)
+
+        # (3 unchanged blocks hidden)
     }
 
-  # aws_launch_template.orchestrator will be created
-  + resource "aws_launch_template" "orchestrator" {
-      + arn             = (known after apply)
-      + default_version = (known after apply)
-      + id              = (known after apply)
-      + image_id        = "ami-0ac62d2d72afdce51"
-      + instance_type   = "r5.large"
-      + latest_version  = (known after apply)
-      + name            = (known after apply)
-      + name_prefix     = "orchestrator-lt-"
-      + tags_all        = {
-          + "Project" = "rf-distributed"
-        }
-      + user_data       = (known after apply)
-
-      + iam_instance_profile {
-          + name = "LabInstanceProfile"
-        }
-
-      + metadata_options (known after apply)
-
-      + network_interfaces {
-          + associate_public_ip_address = "true"
-          + security_groups             = (known after apply)
-        }
-
-      + tag_specifications {
-          + resource_type = "instance"
-          + tags          = {
-              + "Project" = "rf-distributed"
-              + "Role"    = "orchestrator-ec2"
-            }
-        }
-    }
-
-  # aws_security_group.rf_distributed will be created
-  + resource "aws_security_group" "rf_distributed" {
-      + arn                    = (known after apply)
-      + description            = "Orchestrator-Worker RPC + SSH/debug"
-      + egress                 = (known after apply)
-      + id                     = (known after apply)
-      + ingress                = (known after apply)
-      + name                   = "rf-distributed-sg"
-      + name_prefix            = (known after apply)
-      + owner_id               = (known after apply)
-      + revoke_rules_on_delete = false
-      + tags                   = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all               = {
-          + "Project" = "rf-distributed"
-        }
-      + vpc_id                 = "vpc-02f38477e9134942b"
-    }
-
-  # aws_security_group_rule.egress_all will be created
-  + resource "aws_security_group_rule" "egress_all" {
-      + cidr_blocks              = [
-          + "0.0.0.0/0",
-        ]
-      + description              = "Egress libero (pull immagini ECR, S3/DynamoDB/SQS, SSM per ECS Exec)"
-      + from_port                = 0
-      + id                       = (known after apply)
-      + protocol                 = "-1"
-      + security_group_id        = (known after apply)
-      + security_group_rule_id   = (known after apply)
-      + self                     = false
-      + source_security_group_id = (known after apply)
-      + to_port                  = 0
-      + type                     = "egress"
-    }
-
-  # aws_security_group_rule.rpc_self_ingress will be created
-  + resource "aws_security_group_rule" "rpc_self_ingress" {
-      + description              = "RPC self-referencing tra orchestrator/worker/test-engine"
-      + from_port                = 18861
-      + id                       = (known after apply)
-      + protocol                 = "tcp"
-      + security_group_id        = (known after apply)
-      + security_group_rule_id   = (known after apply)
-      + self                     = false
-      + source_security_group_id = (known after apply)
-      + to_port                  = 18861
-      + type                     = "ingress"
-    }
-
-  # aws_sqs_queue.centralized_queue will be created
-  + resource "aws_sqs_queue" "centralized_queue" {
-      + arn                               = (known after apply)
-      + content_based_deduplication       = true
-      + deduplication_scope               = (known after apply)
-      + delay_seconds                     = 0
-      + fifo_queue                        = true
-      + fifo_throughput_limit             = "perQueue"
-      + id                                = (known after apply)
-      + kms_data_key_reuse_period_seconds = (known after apply)
-      + max_message_size                  = 262144
-      + message_retention_seconds         = 86400
-      + name                              = "centralized_queue.fifo"
-      + name_prefix                       = (known after apply)
-      + policy                            = (known after apply)
-      + receive_wait_time_seconds         = 0
-      + redrive_allow_policy              = (known after apply)
-      + redrive_policy                    = (known after apply)
-      + sqs_managed_sse_enabled           = (known after apply)
-      + tags                              = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                          = {
-          + "Project" = "rf-distributed"
-        }
-      + url                               = (known after apply)
-      + visibility_timeout_seconds        = 600
-    }
-
-  # aws_sqs_queue.federated_queue will be created
-  + resource "aws_sqs_queue" "federated_queue" {
-      + arn                               = (known after apply)
-      + content_based_deduplication       = true
-      + deduplication_scope               = (known after apply)
-      + delay_seconds                     = 0
-      + fifo_queue                        = true
-      + fifo_throughput_limit             = "perQueue"
-      + id                                = (known after apply)
-      + kms_data_key_reuse_period_seconds = (known after apply)
-      + max_message_size                  = 262144
-      + message_retention_seconds         = 86400
-      + name                              = "federated_queue.fifo"
-      + name_prefix                       = (known after apply)
-      + policy                            = (known after apply)
-      + receive_wait_time_seconds         = 0
-      + redrive_allow_policy              = (known after apply)
-      + redrive_policy                    = (known after apply)
-      + sqs_managed_sse_enabled           = (known after apply)
-      + tags                              = {
-          + "Project" = "rf-distributed"
-        }
-      + tags_all                          = {
-          + "Project" = "rf-distributed"
-        }
-      + url                               = (known after apply)
-      + visibility_timeout_seconds        = 600
-    }
-
-  # null_resource.docker_build_push will be created
-  + resource "null_resource" "docker_build_push" {
-      + id       = (known after apply)
-      + triggers = {
-          + "dockerfile_hash" = "63456a522f78671072b0cbb3c05dd1bb"
-          + "force_rebuild"   = "static"
-          + "src_hash"        = "b3210da38b8373ba815b1722568bcc01cedc764b"
+  # null_resource.docker_build_push must be replaced
+-/+ resource "null_resource" "docker_build_push" {
+      ~ id       = "150603316169189730" -> (known after apply)
+      ~ triggers = { # forces replacement
+          ~ "src_hash"        = "b3210da38b8373ba815b1722568bcc01cedc764b" -> "d785f43fa97316a9a5da03cbec621850daef3c75"
+            # (2 unchanged elements hidden)
         }
     }
 
-Plan: 46 to add, 0 to change, 0 to destroy.
+Plan: 3 to add, 1 to change, 21 to destroy.
 
 Changes to Outputs:
-  + api_gateway_endpoint                  = (known after apply)
-  + cluster_name                          = "forest-cluster"
-  + datasets_bucket_name                  = "rf-distributed-datasets-378857401407-us-east-1"
-  + ecr_repository_url                    = (known after apply)
-  + next_steps                            = (known after apply)
-  + orchestrator_asg_name                 = "orchestrator-asg"
-  + orchestrator_ec2_instance_ids_command = "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names orchestrator-asg --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text --region us-east-1"
-  + security_group_id                     = (known after apply)
-  + training_mode                         = "federated"
-  + worker_service_names                  = [
-      + "worker-service-1",
-      + "worker-service-2",
-      + "worker-service-3",
-      + "worker-service-4",
-      + "worker-service-5",
-      + "worker-service-6",
-      + "worker-service-7",
-      + "worker-service-8",
-      + "worker-service-9",
-      + "worker-service-10",
+  ~ next_steps                            = <<-EOT
+      - Infrastruttura creata (modalità: federated). Prossimi passi:
+      + Infrastruttura creata (modalità: centralized). Prossimi passi:
+        
+        1. Aggiorna il tuo .env locale con:
+             SYS_ENV=aws
+      -      SYS_MODE=federated
+      +      SYS_MODE=centralized
+             DATASETS_BUCKET_NAME=rf-distributed-datasets-378857401407-us-east-1
+             AWS_DEFAULT_REGION=us-east-1
+             NUM_WORKERS=10
+             API_GATEWAY_URL=https://hh0ipkpnud.execute-api.us-east-1.amazonaws.com
+        
+        2. Provisioning shard: SOLO per dataset_type=real (partizionamento
+           by_day su S3). Per dataset_type=synthetic NON va eseguito: i dati
+           vengono generati al volo al primo training.
+        
+      -      python -m scripts.provision_federated_shards --num-workers 10
+        
+      - 
+        3. AVVIA l'infrastruttura (parte FERMA dopo l'apply: worker_desired_count
+           e orchestrator_desired_count di default sono 0, nessun task/istanza
+           in esecuzione finché non li alzi):
+        
+             aws autoscaling update-auto-scaling-group --auto-scaling-group-name orchestrator-asg \
+               --min-size 2 --max-size 2 --desired-capacity 2 --region us-east-1
+        
+        
+      -      for i in $(seq 1 10); do
+      -        aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
+      -          --desired-count 1 --region us-east-1 > /dev/null
+      -      done
+      +      aws ecs update-service --cluster forest-cluster --service worker-service \
+      +        --desired-count 10 --region us-east-1
+        
+        
+           Aspetta 3-4 minuti (boot EC2, pull immagine, avvio container) prima
+           di procedere - vedi README, sezione 6.1, per come verificarlo.
+        
+        4. Avvia il client contro l'infrastruttura:
+             ./run_aws.sh
+        
+        5. Per fermare tutto senza distruggere l'infrastruttura (stessi comandi
+           del punto 3, con --desired-capacity 0 / --desired-count 0):
+        
+             aws autoscaling update-auto-scaling-group --auto-scaling-group-name orchestrator-asg \
+               --min-size 0 --max-size 0 --desired-capacity 0 --region us-east-1
+        
+      -      for i in $(seq 1 10); do
+      -        aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
+      -          --desired-count 0 --region us-east-1 > /dev/null
+      -      done
+      +      aws ecs update-service --cluster forest-cluster --service worker-service \
+      +        --desired-count 0 --region us-east-1
+        
+        
+           Per rendere lo stop persistente attraverso un futuro apply, imposta
+           in terraform.tfvars: orchestrator_desired_count = 0, worker_desired_count = 0
+           (sono già i default se non li specifichi affatto).
+        
+        6. Per distruggere TUTTA l'infrastruttura creata da Terraform:
+             terraform destroy
+    EOT
+  ~ training_mode                         = "federated" -> "centralized"
+  ~ worker_service_names                  = [
+      - "worker-service-1",
+      - "worker-service-2",
+      - "worker-service-3",
+      - "worker-service-4",
+      - "worker-service-5",
+      - "worker-service-6",
+      - "worker-service-7",
+      - "worker-service-8",
+      - "worker-service-9",
+      - "worker-service-10",
+      + "worker-service",
     ]
 
 ─────────────────────────────────────────────────────────────────────────────
