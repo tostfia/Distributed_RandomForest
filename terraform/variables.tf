@@ -38,6 +38,16 @@ variable "worker_desired_count" {
   default     = 0
 }
 
+variable "dataset_type" {
+  description = "Tipo di dataset: 'synthetic' o 'real'. BUGFIX (11/9/2026): iniettato nel container worker come DATASET_TYPE (vedi ecs_task_definitions.tf) - senza questa variabile, FederatedWorker.__init__ (federatedWorker.py:253) leggeva sempre il default 'real' e tentava di scaricare shard da S3 mai provisionati per il sintetico, crashando con 404 su TUTTI i worker al boot. Deve combaciare con dataset_type in test_config.json e DATASET_TYPE nel .env locale del test-engine, altrimenti worker e test-engine assumono tipi di dataset diversi."
+  type        = string
+  default     = "synthetic"
+  validation {
+    condition     = contains(["synthetic", "real"], var.dataset_type)
+    error_message = "dataset_type deve essere 'synthetic' o 'real'."
+  }
+}
+
 variable "orchestrator_desired_count" {
   description = "Numero di istanze EC2 dell'orchestrator (>=2 per testare la leader election / failover). Non più un desired-count ECS: l'orchestrator gira su istanze EC2 dedicate, vedi orchestrator_ec2.tf (la SCP del Learner Lab nega task definition ECS con memoria > 8192 MiB, insufficiente per gli scenari di scalabilità pesanti)."
   type        = number

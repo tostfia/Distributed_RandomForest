@@ -7,10 +7,20 @@ project_name = "rf-distributed"
 cluster_name = "forest-cluster"
 
 # "centralized" oppure "federated"
-training_mode = "centralized"
+training_mode = "federated"
 
-num_workers                = 2
-orchestrator_desired_count = 2
+# "synthetic" oppure "real" - DEVE combaciare con dataset_type in
+# test_config.json e DATASET_TYPE nel .env locale del test-engine.
+dataset_type = "synthetic"
+
+num_workers                = 10
+orchestrator_desired_count = 0
+# worker_desired_count non specificato: default 0 (vedi variables.tf) -
+# infrastruttura creata ma ferma, sia orchestrator che worker. Alza
+# entrambi (qui e/o worker_desired_count) quando sei pronta a lanciare
+# davvero un test, oppure usa i comandi 'aws ecs update-service' /
+# 'aws autoscaling update-auto-scaling-group' che gia' conosci, senza
+# dover rifare un apply ogni volta.
 
 # Abbassa worker_cpu durante lo sviluppo/debug per ridurre i costi; alzalo
 # solo per i test di performance finali che richiedono parallelismo reale

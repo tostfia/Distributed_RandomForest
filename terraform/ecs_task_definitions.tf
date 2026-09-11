@@ -15,6 +15,11 @@ locals {
     { name = "AWS_DEFAULT_REGION", value = var.aws_region },
     # Riferimento alla variabile locale definita in s3.tf
     { name = "DATASETS_BUCKET_NAME", value = local.datasets_bucket_name },
+    # BUGFIX (11/9/2026): senza questa, FederatedWorker.__init__ leggeva
+    # sempre il default 'real' (federatedWorker.py:253) e tentava di
+    # scaricare shard mai provisionati per il sintetico - crash 404 su S3
+    # per TUTTI i worker al boot, in crash-loop continuo.
+    { name = "DATASET_TYPE", value = var.dataset_type },
   ]
 }
 
