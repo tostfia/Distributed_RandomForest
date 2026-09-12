@@ -1,0 +1,8 @@
+{
+  "n_estimators": 100,
+  "t_seq": 1456.041739681,
+  "t_1node_parallel": 208.79263789800007,
+  "speedup_multicore": 6.973625863150929,
+  "cpu_disponibili": 16,
+  "tree_type": "regressor"
+}
