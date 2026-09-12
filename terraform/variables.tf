@@ -48,6 +48,12 @@ variable "dataset_type" {
   }
 }
 
+variable "worker_batch_multiplier" {
+  description = "Passato ai worker come WORKER_BATCH_MULTIPLIER (vedi BaseWorker.py): moltiplica pool_size (~3 con 4 vCPU) per determinare quanti alberi vengono accumulati prima di ogni checkpoint su storage condiviso. MISURATO EMPIRICAMENTE l'11/9/2026: col default di codice (1, mai impostato esplicitamente prima d'ora), ogni worker fa un round-trip S3 ogni ~3 alberi - con carichi piccoli per worker (es. 40 alberi a 10 worker/100 totali) questo costo fisso di rete per checkpoint pesa proporzionalmente sempre di più salendo di worker, in parte compensando il guadagno di parallelismo. Un valore di 3 porta il batch a ~9 alberi (pool_size*3), riducendo il numero di round-trip di un fattore ~3x. ATTENZIONE al trade-off opposto (documentato nel codice stesso): alzarlo troppo aumenta gli alberi 'pesanti' tenuti in RAM insieme tra un checkpoint e l'altro (max_depth=None su dataset da 1M righe = alberi da centinaia di MB), rischio OOM già osservato in passato con NUM_WORKERS alto. Non alzare oltre 3-5 senza testare esplicitamente la RAM residua a runtime."
+  type        = number
+  default     = 3
+}
+
 variable "orchestrator_desired_count" {
   description = "Numero di istanze EC2 dell'orchestrator (>=2 per testare la leader election / failover). Non più un desired-count ECS: l'orchestrator gira su istanze EC2 dedicate, vedi orchestrator_ec2.tf (la SCP del Learner Lab nega task definition ECS con memoria > 8192 MiB, insufficiente per gli scenari di scalabilità pesanti)."
   type        = number
@@ -116,4 +122,10 @@ variable "source_path" {
   description = "Percorso della root del progetto (dove sta il Dockerfile), relativo a questa cartella terraform/."
   type        = string
   default     = ".."
+}
+
+variable "efs_mount_path" {
+  description = "Path dove orchestrator e worker montano la cache EFS del dataset condiviso (vedi efs.tf). Passato ai container come EFS_MOUNT_PATH: se assente/vuoto in un componente, quel componente si comporta come se EFS non esistesse (fallback automatico su S3, vedi dataset_dao.py)."
+  type        = string
+  default     = "/mnt/efs"
 }

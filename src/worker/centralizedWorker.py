@@ -37,6 +37,7 @@ class CentralizedWorker(BaseWorker):
         )
 
         self._cached_source = None
+        self._cached_content_length = None
         self._cached_X = None
         self._cached_y = None
     
@@ -57,6 +58,47 @@ class CentralizedWorker(BaseWorker):
             source_info (str): URL S3 o path locale passato dinamicamente dall'Orchestratore.
         """
         
+        # CACHE SU CONTENUTO invece che su URL esatto (11/9/2026): la cache
+        # precedente confrontava 'source_info' (l'URL S3 completo) - ma ogni
+        # job genera un URL diverso (es. 'shared_train_test_scal_3_....csv'
+        # vs 'shared_train_test_scal_5_....csv'), anche quando il CONTENUTO
+        # è identico (stesso seed/parametri, vedi "[TEST CACHE AWS] Dataset
+        # riusato..." nei log dell'orchestratore). Il confronto sull'URL
+        # falliva quindi sempre tra una configurazione di scaling e l'altra,
+        # forzando un ri-download completo (~66-100MB, 24-35s MISURATI
+        # empiricamente l'11/9/2026) anche quando lo stesso identico
+        # container aveva già quei dati in memoria dal giro precedente.
+        #
+        # get_content_length() costa un head_object (solo metadata, nessun
+        # trasferimento del contenuto) invece di un get_object completo: il
+        # confronto qui sotto costa quindi decine di ms anche in caso di
+        # cache MISS, contro i 24-35s di un download - il costo aggiuntivo
+        # nel caso peggiore (contenuto diverso, serve comunque scaricare) è
+        # trascurabile rispetto al beneficio nel caso migliore (contenuto
+        # identico, download evitato del tutto).
+        try:
+            content_length = self.dao.get_content_length(source_info)
+        except Exception as e:
+            # Se il controllo leggero fallisce per qualunque motivo (rete,
+            # permessi, DAO locale senza supporto), non deve bloccare il
+            # training: si procede come se fosse un cache miss, esattamente
+            # il comportamento di prima di questa modifica.
+            print(f"[CentralizedWorker] [WARN] get_content_length fallita ({e}), "
+                  f"procedo senza cache su contenuto (comportamento pre-fix).")
+            content_length = None
+
+        if (
+            content_length is not None
+            and self._cached_content_length == content_length
+            and self._cached_X is not None
+            and self._cached_y is not None
+        ):
+            print(f"[CentralizedWorker] Dati già in cache (stessa dimensione file: "
+                  f"{content_length} byte) - nessun ri-download nonostante l'URL "
+                  f"diverso da quello del job precedente.")
+            self._cached_source = source_info  # aggiornato per coerenza/debug
+            return self._cached_X, self._cached_y
+
         if self._cached_source == source_info and self._cached_X is not None and self._cached_y is not None:
             print("[CentralizedWorker] Utilizzo dei dati già caricati in cache.")
             return self._cached_X, self._cached_y
@@ -110,6 +152,7 @@ class CentralizedWorker(BaseWorker):
         del df, X_df, y_df
 
         self._cached_source = source_info
+        self._cached_content_length = content_length
         self._cached_X = X
         self._cached_y = y
         print(

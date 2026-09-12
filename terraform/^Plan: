@@ -1,0 +1,907 @@
+data.archive_file.rf_gateway_lambda: Reading...
+data.archive_file.rf_gateway_lambda: Read complete after 0s [id=c536cdf52a06e7ccabfd7caef5a0b2455060fa3f]
+data.aws_iam_role.lab_role: Reading...
+data.aws_vpc.default: Reading...
+data.aws_region.current: Reading...
+data.aws_caller_identity.current: Reading...
+data.aws_region.current: Read complete after 0s [id=us-east-1]
+data.aws_caller_identity.current: Read complete after 0s [id=383056860320]
+data.aws_iam_role.lab_role: Read complete after 1s [id=LabRole]
+data.aws_vpc.default: Read complete after 2s [id=vpc-0127ff888dfc3014b]
+data.aws_subnets.public: Reading...
+data.aws_subnets.orchestrator_capable: Reading...
+data.aws_subnets.orchestrator_capable: Read complete after 0s [id=us-east-1]
+data.aws_subnets.public: Read complete after 0s [id=us-east-1]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_apigatewayv2_api.mljobs will be created
+  + resource "aws_apigatewayv2_api" "mljobs" {
+      + api_endpoint                 = (known after apply)
+      + api_key_selection_expression = "$request.header.x-api-key"
+      + arn                          = (known after apply)
+      + execution_arn                = (known after apply)
+      + id                           = (known after apply)
+      + ip_address_type              = (known after apply)
+      + name                         = "MLJobsAPI"
+      + protocol_type                = "HTTP"
+      + route_selection_expression   = "$request.method $request.path"
+      + tags                         = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                     = {
+          + "Project" = "rf-distributed"
+        }
+    }
+
+  # aws_apigatewayv2_integration.rf_gateway will be created
+  + resource "aws_apigatewayv2_integration" "rf_gateway" {
+      + api_id                                    = (known after apply)
+      + connection_type                           = "INTERNET"
+      + id                                        = (known after apply)
+      + integration_method                        = "POST"
+      + integration_response_selection_expression = (known after apply)
+      + integration_type                          = "AWS_PROXY"
+      + integration_uri                           = (known after apply)
+      + payload_format_version                    = "2.0"
+      + timeout_milliseconds                      = 30000
+    }
+
+  # aws_apigatewayv2_route.get_details will be created
+  + resource "aws_apigatewayv2_route" "get_details" {
+      + api_id             = (known after apply)
+      + api_key_required   = false
+      + authorization_type = "NONE"
+      + id                 = (known after apply)
+      + route_key          = "GET /jobs/{job_id}/details"
+      + target             = (known after apply)
+    }
+
+  # aws_apigatewayv2_route.get_status will be created
+  + resource "aws_apigatewayv2_route" "get_status" {
+      + api_id             = (known after apply)
+      + api_key_required   = false
+      + authorization_type = "NONE"
+      + id                 = (known after apply)
+      + route_key          = "GET /jobs/{job_id}/status"
+      + target             = (known after apply)
+    }
+
+  # aws_apigatewayv2_route.post_centralized will be created
+  + resource "aws_apigatewayv2_route" "post_centralized" {
+      + api_id             = (known after apply)
+      + api_key_required   = false
+      + authorization_type = "NONE"
+      + id                 = (known after apply)
+      + route_key          = "POST /jobs/centralized"
+      + target             = (known after apply)
+    }
+
+  # aws_apigatewayv2_route.post_federated will be created
+  + resource "aws_apigatewayv2_route" "post_federated" {
+      + api_id             = (known after apply)
+      + api_key_required   = false
+      + authorization_type = "NONE"
+      + id                 = (known after apply)
+      + route_key          = "POST /jobs/federated"
+      + target             = (known after apply)
+    }
+
+  # aws_apigatewayv2_stage.default will be created
+  + resource "aws_apigatewayv2_stage" "default" {
+      + api_id        = (known after apply)
+      + arn           = (known after apply)
+      + auto_deploy   = true
+      + deployment_id = (known after apply)
+      + execution_arn = (known after apply)
+      + id            = (known after apply)
+      + invoke_url    = (known after apply)
+      + name          = "$default"
+      + tags          = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all      = {
+          + "Project" = "rf-distributed"
+        }
+    }
+
+  # aws_autoscaling_group.orchestrator will be created
+  + resource "aws_autoscaling_group" "orchestrator" {
+      + arn                              = (known after apply)
+      + availability_zones               = (known after apply)
+      + default_cooldown                 = (known after apply)
+      + desired_capacity                 = 0
+      + force_delete                     = false
+      + force_delete_warm_pool           = false
+      + health_check_grace_period        = 300
+      + health_check_type                = "EC2"
+      + id                               = (known after apply)
+      + ignore_failed_scaling_activities = false
+      + load_balancers                   = (known after apply)
+      + max_size                         = 0
+      + metrics_granularity              = "1Minute"
+      + min_size                         = 0
+      + name                             = "orchestrator-asg"
+      + name_prefix                      = (known after apply)
+      + predicted_capacity               = (known after apply)
+      + protect_from_scale_in            = false
+      + service_linked_role_arn          = (known after apply)
+      + target_group_arns                = (known after apply)
+      + vpc_zone_identifier              = [
+          + "subnet-05d44fae2ace97a12",
+          + "subnet-0ceaf38169fcf556a",
+          + "subnet-0d26cb0a2c791dc06",
+          + "subnet-0e374722e1ec81b09",
+          + "subnet-0e67552278ca55e51",
+        ]
+      + wait_for_capacity_timeout        = "10m"
+      + warm_pool_size                   = (known after apply)
+
+      + availability_zone_distribution (known after apply)
+
+      + capacity_reservation_specification (known after apply)
+
+      + instance_refresh {
+          + strategy = "Rolling"
+
+          + preferences {
+              + max_healthy_percentage       = 100
+              + min_healthy_percentage       = 50
+              + scale_in_protected_instances = "Ignore"
+              + skip_matching                = false
+              + standby_instances            = "Ignore"
+            }
+        }
+
+      + launch_template {
+          + id      = (known after apply)
+          + name    = (known after apply)
+          + version = "$Latest"
+        }
+
+      + mixed_instances_policy (known after apply)
+
+      + tag {
+          + key                 = "Project"
+          + propagate_at_launch = true
+          + value               = "rf-distributed"
+        }
+      + tag {
+          + key                 = "Role"
+          + propagate_at_launch = true
+          + value               = "orchestrator-ec2"
+        }
+
+      + traffic_source (known after apply)
+    }
+
+  # aws_dynamodb_table.job_locks will be created
+  + resource "aws_dynamodb_table" "job_locks" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "lock_key"
+      + id               = (known after apply)
+      + name             = "JobLocks"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "lock_key"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.job_meta_data will be created
+  + resource "aws_dynamodb_table" "job_meta_data" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "job_id"
+      + id               = (known after apply)
+      + name             = "JobMetadata"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "job_id"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.model_status will be created
+  + resource "aws_dynamodb_table" "model_status" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "job_id"
+      + id               = (known after apply)
+      + name             = "ModelStatus"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "job_id"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.orchestrator_locks will be created
+  + resource "aws_dynamodb_table" "orchestrator_locks" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "lock_key"
+      + id               = (known after apply)
+      + name             = "OrchestratorLocks"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "lock_key"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.orchestrators_registry will be created
+  + resource "aws_dynamodb_table" "orchestrators_registry" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "orchestrator_name"
+      + id               = (known after apply)
+      + name             = "orchestrators_registry"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "orchestrator_name"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.worker_tasks will be created
+  + resource "aws_dynamodb_table" "worker_tasks" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "task_id"
+      + id               = (known after apply)
+      + name             = "WorkerTasks"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "job_id"
+          + type = "S"
+        }
+      + attribute {
+          + name = "task_id"
+          + type = "S"
+        }
+      + attribute {
+          + name = "worker_name"
+          + type = "S"
+        }
+
+      + global_secondary_index {
+          + hash_key           = "job_id"
+          + name               = "job_id-index"
+          + non_key_attributes = []
+          + projection_type    = "ALL"
+          + read_capacity      = (known after apply)
+          + write_capacity     = (known after apply)
+            # (1 unchanged attribute hidden)
+        }
+      + global_secondary_index {
+          + hash_key           = "worker_name"
+          + name               = "worker_name-index"
+          + non_key_attributes = []
+          + projection_type    = "ALL"
+          + read_capacity      = (known after apply)
+          + write_capacity     = (known after apply)
+            # (1 unchanged attribute hidden)
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_dynamodb_table.workers_registry will be created
+  + resource "aws_dynamodb_table" "workers_registry" {
+      + arn              = (known after apply)
+      + billing_mode     = "PAY_PER_REQUEST"
+      + hash_key         = "worker_name"
+      + id               = (known after apply)
+      + name             = "workers_registry"
+      + read_capacity    = (known after apply)
+      + stream_arn       = (known after apply)
+      + stream_label     = (known after apply)
+      + stream_view_type = (known after apply)
+      + tags             = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all         = {
+          + "Project" = "rf-distributed"
+        }
+      + write_capacity   = (known after apply)
+
+      + attribute {
+          + name = "worker_name"
+          + type = "S"
+        }
+
+      + point_in_time_recovery (known after apply)
+
+      + server_side_encryption (known after apply)
+
+      + ttl (known after apply)
+    }
+
+  # aws_ecr_repository.rf_distributed will be created
+  + resource "aws_ecr_repository" "rf_distributed" {
+      + arn                  = (known after apply)
+      + id                   = (known after apply)
+      + image_tag_mutability = "MUTABLE"
+      + name                 = "rf-distributed"
+      + registry_id          = (known after apply)
+      + repository_url       = (known after apply)
+      + tags                 = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all             = {
+          + "Project" = "rf-distributed"
+        }
+
+      + image_scanning_configuration {
+          + scan_on_push = true
+        }
+    }
+
+  # aws_ecs_cluster.forest_cluster will be created
+  + resource "aws_ecs_cluster" "forest_cluster" {
+      + arn      = (known after apply)
+      + id       = (known after apply)
+      + name     = "forest-cluster"
+      + tags     = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all = {
+          + "Project" = "rf-distributed"
+        }
+
+      + setting (known after apply)
+    }
+
+  # aws_ecs_service.worker_centralized[0] will be created
+  + resource "aws_ecs_service" "worker_centralized" {
+      + availability_zone_rebalancing      = "DISABLED"
+      + cluster                            = (known after apply)
+      + deployment_maximum_percent         = 100
+      + deployment_minimum_healthy_percent = 0
+      + desired_count                      = 0
+      + enable_ecs_managed_tags            = false
+      + enable_execute_command             = false
+      + force_new_deployment               = true
+      + iam_role                           = (known after apply)
+      + id                                 = (known after apply)
+      + launch_type                        = "FARGATE"
+      + name                               = "worker-service"
+      + platform_version                   = (known after apply)
+      + scheduling_strategy                = "REPLICA"
+      + tags                               = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                           = {
+          + "Project" = "rf-distributed"
+        }
+      + task_definition                    = (known after apply)
+      + triggers                           = (known after apply)
+      + wait_for_steady_state              = false
+
+      + network_configuration {
+          + assign_public_ip = true
+          + security_groups  = (known after apply)
+          + subnets          = [
+              + "subnet-05d44fae2ace97a12",
+              + "subnet-0ceaf38169fcf556a",
+              + "subnet-0cffa5e0ffebda472",
+              + "subnet-0d26cb0a2c791dc06",
+              + "subnet-0e374722e1ec81b09",
+              + "subnet-0e67552278ca55e51",
+            ]
+        }
+    }
+
+  # aws_ecs_task_definition.worker_centralized[0] will be created
+  + resource "aws_ecs_task_definition" "worker_centralized" {
+      + arn                      = (known after apply)
+      + arn_without_revision     = (known after apply)
+      + container_definitions    = (known after apply)
+      + cpu                      = "4096"
+      + enable_fault_injection   = (known after apply)
+      + execution_role_arn       = "arn:aws:iam::383056860320:role/LabRole"
+      + family                   = "lab-worker-task"
+      + id                       = (known after apply)
+      + memory                   = "8192"
+      + network_mode             = "awsvpc"
+      + requires_compatibilities = [
+          + "FARGATE",
+        ]
+      + revision                 = (known after apply)
+      + skip_destroy             = false
+      + tags                     = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                 = {
+          + "Project" = "rf-distributed"
+        }
+      + task_role_arn            = "arn:aws:iam::383056860320:role/LabRole"
+      + track_latest             = false
+
+      + volume {
+          + configure_at_launch = (known after apply)
+          + name                = "dataset-cache"
+            # (1 unchanged attribute hidden)
+
+          + efs_volume_configuration {
+              + file_system_id          = (known after apply)
+              + root_directory          = "/"
+              + transit_encryption      = "ENABLED"
+              + transit_encryption_port = 0
+            }
+        }
+    }
+
+  # aws_efs_file_system.dataset_cache will be created
+  + resource "aws_efs_file_system" "dataset_cache" {
+      + arn                     = (known after apply)
+      + availability_zone_id    = (known after apply)
+      + availability_zone_name  = (known after apply)
+      + creation_token          = "rf-distributed-dataset-cache"
+      + dns_name                = (known after apply)
+      + encrypted               = true
+      + id                      = (known after apply)
+      + kms_key_id              = (known after apply)
+      + name                    = (known after apply)
+      + number_of_mount_targets = (known after apply)
+      + owner_id                = (known after apply)
+      + performance_mode        = (known after apply)
+      + size_in_bytes           = (known after apply)
+      + tags                    = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                = {
+          + "Project" = "rf-distributed"
+        }
+      + throughput_mode         = "bursting"
+
+      + protection (known after apply)
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-05d44fae2ace97a12"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-05d44fae2ace97a12"
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-0ceaf38169fcf556a"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-0ceaf38169fcf556a"
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-0cffa5e0ffebda472"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-0cffa5e0ffebda472"
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-0d26cb0a2c791dc06"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-0d26cb0a2c791dc06"
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-0e374722e1ec81b09"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-0e374722e1ec81b09"
+    }
+
+  # aws_efs_mount_target.dataset_cache["subnet-0e67552278ca55e51"] will be created
+  + resource "aws_efs_mount_target" "dataset_cache" {
+      + availability_zone_id   = (known after apply)
+      + availability_zone_name = (known after apply)
+      + dns_name               = (known after apply)
+      + file_system_arn        = (known after apply)
+      + file_system_id         = (known after apply)
+      + id                     = (known after apply)
+      + ip_address             = (known after apply)
+      + mount_target_dns_name  = (known after apply)
+      + network_interface_id   = (known after apply)
+      + owner_id               = (known after apply)
+      + security_groups        = (known after apply)
+      + subnet_id              = "subnet-0e67552278ca55e51"
+    }
+
+  # aws_lambda_function.rf_gateway will be created
+  + resource "aws_lambda_function" "rf_gateway" {
+      + architectures                  = (known after apply)
+      + arn                            = (known after apply)
+      + code_sha256                    = (known after apply)
+      + filename                       = "./lambda/lambda_function.zip"
+      + function_name                  = "RFGatewayLambda"
+      + handler                        = "lambda_function.lambda_handler"
+      + id                             = (known after apply)
+      + invoke_arn                     = (known after apply)
+      + last_modified                  = (known after apply)
+      + memory_size                    = 128
+      + package_type                   = "Zip"
+      + publish                        = false
+      + qualified_arn                  = (known after apply)
+      + qualified_invoke_arn           = (known after apply)
+      + reserved_concurrent_executions = -1
+      + role                           = "arn:aws:iam::383056860320:role/LabRole"
+      + runtime                        = "python3.12"
+      + signing_job_arn                = (known after apply)
+      + signing_profile_version_arn    = (known after apply)
+      + skip_destroy                   = false
+      + source_code_hash               = "pBufBv9QPkMFN9Sh4wT4mTJhF6DKOkcvy7tjexXsLS4="
+      + source_code_size               = (known after apply)
+      + tags                           = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                       = {
+          + "Project" = "rf-distributed"
+        }
+      + timeout                        = 15
+      + version                        = (known after apply)
+
+      + environment {
+          + variables = (known after apply)
+        }
+
+      + ephemeral_storage (known after apply)
+
+      + logging_config (known after apply)
+
+      + tracing_config (known after apply)
+    }
+
+  # aws_lambda_permission.apigw_invoke will be created
+  + resource "aws_lambda_permission" "apigw_invoke" {
+      + action              = "lambda:InvokeFunction"
+      + function_name       = "RFGatewayLambda"
+      + id                  = (known after apply)
+      + principal           = "apigateway.amazonaws.com"
+      + source_arn          = (known after apply)
+      + statement_id        = "AllowAPIGatewayInvoke"
+      + statement_id_prefix = (known after apply)
+    }
+
+  # aws_launch_template.orchestrator will be created
+  + resource "aws_launch_template" "orchestrator" {
+      + arn             = (known after apply)
+      + default_version = (known after apply)
+      + id              = (known after apply)
+      + image_id        = "ami-0ac62d2d72afdce51"
+      + instance_type   = "r5.large"
+      + latest_version  = (known after apply)
+      + name            = (known after apply)
+      + name_prefix     = "orchestrator-lt-"
+      + tags_all        = {
+          + "Project" = "rf-distributed"
+        }
+      + user_data       = (known after apply)
+
+      + iam_instance_profile {
+          + name = "LabInstanceProfile"
+        }
+
+      + metadata_options (known after apply)
+
+      + network_interfaces {
+          + associate_public_ip_address = "true"
+          + security_groups             = (known after apply)
+        }
+
+      + tag_specifications {
+          + resource_type = "instance"
+          + tags          = {
+              + "Project" = "rf-distributed"
+              + "Role"    = "orchestrator-ec2"
+            }
+        }
+    }
+
+  # aws_security_group.rf_distributed will be created
+  + resource "aws_security_group" "rf_distributed" {
+      + arn                    = (known after apply)
+      + description            = "Orchestrator-Worker RPC + SSH/debug"
+      + egress                 = (known after apply)
+      + id                     = (known after apply)
+      + ingress                = (known after apply)
+      + name                   = "rf-distributed-sg"
+      + name_prefix            = (known after apply)
+      + owner_id               = (known after apply)
+      + revoke_rules_on_delete = false
+      + tags                   = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all               = {
+          + "Project" = "rf-distributed"
+        }
+      + vpc_id                 = "vpc-0127ff888dfc3014b"
+    }
+
+  # aws_security_group_rule.efs_nfs_self_ingress will be created
+  + resource "aws_security_group_rule" "efs_nfs_self_ingress" {
+      + description              = "NFS per il mount EFS della cache dataset (orchestrator scrive, worker leggono)"
+      + from_port                = 2049
+      + id                       = (known after apply)
+      + protocol                 = "tcp"
+      + security_group_id        = (known after apply)
+      + security_group_rule_id   = (known after apply)
+      + self                     = true
+      + source_security_group_id = (known after apply)
+      + to_port                  = 2049
+      + type                     = "ingress"
+    }
+
+  # aws_security_group_rule.egress_all will be created
+  + resource "aws_security_group_rule" "egress_all" {
+      + cidr_blocks              = [
+          + "0.0.0.0/0",
+        ]
+      + description              = "Egress libero (pull immagini ECR, S3/DynamoDB/SQS, SSM per ECS Exec)"
+      + from_port                = 0
+      + id                       = (known after apply)
+      + protocol                 = "-1"
+      + security_group_id        = (known after apply)
+      + security_group_rule_id   = (known after apply)
+      + self                     = false
+      + source_security_group_id = (known after apply)
+      + to_port                  = 0
+      + type                     = "egress"
+    }
+
+  # aws_security_group_rule.rpc_self_ingress will be created
+  + resource "aws_security_group_rule" "rpc_self_ingress" {
+      + description              = "RPC self-referencing tra orchestrator/worker/test-engine"
+      + from_port                = 18861
+      + id                       = (known after apply)
+      + protocol                 = "tcp"
+      + security_group_id        = (known after apply)
+      + security_group_rule_id   = (known after apply)
+      + self                     = false
+      + source_security_group_id = (known after apply)
+      + to_port                  = 18861
+      + type                     = "ingress"
+    }
+
+  # aws_sqs_queue.centralized_queue will be created
+  + resource "aws_sqs_queue" "centralized_queue" {
+      + arn                               = (known after apply)
+      + content_based_deduplication       = true
+      + deduplication_scope               = (known after apply)
+      + delay_seconds                     = 0
+      + fifo_queue                        = true
+      + fifo_throughput_limit             = "perQueue"
+      + id                                = (known after apply)
+      + kms_data_key_reuse_period_seconds = (known after apply)
+      + max_message_size                  = 262144
+      + message_retention_seconds         = 86400
+      + name                              = "centralized_queue.fifo"
+      + name_prefix                       = (known after apply)
+      + policy                            = (known after apply)
+      + receive_wait_time_seconds         = 0
+      + redrive_allow_policy              = (known after apply)
+      + redrive_policy                    = (known after apply)
+      + sqs_managed_sse_enabled           = (known after apply)
+      + tags                              = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                          = {
+          + "Project" = "rf-distributed"
+        }
+      + url                               = (known after apply)
+      + visibility_timeout_seconds        = 600
+    }
+
+  # aws_sqs_queue.federated_queue will be created
+  + resource "aws_sqs_queue" "federated_queue" {
+      + arn                               = (known after apply)
+      + content_based_deduplication       = true
+      + deduplication_scope               = (known after apply)
+      + delay_seconds                     = 0
+      + fifo_queue                        = true
+      + fifo_throughput_limit             = "perQueue"
+      + id                                = (known after apply)
+      + kms_data_key_reuse_period_seconds = (known after apply)
+      + max_message_size                  = 262144
+      + message_retention_seconds         = 86400
+      + name                              = "federated_queue.fifo"
+      + name_prefix                       = (known after apply)
+      + policy                            = (known after apply)
+      + receive_wait_time_seconds         = 0
+      + redrive_allow_policy              = (known after apply)
+      + redrive_policy                    = (known after apply)
+      + sqs_managed_sse_enabled           = (known after apply)
+      + tags                              = {
+          + "Project" = "rf-distributed"
+        }
+      + tags_all                          = {
+          + "Project" = "rf-distributed"
+        }
+      + url                               = (known after apply)
+      + visibility_timeout_seconds        = 600
+    }
+
+  # null_resource.docker_build_push will be created
+  + resource "null_resource" "docker_build_push" {
+      + id       = (known after apply)
+      + triggers = {
+          + "dockerfile_hash" = "63456a522f78671072b0cbb3c05dd1bb"
+          + "force_rebuild"   = "static"
+          + "src_hash"        = "667d4fe17fee48e9196a9e8b7d45cd386bf3a7a1"
+        }
+    }
+
+Plan: 36 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + api_gateway_endpoint                  = (known after apply)
+  + cluster_name                          = "forest-cluster"
+  + datasets_bucket_name                  = "rf-distributed-datasets-383056860320-us-east-1"
+  + ecr_repository_url                    = (known after apply)
+  + next_steps                            = (known after apply)
+  + orchestrator_asg_name                 = "orchestrator-asg"
+  + orchestrator_ec2_instance_ids_command = "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names orchestrator-asg --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text --region us-east-1"
+  + security_group_id                     = (known after apply)
+  + training_mode                         = "centralized"
+  + worker_service_names                  = [
+      + "worker-service",
+    ]
+
+─────────────────────────────────────────────────────────────────────────────
+
+Saved the plan to: tfplan
+
+To perform exactly these actions, run the following command to apply:
+    terraform apply "tfplan"

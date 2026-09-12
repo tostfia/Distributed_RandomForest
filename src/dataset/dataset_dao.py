@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import os
+import time
 
 import pandas as pd
 import io
@@ -31,6 +32,15 @@ class DatasetDAO(ABC):
         pass
 
     @abstractmethod
+    def load_binary(self, path: str) -> bytes:
+        """Carica dati binari generici precedentemente salvati con save_binary.
+        Usato per artefatti piccoli non tabellari (es. vettori OOB parziali
+        per-worker, vedi BaseWorker.exposed_train_subset_forest e
+        BaseOrchestrator._compute_oob_metrics_distributed) dove pd.read_csv
+        non si applica."""
+        pass
+
+    @abstractmethod
     def exists(self, path: str) -> bool:
         pass
 
@@ -42,6 +52,25 @@ class DatasetDAO(ABC):
         sample_fraction per-file mirata (es. campionamento ribilanciato per
         giorno di cattura su CIC-IDS2018, dove i 10 CSV hanno volumi molto
         diversi tra loro: un giorno può pesare quasi la metà del totale).
+        """
+        pass
+
+    @abstractmethod
+    def get_content_length(self, path: str) -> int:
+        """Dimensione in byte del file, SENZA scaricarne il contenuto (solo
+        metadata: head_object su S3, os.path.getsize in locale). Usato come
+        firma leggera di identità del contenuto (vedi CentralizedWorker._load_data):
+        due file con la stessa dimensione esatta, generati con lo stesso seed/
+        parametri sintetici, sono con altissima probabilità lo stesso dataset,
+        anche se il path/nome del file è diverso (es. run di scalabilità
+        successivi che copiano lo stesso dataset sotto job_id differenti).
+        Non è una garanzia crittografica di uguaglianza (a differenza di un
+        hash del contenuto), ma costa quanto un head_object invece di un
+        download completo (~66-100MB per questo dataset): un compromesso
+        deliberato tra costo e certezza, accettabile perché un falso positivo
+        (stessa dimensione, contenuto diverso) richiederebbe una collisione
+        di byte-length assai improbabile con dataset sintetici a virgola
+        mobile su ~800.000 righe.
         """
         pass
 
@@ -80,6 +109,12 @@ class LocalFileSystemDAO(DatasetDAO):
         with open(path, "wb") as f:
             f.write(data)
 
+    def load_binary(self, path: str) -> bytes:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Il file binario locale {path} non esiste.")
+        with open(path, "rb") as f:
+            return f.read()
+
     def exists(self, path: str) -> bool:
         return os.path.exists(path)
 
@@ -97,6 +132,11 @@ class LocalFileSystemDAO(DatasetDAO):
         # -1 per l'header. Se il file è vuoto (0 righe fisiche), evitiamo un
         # conteggio negativo.
         return max(0, n_lines - 1)
+
+    def get_content_length(self, path: str) -> int:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Il file locale {path} non esiste.")
+        return os.path.getsize(path)
 
 
 class AwsS3DAO(DatasetDAO):
@@ -128,6 +168,40 @@ class AwsS3DAO(DatasetDAO):
         return bucket, key
 
     def load_dataset(self, path: str, sample_fraction: float = None, dataset_seed: int = None) -> pd.DataFrame:
+        # CACHE EFS (11/9/2026): controllo PRIMA di toccare S3. Solo per il
+        # ramo senza campionamento (sample_fraction=None) - lo stesso che
+        # abbiamo strumentato/ottimizzato con pyarrow, e l'unico per cui
+        # l'orchestrator scrive effettivamente una copia su EFS (vedi
+        # centralized.py, dopo il salvataggio S3 di train_df). Se
+        # EFS_MOUNT_PATH non e' impostata (worker senza EFS montato, o
+        # training_mode=federated dove questa cache non si usa), o il file
+        # non c'e' ancora, o la lettura fallisce per qualunque motivo:
+        # fallback silenzioso sul normale download S3 sotto - MAI un punto
+        # di fallimento singolo, solo un'ottimizzazione opportunistica.
+        efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
+        if efs_mount_path and sample_fraction is None:
+            efs_cache_path = os.path.join(efs_mount_path, "dataset_cache", os.path.basename(path))
+            try:
+                if os.path.exists(efs_cache_path) and os.path.getsize(efs_cache_path) > 0:
+                    print(f"[DAO-AWS] [EFS] Cache trovata su '{efs_cache_path}': leggo in locale "
+                          f"invece di scaricare da S3...")
+                    read_start = time.perf_counter()
+                    try:
+                        df = pd.read_csv(efs_cache_path, engine="pyarrow")
+                        engine_used = "pyarrow"
+                    except Exception as e_parse:
+                        print(f"[DAO-AWS] [WARN] Parsing pyarrow su file EFS fallito "
+                              f"({e_parse}), ricado sul motore C.")
+                        df = pd.read_csv(efs_cache_path)
+                        engine_used = "C (fallback)"
+                    read_seconds = time.perf_counter() - read_start
+                    print(f"[DAO-AWS] [TIMING] Lettura da EFS ({engine_used}): {read_seconds:.2f}s "
+                          f"(nessun trasferimento di rete, cache hit)")
+                    return df
+            except Exception as e_efs:
+                print(f"[DAO-AWS] [WARN] Lettura cache EFS fallita ({e_efs}), ricado su S3 "
+                      f"(comportamento pre-EFS, nessun impatto sulla correttezza).")
+
         print(f"[DAO-AWS] Caricamento del dataset dal bucket S3: {path}")
         bucket, key = self._parse_s3_uri(path)
 
@@ -141,6 +215,13 @@ class AwsS3DAO(DatasetDAO):
         if sample_fraction is not None and 0.0 < sample_fraction < 1.0:
             print(f"[DAO-AWS] Campionamento in streaming (frac={sample_fraction}) durante la lettura, "
                   f"evito di caricare l'intero file in RAM...")
+            # NOTA (11/9/2026): qui rete e parsing sono intrecciati - pandas
+            # consuma lo StreamingBody a chunk, quindi il trasferimento di
+            # rete avviene DENTRO il ciclo di parsing, non prima. Separarli
+            # richiederebbe di avvolgere lo StreamingBody per contare i byte
+            # letti nel tempo, non fatto qui: questo ramo non è comunque
+            # quello esercitato da CentralizedWorker (che non passa mai
+            # sample_fraction) nei test di scalabilità di oggi.
             chunks = []
             # response['Body'] è uno StreamingBody: pandas lo consuma progressivamente,
             # senza mai materializzare l'intero oggetto S3 in memoria.
@@ -152,7 +233,45 @@ class AwsS3DAO(DatasetDAO):
             print(f"[DAO-AWS] [OK] Campionamento streaming completato: {df.shape[0]} righe mantenute.")
             return df
 
-        return pd.read_csv(io.BytesIO(response['Body'].read()))
+        # STRUMENTAZIONE (11/9/2026): rete e parsing separati esplicitamente,
+        # invece della singola riga 'pd.read_csv(io.BytesIO(response[...].read()))'
+        # di prima - quella riga sommava i due costi in un tempo solo,
+        # impossibile da distinguere dall'esterno (vedi discussione su EFS
+        # vs Parquet: i due fix risolvono costi diversi, serve sapere quale
+        # dei due domina prima di scegliere).
+        network_start = time.perf_counter()
+        raw_bytes = response['Body'].read()
+        network_seconds = time.perf_counter() - network_start
+
+        parsing_start = time.perf_counter()
+        # engine="pyarrow": motore di parsing C++ invece del motore C
+        # default di pandas - MISURATO EMPIRICAMENTE su dataset sintetico
+        # (100 colonne float omogenee): 15.65-16.10s -> 3.27-3.34s, ~4.8x
+        # piu' veloce (11/9/2026). NON ancora verificato sul dataset REALE
+        # (CICIDS, colonne miste/tipi eterogenei prima della feature
+        # selection) - il motore pyarrow di pandas ha differenze note dal
+        # motore C su inferenza tipi/valori mancanti con colonne non
+        # omogenee. Fallback esplicito al motore C se pyarrow solleva
+        # QUALUNQUE eccezione, invece di propagarla: preferiamo un parsing
+        # piu' lento ma sicuro a un fallimento totale del caricamento dati,
+        # specialmente per un percorso (dataset reale) mai esercitato con
+        # questo motore.
+        try:
+            df = pd.read_csv(io.BytesIO(raw_bytes), engine="pyarrow")
+            engine_used = "pyarrow"
+        except Exception as e:
+            print(f"[DAO-AWS] [WARN] Parsing con engine='pyarrow' fallito ({e}), "
+                  f"ricado sul motore C di default.")
+            df = pd.read_csv(io.BytesIO(raw_bytes))
+            engine_used = "C (fallback)"
+        parsing_seconds = time.perf_counter() - parsing_start
+
+        total_mb = len(raw_bytes) / (1024 * 1024)
+        print(f"[DAO-AWS] [TIMING] Trasferimento rete: {network_seconds:.2f}s "
+              f"({total_mb:.1f} MB, {total_mb / network_seconds if network_seconds > 0 else 0:.1f} MB/s) "
+              f"| Parsing CSV ({engine_used}): {parsing_seconds:.2f}s | Totale: {network_seconds + parsing_seconds:.2f}s")
+
+        return df
 
     def save_dataset(self, path: str, df: pd.DataFrame) -> None:
         print(f"[DAO-AWS] Salvataggio del dataset nel bucket S3 su: {path}")
@@ -172,6 +291,12 @@ class AwsS3DAO(DatasetDAO):
         s3_client = self._get_isolated_client()
         s3_client.put_object(Bucket=bucket, Key=key, Body=data)
         print(f"[DAO-AWS] [OK] Salvataggio binario completato con successo!")
+
+    def load_binary(self, path: str) -> bytes:
+        bucket, key = self._parse_s3_uri(path)
+        s3_client = self._get_isolated_client()
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        return response["Body"].read()
 
     def exists(self, path: str) -> bool:
         bucket, key = self._parse_s3_uri(path)
@@ -212,3 +337,12 @@ class AwsS3DAO(DatasetDAO):
                 if payload:
                     return int(payload.split(",")[0])
         return 0
+
+    def get_content_length(self, path: str) -> int:
+        # head_object: solo metadata, nessun byte del contenuto trasferito.
+        # Stesso costo/tipo di chiamata già usata in exists() sopra, qui
+        # teniamo il campo ContentLength invece di scartare la risposta.
+        bucket, key = self._parse_s3_uri(path)
+        s3_client = self._get_isolated_client()
+        response = s3_client.head_object(Bucket=bucket, Key=key)
+        return response["ContentLength"]

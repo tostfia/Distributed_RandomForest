@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import fcntl
 import json
 import os
+import pickle
 import statistics
 import sys
 import time
@@ -9,6 +10,7 @@ import numpy as np
 import rpyc
 import signal
 import threading
+from src.dataset.dataset_dao_factory import DatasetDAOFactory
 from src.dataset.metrics_dao import MetricsDAOFactory
 from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, f1_score, roc_auc_score
 from src.shared.config import SystemConfig
@@ -1402,6 +1404,90 @@ class BaseOrchestrator(ABC):
                 y_probs = None
 
             return final_predictions, y_probs
+
+    def _compute_oob_metrics_distributed(self, job_id: str, task_seeds: list, y_train: np.ndarray,
+                                          n_train_rows: int, environment: str):
+        """
+        Versione DISTRIBUITA della stima OOB (12/9/2026): invece di rileggere
+        l'intero training set sull'Orchestratore e richiamare .predict() su
+        OGNI albero in sequenza (vedi _compute_oob_metrics, il metodo
+        originale - lasciato INTATTO come fallback), qui sommiamo i
+        contributi PARZIALI (oob_sum/oob_count) che ogni worker ha già
+        calcolato localmente durante il training stesso (vedi
+        BaseWorker.exposed_train_subset_forest) e persistito su storage
+        condiviso.
+
+        Costo: O(n_train_rows * len(task_seeds)) per la sola somma vettoriale,
+        contro O(n_alberi_totali) chiamate .predict() sequenziali del metodo
+        originale - e NESSUN bisogno di ricaricare l'intero X_train qui (lo
+        richiediamo comunque come parametro per calcolare le metriche finali,
+        ma non per le predizioni: quelle sono già state fatte dai worker).
+
+        Restituisce None se anche un SOLO task manca il proprio contributo
+        (worker che non supportava l'accumulo, errore di persistenza, job
+        con dataset_type non regressore, ecc.) - il chiamante deve ricadere
+        sul metodo sequenziale per l'INTERO job in quel caso: sommare solo
+        una parte dei contributi produrrebbe una stima OOB distorta (pesi
+        diversi/mancanti per sample diversi), peggio che non calcolarla affatto.
+        """
+        # BUGFIX (12/9/2026): get_dao() non accetta argomenti - legge l'ambiente
+        # internamente da SystemConfig(), non da un parametro. Errore reale
+        # osservato in produzione: "DatasetDAOFactory.get_dao() takes 0
+        # positional arguments but 1 was given". Il parametro 'environment'
+        # di questo metodo resta nella firma (per coerenza con le altre
+        # chiamate del file, es. _compute_oob_metrics), semplicemente non
+        # viene più passato qui sotto.
+        dao = DatasetDAOFactory.get_dao()
+        oob_sum = np.zeros(n_train_rows, dtype=np.float64)
+        oob_count = np.zeros(n_train_rows, dtype=np.int64)
+        tasks_found = 0
+
+        for seed in task_seeds:
+            oob_path = self._oob_contribution_path(job_id, seed)
+            try:
+                if not dao.exists(oob_path):
+                    print(f"[{self.orchestrator_name}] [OOB-DISTRIBUTED] Contributo mancante per il "
+                          f"task seed={seed} ('{oob_path}' non trovato) - ricado sul metodo sequenziale "
+                          f"per l'intero job.")
+                    return None
+                raw = dao.load_binary(oob_path)
+                partial = pickle.loads(raw)
+                oob_sum += partial["oob_sum"]
+                oob_count += partial["oob_count"]
+                tasks_found += 1
+            except Exception as e:
+                print(f"[{self.orchestrator_name}] [OOB-DISTRIBUTED] Lettura contributo fallita per il "
+                      f"task seed={seed} ({e}) - ricado sul metodo sequenziale per l'intero job.")
+                return None
+
+        if tasks_found == 0 or not np.any(oob_count > 0):
+            print(f"[{self.orchestrator_name}] [OOB-DISTRIBUTED] Nessun contributo OOB utilizzabile "
+                  f"trovato ({tasks_found} task letti). Stima OOB saltata.")
+            return None
+
+        covered = oob_count > 0
+        oob_predictions = oob_sum[covered] / oob_count[covered]
+        metrics = self.calculate_metrics(
+            final_predictions=oob_predictions,
+            y_test=y_train[covered],
+            tree_type="regressor",
+            y_probs=None
+        )
+        print(f"[{self.orchestrator_name}] [OOB-DISTRIBUTED] Stima OOB calcolata sommando i contributi "
+              f"di {tasks_found} task ({int(covered.sum())} campioni coperti su {n_train_rows}), "
+              f"nessuna rilettura sequenziale degli alberi necessaria.")
+        return metrics
+
+    def _oob_contribution_path(self, job_id: str, base_seed: int) -> str:
+        """Stessa convenzione di path usata dal worker per scrivere il proprio
+        contributo (vedi BaseWorker.exposed_train_subset_forest) - derivata
+        qui da self.train_data_path invece che da source_info (stesso valore,
+        nome diverso lato Orchestratore) con la stessa identica logica di
+        risalita di due livelli, per restare sincronizzati se la convenzione
+        cambia in futuro (un solo posto da aggiornare per lato, non due
+        stringhe duplicate scritte a mano)."""
+        storage_root = os.path.dirname(os.path.dirname(self.train_data_path))
+        return f"{storage_root}/oob_contributions/{job_id}/oob_seed_{base_seed}.pkl"
 
     def _compute_oob_metrics(
             self,

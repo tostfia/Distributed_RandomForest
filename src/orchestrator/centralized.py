@@ -299,6 +299,36 @@ class CentralizedOrchestrator(BaseOrchestrator):
             self.last_etl_seconds = time.perf_counter() - t0
             print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
             print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
+
+            # CACHE EFS (11/9/2026): scrittura best-effort, SOLO se
+            # EFS_MOUNT_PATH e' impostata (vedi orchestrator_ec2.tf) - se la
+            # variabile manca o la scrittura fallisce per qualunque motivo,
+            # non deve MAI far fallire il job: S3 sopra e' gia' il
+            # salvataggio canonico richiesto dalla traccia, questo e' solo
+            # un'ottimizzazione di velocita' per i worker che leggeranno lo
+            # stesso file (vedi dataset_dao.py per la logica di lettura/
+            # fallback lato worker). Solo train_df: e' quello che ogni
+            # worker scarica per il training (il collo di bottiglia
+            # misurato), non test_df (letto una sola volta dall'orchestrator
+            # stesso per l'inferenza, nessuna ridondanza da eliminare li').
+            efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
+            if efs_mount_path:
+                try:
+                    efs_cache_dir = os.path.join(efs_mount_path, "dataset_cache")
+                    os.makedirs(efs_cache_dir, exist_ok=True)
+                    efs_cache_path = os.path.join(efs_cache_dir, os.path.basename(train_data_path))
+                    # Scrittura atomica (tmp + replace): stesso pattern gia'
+                    # usato altrove nel progetto (es. BaseWorker._save_task_to_shared_storage)
+                    # per evitare che un worker legga un file a meta' scritto.
+                    tmp_path = f"{efs_cache_path}.tmp-{os.getpid()}"
+                    train_df.to_csv(tmp_path, index=False)
+                    os.replace(tmp_path, efs_cache_path)
+                    print(f"[{self.orchestrator_name}] [EFS] Cache scritta anche su "
+                          f"'{efs_cache_path}' (oltre a S3) per lettura veloce dai worker.")
+                except Exception as e_efs:
+                    print(f"[{self.orchestrator_name}] [EFS] [WARN] Scrittura cache fallita "
+                          f"({e_efs}) - i worker ricadranno su S3, nessun impatto sulla correttezza.")
+
             # Stessa motivazione di 'del df_full' sopra: train_df/test_df sono
             # copie potenzialmente grandi (fino a ~800MB combinate per lo
             # scenario sintetico) che altrimenti resterebbero vive fino al
@@ -312,10 +342,29 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.train_data_path = train_data_path
         self.test_data_path = test_data_path
 
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int, skip_oob: bool = True) -> int:
         """
         Esegue lo step di addestramento distribuito centralizzato.
         Restituisce il numero REALE di alberi totali validati e salvati con successo.
+
+        skip_oob: se True (default, dal 12/9/2026), salta la stima
+        Out-Of-Bag a fine training (vedi blocco "STIMA OOB" più sotto).
+        DEFAULT CAMBIATO da False a True: le metriche di accuratezza
+        finali (accuracy_metrics nei report) vengono SEMPRE dall'inferenza
+        reale su un test set separato, mai dall'OOB - esattamente lo
+        stesso ruolo che l'OOB ha nella baseline locale
+        (run_baseline.py, optuna_oob_hyperparameter_search): solo proxy
+        economico per il TUNING degli iperparametri, mai usata per la
+        valutazione finale del modello. Calcolarla di default nel training
+        "normale" era quindi un costo pagato per un dato che nessun
+        consumatore del sistema legge mai. Chi ne avesse davvero bisogno
+        (es. un futuro percorso di tuning lato distribuito, analogo a
+        quello della baseline) può ancora richiederla esplicitamente
+        passando skip_oob=False. Costo se calcolata: ~150s+ osservati
+        empiricamente con il metodo sequenziale (10/9/2026), o il costo
+        dei contributi .predict() per-albero se si usa il metodo
+        distribuito (12/9/2026, solo regressore/centralized, vedi
+        BaseOrchestrator._compute_oob_metrics_distributed).
         """
         expected_job_id = payload.get("job_id", "unknown_job")
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
@@ -488,6 +537,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
             results_lock = threading.Lock()
 
+            # OOB DISTRIBUITA (12/9/2026): traccia i seed dei task completati
+            # CON SUCCESSO (aggiunti solo dopo l'ack, vedi sotto) - servono
+            # per andare a ritrovare i contributi OOB persistiti dai worker
+            # (uno per task, vedi BaseWorker.exposed_train_subset_forest).
+            # Lock dedicato invece di riusare results_lock: questa lista viene
+            # scritta in un punto diverso (subito dopo l'ack, PRIMA della
+            # ricomposizione degli alberi) da dove results_lock protegge
+            # 'all_trained_trees' - tenerli separati evita di allargare la
+            # sezione critica di results_lock senza motivo.
+            completed_task_seeds = []
+            completed_task_seeds_lock = threading.Lock()
+
             # Lock DEDICATO alla persistenza del checkpoint, separato da
             # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
             # cioè dentro la stessa sezione critica che serve ad accodare gli
@@ -574,7 +635,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 class_weight=class_weight,
                                 criterion=criterion,
                                 bootstrap=bootstrap,
-                                max_samples=max_samples
+                                max_samples=max_samples,
+                                # BUGFIX (12/9/2026): senza questo, il worker
+                                # accumulava SEMPRE i contributi OOB (costo
+                                # .predict() per albero) indipendentemente da
+                                # skip_oob - il parametro controllava solo se
+                                # l'Orchestratore CONSUMAVA il risultato a fine
+                                # training, non se il worker lo CALCOLAVA
+                                # durante. Il costo restava quindi sempre
+                                # presente in training_only_seconds anche con
+                                # skip_oob=True (default dal 12/9/2026).
+                                compute_oob=(not skip_oob)
                             )
 
                             # Il worker NON restituisce più il blob degli alberi
@@ -590,6 +661,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 raise RuntimeError(
                                     f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                                 )
+
+                            # OOB DISTRIBUITA: registra il seed SOLO se il worker conferma
+                            # di aver persistito il proprio contributo OOB (oob_ready=True).
+                            # Un worker su una versione precedente del codice, o che non
+                            # supporta l'accumulo (tree_type != regressor), semplicemente
+                            # non include questo campo (dict.get -> default False) - nessun
+                            # errore, il job prosegue comunque, solo senza quel contributo
+                            # (la stima OOB distribuita a fine training vedra' 'ci sono
+                            # meno seed completati del previsto' solo se il conteggio totale
+                            # di task non combacia, ma qui tracciamo per task realmente
+                            # riuscito quindi anche questo resta coerente).
+                            if ack.get("oob_ready"):
+                                with completed_task_seeds_lock:
+                                    completed_task_seeds.append(chunk_seed)
 
                             # FIX: l'Orchestratore ricomponeva l'INTERO task in un
                             # colpo solo (load_task_trees_from_shared_storage), con
@@ -934,30 +1019,77 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 # ─── STIMA OOB (Breiman, 2001), "gratis" e non bloccante ───
                 # Se fallisce per qualunque motivo, non deve invalidare un training
                 # già completato e salvato con successo: solo log, nessun raise.
-                oob_start = time.perf_counter()
-                try:
-                    X_train_oob, y_train_oob = self._load_training_matrix_for_oob(tree_type)
-                    oob_metrics = self._compute_oob_metrics(
-                        tree_source=lambda: self._iter_checkpoint_trees(self.current_job_id),
-                        X_train=X_train_oob,
-                        y_train=y_train_oob,
-                        tree_type=tree_type
-                    )
-                    if oob_metrics is not None:
-                        self._save_metrics(self.current_job_id, "training_oob", {
-                            "job_id": self.current_job_id, "mode": "centralized", "phase": "training_oob",
-                            "tree_type": tree_type, "n_estimators": n_trees_for_report,
-                            "metrics": oob_metrics
-                        })
-                except Exception as e_oob:
-                    print(f"   [{self.orchestrator_name}] [OOB-WARN] Stima OOB fallita (training non impattato): {e_oob}")
-                finally:
-                    # Cronometrata anche in caso di fallimento: se l'OOB si
-                    # interrompe a metà, il tempo speso è comunque reale e non
-                    # va attribuito silenziosamente all'addestramento.
-                    self.last_oob_seconds = time.perf_counter() - oob_start
-                    print(f"[DEBUG TIMING] Stima OOB (ricarica training set + predizioni): "
-                          f"{self.last_oob_seconds:.2f}s.")
+                if not skip_oob:
+                    oob_start = time.perf_counter()
+                    try:
+                        # OOB DISTRIBUITA (12/9/2026): provata PRIMA del metodo
+                        # sequenziale originale. Se i worker hanno persistito i
+                        # propri contributi (tree_type=="regressor", vedi
+                        # BaseWorker), sommarli costa O(n_train_rows * n_task)
+                        # invece di richiamare .predict() su OGNI albero in
+                        # sequenza sull'Orchestratore (146-159s misurati,
+                        # indipendenti dal numero di worker - il vero motivo
+                        # per cui la OOB non scala oggi). ATTENZIONE: il
+                        # ricaricamento sotto (_load_training_matrix_for_oob)
+                        # NON è più leggero di prima - scarica comunque
+                        # l'intero CSV (~26-32s misurati) e scarta le feature,
+                        # tenendo solo target. Il guadagno di questo percorso
+                        # è SOLO l'eliminazione del loop .predict() sequenziale,
+                        # non del ricaricamento stesso - resterebbe un margine
+                        # ulteriore se in futuro si aggiungesse un metodo DAO
+                        # per caricare una sola colonna invece dell'intero file.
+                        oob_metrics = None
+                        if tree_type == "regressor" and completed_task_seeds:
+                            try:
+                                _, y_train_for_oob = self._load_training_matrix_for_oob(tree_type)
+                                oob_metrics = self._compute_oob_metrics_distributed(
+                                    job_id=self.current_job_id,
+                                    task_seeds=completed_task_seeds,
+                                    y_train=y_train_for_oob,
+                                    n_train_rows=y_train_for_oob.shape[0],
+                                    environment=self.environment
+                                )
+                            except Exception as e_oob_dist:
+                                print(f"   [{self.orchestrator_name}] [OOB-DISTRIBUTED] Tentativo fallito "
+                                      f"({e_oob_dist}) - ricado sul metodo sequenziale.")
+                                oob_metrics = None
+
+                        if oob_metrics is None:
+                            # Fallback: metodo sequenziale originale, invariato.
+                            # Ricopre sia il caso classificatore (mai tentato
+                            # in modalita' distribuita, vedi nota in BaseWorker)
+                            # sia qualunque fallimento del percorso distribuito
+                            # sopra (nessun contributo trovato, worker su
+                            # codice precedente, errore di lettura, ecc.).
+                            X_train_oob, y_train_oob = self._load_training_matrix_for_oob(tree_type)
+                            oob_metrics = self._compute_oob_metrics(
+                                tree_source=lambda: self._iter_checkpoint_trees(self.current_job_id),
+                                X_train=X_train_oob,
+                                y_train=y_train_oob,
+                                tree_type=tree_type
+                            )
+                        if oob_metrics is not None:
+                            self._save_metrics(self.current_job_id, "training_oob", {
+                                "job_id": self.current_job_id, "mode": "centralized", "phase": "training_oob",
+                                "tree_type": tree_type, "n_estimators": n_trees_for_report,
+                                "metrics": oob_metrics
+                            })
+                    except Exception as e_oob:
+                        print(f"   [{self.orchestrator_name}] [OOB-WARN] Stima OOB fallita (training non impattato): {e_oob}")
+                    finally:
+                        # Cronometrata anche in caso di fallimento: se l'OOB si
+                        # interrompe a metà, il tempo speso è comunque reale e non
+                        # va attribuito silenziosamente all'addestramento.
+                        self.last_oob_seconds = time.perf_counter() - oob_start
+                        print(f"[DEBUG TIMING] Stima OOB (ricarica training set + predizioni): "
+                              f"{self.last_oob_seconds:.2f}s.")
+                else:
+                    # last_oob_seconds resta 0.0 (già azzerato a inizio metodo,
+                    # riga ~450): nessun bisogno di riassegnarlo qui, ma un log
+                    # esplicito evita che chi legge i log si chieda perché
+                    # manchi la riga "[OOB-WARN]"/"Stima OOB" che si aspetta di vedere.
+                    print(f"[{self.orchestrator_name}] [OOB] Saltata su richiesta esplicita (skip_oob=True) "
+                          f"- scenario di solo timing/resilienza, non di accuratezza.")
 
                 print(f"[DEBUG TIMING] Riepilogo _execute_training_step -> "
                       f"ETL {self.last_etl_seconds:.2f}s | costruzione alberi "

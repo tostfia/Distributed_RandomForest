@@ -20,6 +20,7 @@ locals {
     # scaricare shard mai provisionati per il sintetico - crash 404 su S3
     # per TUTTI i worker al boot, in crash-loop continuo.
     { name = "DATASET_TYPE", value = var.dataset_type },
+    { name = "WORKER_BATCH_MULTIPLIER", value = tostring(var.worker_batch_multiplier) },
   ]
 }
 
@@ -53,6 +54,21 @@ resource "aws_ecs_task_definition" "worker_centralized" {
   task_role_arn             = data.aws_iam_role.lab_role.arn
   execution_role_arn        = data.aws_iam_role.lab_role.arn
 
+  # Cache EFS del dataset condiviso (vedi efs.tf): il worker MONTA in
+  # sola lettura, non scrive mai - solo l'orchestrator scrive (unico
+  # scrittore, nessuna race condition tra worker). readOnly=true qui
+  # e' difesa aggiuntiva, non solo convenzione: anche in presenza di un
+  # bug nel codice worker che tentasse una scrittura, il mount la
+  # rifiuterebbe a livello di container.
+  volume {
+    name = "dataset-cache"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.dataset_cache.id
+      root_directory      = "/"
+      transit_encryption  = "ENABLED"
+    }
+  }
+
   container_definitions = jsonencode([
     {
       name      = "worker"
@@ -61,7 +77,15 @@ resource "aws_ecs_task_definition" "worker_centralized" {
       environment = concat(local.common_env, [
         { name = "WORKER_HEARTBEAT_TIMEOUT", value = var.worker_heartbeat_timeout },
         { name = "RPC_PORT", value = tostring(var.rpc_port) },
+        { name = "EFS_MOUNT_PATH", value = var.efs_mount_path },
       ])
+      mountPoints = [
+        {
+          sourceVolume  = "dataset-cache"
+          containerPath = var.efs_mount_path
+          readOnly      = true
+        }
+      ]
       command = [
         "sh", "-c",
         "export RPC_ADVERTISE_HOST=$(curl -s \"$ECS_CONTAINER_METADATA_URI_V4\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['Networks'][0]['IPv4Addresses'][0])\"); echo \"Registrazione con IP: $RPC_ADVERTISE_HOST\"; exec python -m src.worker.main Worker-$${EC2_ID}-$${TRAINING_MODE}-$(hostname) ${var.rpc_port} ${var.training_mode} aws"
@@ -86,7 +110,7 @@ resource "aws_ecs_task_definition" "worker_centralized" {
   # test 'aws ecs register-task-definition --tags key=Project,value=...'.
   tags = { Project = var.project_name }
 
-  depends_on = [null_resource.docker_build_push]
+  depends_on = [null_resource.docker_build_push, aws_efs_mount_target.dataset_cache]
 }
 
 # ---------------------------------------------------------------------

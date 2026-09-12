@@ -212,6 +212,24 @@ if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" == "None" ]; then
 fi
 echo "    VPC: $VPC_ID | Subnet: $SUBNET_ID | SG: $SG_ID"
 
+# Cache EFS del dataset condiviso (vedi terraform/efs.tf): stesso filesystem
+# montato dall'orchestrator EC2 reale, qui montato anche sul test-engine
+# perche' gli scenari 1-5 fanno girare l'orchestratore IN-PROCESS dentro
+# questa istanza (non passano da SQS verso orchestrator-asg) - senza questo
+# mount, EFS_MOUNT_PATH non verrebbe mai impostata qui, e la scrittura della
+# cache in centralized.py verrebbe sempre saltata in sicurezza (nessun
+# errore, ma nessun beneficio). Creation token fisso, deve combaciare con
+# "${var.project_name}-dataset-cache" in efs.tf (project_name=rf-distributed).
+EFS_FS_ID=$(aws efs describe-file-systems --creation-token rf-distributed-dataset-cache \
+  --query 'FileSystems[0].FileSystemId' --output text --region "$REGION" 2>/dev/null || echo "")
+if [ -z "$EFS_FS_ID" ] || [ "$EFS_FS_ID" == "None" ]; then
+  echo "    [ATTENZIONE] Filesystem EFS 'rf-distributed-dataset-cache' non trovato (hai applicato"
+  echo "                 efs.tf?): il test-engine procedera' senza cache EFS, solo S3 - nessun"
+  echo "                 impatto sulla correttezza, solo sulla velocita'."
+else
+  echo "    EFS: $EFS_FS_ID"
+fi
+
 echo "==> [4/4] Avvio dell'istanza EC2 ($INSTANCE_TYPE, 16 GiB)..."
 USER_DATA=$(cat <<EOF
 #!/bin/bash
@@ -222,6 +240,23 @@ systemctl start docker
 
 aws ecr get-login-password --region ${REGION} | \
   docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+# Mount EFS tollerante ai fallimenti (stessa logica di orchestrator_ec2.tf):
+# se fallisce, il test-engine parte comunque, solo senza cache (EFS_MOUNT_PATH_ARG
+# resta vuota, il codice Python ricade automaticamente su S3 - vedi dataset_dao.py).
+yum install -y amazon-efs-utils || true
+mkdir -p /mnt/efs
+EFS_MOUNT_PATH_ARG=""
+if [ -n "${EFS_FS_ID}" ] && [ "${EFS_FS_ID}" != "None" ]; then
+  if mount -t efs -o tls ${EFS_FS_ID}:/ /mnt/efs; then
+    echo "[EFS] Mount riuscito su /mnt/efs."
+    EFS_MOUNT_PATH_ARG="-e EFS_MOUNT_PATH=/mnt/efs -v /mnt/efs:/mnt/efs"
+  else
+    echo "[EFS] [WARN] Mount fallito - procedo SENZA cache EFS (solo S3)."
+  fi
+else
+  echo "[EFS] Nessun filesystem EFS configurato - procedo con solo S3."
+fi
 
 docker run --rm \
   --name test-engine \
@@ -242,6 +277,7 @@ docker run --rm \
   -e RPC_SYNC_TIMEOUT_SECONDS=${RPC_SYNC_TIMEOUT_SECONDS}s \
   -e RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}s \
   -e SCENARIO=${SCENARIO_CHOICE} \
+  \$EFS_MOUNT_PATH_ARG \
   ${ECR_REGISTRY}/${REPO_NAME}:latest \
   sh -c "timeout 7200 python -m src.testing.engine"
 

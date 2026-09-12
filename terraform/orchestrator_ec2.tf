@@ -82,6 +82,26 @@ locals {
     PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
     CONTAINER_HOSTNAME="ip-$(echo $PRIVATE_IP | tr '.' '-').ec2.internal"
 
+    # Cache EFS del dataset condiviso (vedi efs.tf): l'orchestrator e'
+    # l'UNICO scrittore (i worker Fargate montano lo stesso EFS in sola
+    # lettura, vedi ecs_task_definitions.tf). Il mount NON usa 'set -e'
+    # per questo blocco specifico ('|| true' esplicito): se fallisse per
+    # qualunque motivo (mount target non ancora propagato, problema di
+    # rete transitorio), l'orchestrator deve comunque avviarsi - la
+    # variabile EFS_MOUNT_PATH_ARG resta vuota, quindi 'docker run' sotto
+    # NON passa EFS_MOUNT_PATH al container, e il codice Python ricade
+    # automaticamente sul solo S3 (vedi dataset_dao.py). Un mount fallito
+    # degrada le prestazioni, non deve mai far fallire il boot.
+    yum install -y amazon-efs-utils || true
+    mkdir -p /mnt/efs
+    EFS_MOUNT_PATH_ARG=""
+    if mount -t efs -o tls ${aws_efs_file_system.dataset_cache.id}:/ /mnt/efs; then
+      echo "[EFS] Mount riuscito su /mnt/efs."
+      EFS_MOUNT_PATH_ARG="-e EFS_MOUNT_PATH=/mnt/efs -v /mnt/efs:/mnt/efs"
+    else
+      echo "[EFS] [WARN] Mount fallito - l'orchestrator procede SENZA cache EFS (solo S3)."
+    fi
+
     docker run -d \
       --name orchestrator \
       --restart unless-stopped \
@@ -104,6 +124,7 @@ locals {
       -e WORKER_HEARTBEAT_TIMEOUT=${var.worker_heartbeat_timeout} \
       -e RPC_SYNC_TIMEOUT_SECONDS=${var.rpc_sync_timeout_seconds}s \
       -e RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=${var.rpc_inference_sync_timeout_seconds}s \
+      $EFS_MOUNT_PATH_ARG \
       ${local.image_uri} \
       python -m src.orchestrator.main
   EOF
@@ -245,7 +266,7 @@ resource "aws_autoscaling_group" "orchestrator" {
     propagate_at_launch = true
   }
 
-  depends_on = [null_resource.docker_build_push]
+  depends_on = [null_resource.docker_build_push, aws_efs_mount_target.dataset_cache]
 }
 
 output "orchestrator_asg_name" {
