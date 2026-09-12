@@ -92,7 +92,7 @@ class PlotGenerator:
         self,
         reports_root: str = "test_reports",
         plots_dir: str = "plots",
-        baseline_pkl: str = os.path.join("outputs_baseline", "baseline_random_forest_completa.pkl"),
+        baseline_pkl: str = os.path.join("outputs_baseline", "baseline_random_forest_regressor.pkl"),
         dpi: int = 160,
     ):
         self.reports_root = reports_root
@@ -106,7 +106,8 @@ class PlotGenerator:
         self.primary_env = None
         self.primary_mode = None
 
-        self.baseline = None          # contenuto del .pkl, se leggibile
+        self.baseline = None           # contenuto del .pkl, se leggibile
+        self.baseline_tempi_locali = {}  # {n_alberi: {t_seq, t_1node_parallel, ...}}, da JSON
         self.generated = []           # path dei PNG effettivamente prodotti
         self.skipped = []             # (nome_grafico, motivo)
 
@@ -114,6 +115,7 @@ class PlotGenerator:
         self._ensure_plots_dir()
         self._load_all_reports()
         self._load_baseline()
+        self._load_baseline_tempi_locali()
 
     # =======================================================================
     # SETUP
@@ -349,6 +351,48 @@ class PlotGenerator:
             print(f"[WARN] Impossibile deserializzare '{path}' ({type(e).__name__}: {e}). "
                   f"I grafici basati sulla baseline saranno saltati.")
 
+    def _load_baseline_tempi_locali(self):
+        """
+        Carica i tempi di riferimento locali (T_seq, T_1node) da JSON dedicati,
+        uno per numero di alberi: 'baseline_tempi_locali_<N>_alberi.json',
+        cercati nella stessa cartella del .pkl della baseline.
+
+        Sostituisce, per il solo scopo dei due riferimenti orizzontali del
+        grafico di strong scaling, la lettura dal .pkl: run_baseline() li
+        scrive gia' pronti in JSON, quindi qui non serve pickle.load() (con i
+        relativi rischi di incompatibilita' fra versioni di scikit-learn) solo
+        per leggere due numeri in virgola mobile.
+        """
+        baseline_dir = os.path.dirname(self.baseline_pkl_path) or "."
+        pattern = os.path.join(baseline_dir, "baseline_tempi_locali_*_alberi.json")
+        for path in sorted(glob.glob(pattern)):
+            try:
+                with open(path, "r") as f:
+                    data = json.load(f)
+            except Exception as e:  # file corrotto/troncato: non deve fermare la generazione
+                print(f"[WARN] Impossibile leggere '{path}' ({type(e).__name__}: {e}): lo salto.")
+                continue
+            if not isinstance(data, dict):
+                print(f"[WARN] '{path}' non contiene il dizionario atteso: lo ignoro.")
+                continue
+            n_alberi = data.get("n_estimators")
+            if n_alberi is None:
+                print(f"[WARN] '{path}' senza 'n_estimators': lo ignoro.")
+                continue
+            try:
+                self.baseline_tempi_locali[int(n_alberi)] = data
+            except (TypeError, ValueError):
+                print(f"[WARN] '{path}' ha un 'n_estimators' non numerico: lo ignoro.")
+
+        if self.baseline_tempi_locali:
+            trovati = ", ".join(str(n) for n in sorted(self.baseline_tempi_locali))
+            print(f"[PLOT] Tempi di baseline locale caricati per {trovati} alberi "
+                  f"da '{baseline_dir}'.")
+        else:
+            print(f"[WARN] Nessun 'baseline_tempi_locali_<N>_alberi.json' trovato in "
+                  f"'{baseline_dir}': i riferimenti T_seq/T_1node nel grafico di strong "
+                  f"scaling saranno assenti.")
+
     # =======================================================================
     # ACCESSO AI DATI (tutto via .get(), mai indicizzazione diretta)
     # =======================================================================
@@ -403,6 +447,44 @@ class PlotGenerator:
             if best_key is None or key > best_key:
                 best, best_key = run, key
         return best
+
+    def _pick_scalability_runs(self):
+        """
+        Restituisce TUTTE le run con uno scenario 'scalability' utilizzabile,
+        una per file di report — a differenza di _pick_run, che ne sceglie
+        UNA sola per i grafici a sorgente singola.
+
+        Serve ai grafici di scalabilita' (strong scaling, speedup/efficienza,
+        throughput): se in test_reports/aws/ ci sono sia
+        'test_report_scalability_100_alberi.json' sia
+        'test_report_scalability_400_alberi.json', sono due esperimenti a
+        carico diverso e vanno rappresentati entrambi, con un grafico
+        ciascuno — non scelto l'uno a scapito dell'altro come farebbe
+        _pick_run in base a copertura/recency.
+
+        Ordinate per ambiente (aws -> docker -> local) e, a parita' di
+        ambiente, per numero di alberi crescente: generazione deterministica.
+        """
+        candidates = [r for r in self.runs if self._is_usable(r["scenarios"].get("scalability"))]
+
+        def sort_key(r):
+            trees = self._trees_per_scale(r) or 0
+            return (self.ENV_PRIORITY.index(r["env"]), trees, r["file"])
+
+        return sorted(candidates, key=sort_key)
+
+    def _scale_suffix(self, run) -> str:
+        """
+        Suffisso per distinguere nel nome del file (e nei messaggi di log) i
+        grafici prodotti da run di scalabilita' diverse. Il numero di alberi
+        e' l'informazione che conta davvero (e' cio' che rende due run non
+        confrontabili); se non e' deducibile dalla scenario_description si
+        ripiega su ambiente + nome file, che restano comunque univoci.
+        """
+        trees = self._trees_per_scale(run)
+        if trees:
+            return f"{trees}_alberi"
+        return f"{run['env']}_{os.path.splitext(run['file'])[0]}"
 
     @staticmethod
     def _is_usable(scenario: dict) -> bool:
@@ -999,12 +1081,25 @@ class PlotGenerator:
     # =======================================================================
 
     def plot_strong_scaling(self):
-        """Tempo di addestramento in funzione del numero di worker (strong scaling)."""
+        """
+        Tempo di addestramento in funzione del numero di worker (strong
+        scaling): un grafico per OGNI run di scalabilita' trovata (carichi
+        diversi, es. 100 e 400 alberi, non vanno mescolati ne' scelti l'uno
+        a scapito dell'altro).
+        """
         name = "Curva di strong scaling"
-        run = self._pick_run(["scalability"])
+        runs = self._pick_scalability_runs()
+        if not runs:
+            self._skip(name, "nessuno scenario 'scalability' utilizzabile nei report")
+            return
+        for run in runs:
+            self._plot_strong_scaling_for_run(run, name)
+
+    def _plot_strong_scaling_for_run(self, run, name):
+        suffix = self._scale_suffix(run)
         series = self._scaling_series(run)
         if len(series) < 2:
-            self._skip(name, "servono almeno due configurazioni di worker in "
+            self._skip(f"{name} ({suffix})", "servono almeno due configurazioni di worker in "
                              "'scalability.metrics_per_scale'")
             return
 
@@ -1036,7 +1131,16 @@ class PlotGenerator:
                 label=f"Scaling ideale a partire da {int(workers[0])} worker", zorder=2)
 
         # Riferimenti della baseline locale: T_seq (monocore) e T_1node (multicore).
-        tempi = (self.baseline or {}).get("baseline_tempi_locali") or {}
+        # Presi dal JSON 'baseline_tempi_locali_<N>_alberi.json' che corrisponde
+        # al carico di QUESTA run (stesso N di alberi): tempi misurati con un
+        # numero di alberi diverso non sono un riferimento valido.
+        trees = self._trees_per_scale(run)
+        tempi = self.baseline_tempi_locali.get(trees) if trees else None
+        if trees and tempi is None:
+            print(f"[WARN] Nessun 'baseline_tempi_locali_{trees}_alberi.json' trovato: "
+                  f"il grafico di strong scaling non avra' i riferimenti T_seq/T_1node "
+                  f"per {trees} alberi.")
+        tempi = tempi or {}
         reference_values = []
         for key, label, color in (
             ("t_seq", "Baseline monocore (T_seq)", PALETTE["accent"]),
@@ -1068,7 +1172,6 @@ class PlotGenerator:
         ax.legend(loc="upper right")
         ax.set_axisbelow(True)
 
-        trees = self._trees_per_scale(run)
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
@@ -1076,7 +1179,7 @@ class PlotGenerator:
         self._footnote(fig, "Il divario fra curva misurata e curva ideale e' l'overhead "
                             "distribuito: parte seriale (ETL, aggregazione, OOB) piu' costo "
                             "di comunicazione RPC. " + self._provenance(run))
-        self._save(fig, "sdcc_01_strong_scaling.png")
+        self._save(fig, f"sdcc_01_strong_scaling_{suffix}.png")
 
     def _trees_per_scale(self, run=None):
         """Numero di alberi dichiarato dallo scenario di scalabilita', se noto."""
@@ -1090,12 +1193,24 @@ class PlotGenerator:
         return None
 
     def plot_speedup_and_efficiency(self):
-        """Speedup misurato vs ideale, con l'efficienza parallela sul pannello destro."""
+        """
+        Speedup misurato vs ideale, con l'efficienza parallela sul pannello
+        destro: un grafico per OGNI run di scalabilita' trovata (carichi
+        diversi non vanno mescolati ne' scelti l'uno a scapito dell'altro).
+        """
         name = "Speedup ed efficienza"
-        run = self._pick_run(["scalability"])
+        runs = self._pick_scalability_runs()
+        if not runs:
+            self._skip(name, "nessuno scenario 'scalability' utilizzabile nei report")
+            return
+        for run in runs:
+            self._plot_speedup_and_efficiency_for_run(run, name)
+
+    def _plot_speedup_and_efficiency_for_run(self, run, name):
+        suffix = self._scale_suffix(run)
         series = self._scaling_series(run)
         if len(series) < 2:
-            self._skip(name, "servono almeno due configurazioni di worker per calcolare lo speedup")
+            self._skip(f"{name} ({suffix})", "servono almeno due configurazioni di worker per calcolare lo speedup")
             return
 
         workers = np.array([p["workers"] for p in series], dtype=float)
@@ -1169,21 +1284,46 @@ class PlotGenerator:
         ax.set_ylim(0, max(1.15, float(efficiency.max()) * 1.15))
         ax.set_axisbelow(True)
 
-        fig.suptitle(f"Scalabilita' del sistema distribuito - {self._env_subtitle(run)}",
+        trees = self._trees_per_scale(run)
+        subtitle = self._env_subtitle(run)
+        if trees:
+            subtitle += f" - carico fisso di {trees} alberi"
+        fig.suptitle(f"Scalabilita' del sistema distribuito - {subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "Lo speedup sul tempo totale e' limitato dalla frazione seriale "
                             "(legge di Amdahl): l'ETL e l'aggregazione non si accorciano "
                             "aggiungendo worker. L'efficienza misura quanto di ogni worker "
                             "aggiunto viene effettivamente convertito in lavoro utile. " + self._provenance(run))
-        self._save(fig, "sdcc_02_speedup_efficienza.png")
+        self._save(fig, f"sdcc_02_speedup_efficienza_{suffix}.png")
 
     def plot_time_breakdown(self):
         """
         Scomposizione del tempo per configurazione di worker (barre impilate):
-        e' la visualizzazione diretta della legge di Amdahl.
+        e' la visualizzazione diretta della legge di Amdahl. Un grafico per
+        OGNI run di scalabilita' strumentata su piu' configurazioni di
+        worker; se nessuna lo e', ripiega su un'unica configurazione presa
+        da 'performance_and_metrics.timing_breakdown'.
         """
         name = "Scomposizione dei tempi (Amdahl)"
+        scal_runs = self._pick_scalability_runs()
+        usable_scal_runs = [
+            r for r in scal_runs
+            if len(self._scaling_series(r)) >= 2
+            and all(p["instrumented"] and p["train_only"] is not None for p in self._scaling_series(r))
+        ]
+        if usable_scal_runs:
+            for run in usable_scal_runs:
+                self._plot_time_breakdown_for_run(run, name)
+            return
+
+        # Nessuna run di scalabilita' strumentata su piu' configurazioni:
+        # ripiega su un'unica configurazione (performance_and_metrics).
         run = self._pick_run(["scalability", "performance_and_metrics"])
+        self._plot_time_breakdown_for_run(run, name)
+
+    def _plot_time_breakdown_for_run(self, run, name):
+        suffix = self._scale_suffix(run) if run else None
+        label_suffix = f" ({suffix})" if suffix else ""
         series = self._scaling_series(run)
         phases = ("etl_seconds", "training_only_seconds", "aggregation_seconds",
                   "oob_estimation_seconds", "unaccounted_seconds")
@@ -1207,12 +1347,12 @@ class PlotGenerator:
             perf = self._scenario("performance_and_metrics", run)
             timing = perf.get("timing_breakdown") if isinstance(perf, dict) else None
             if not isinstance(timing, dict):
-                self._skip(name, "ne' 'scalability' con tempi strumentati ne' "
+                self._skip(f"{name}{label_suffix}", "ne' 'scalability' con tempi strumentati ne' "
                                  "'performance_and_metrics.timing_breakdown' disponibili")
                 return
             row = {ph: self._get_float(timing, ph, 0.0) or 0.0 for ph in phases}
             if sum(row.values()) <= 0:
-                self._skip(name, "'timing_breakdown' presente ma tutto a zero "
+                self._skip(f"{name}{label_suffix}", "'timing_breakdown' presente ma tutto a zero "
                                  "(orchestratore non strumentato in questa modalita')")
                 return
             rows.append(row)
@@ -1221,7 +1361,7 @@ class PlotGenerator:
 
         totals = [sum(r.values()) for r in rows]
         if not any(t > 0 for t in totals):
-            self._skip(name, "tempi di fase tutti nulli")
+            self._skip(f"{name}{label_suffix}", "tempi di fase tutti nulli")
             return
 
         x = np.arange(len(rows), dtype=float)
@@ -1269,15 +1409,28 @@ class PlotGenerator:
                             "seriali restano pressoche' costanti e, crescendo in quota "
                             "relativa (pannello destro), fissano il tetto di Amdahl allo "
                             "speedup ottenibile. " + self._provenance(run))
-        self._save(fig, "sdcc_03_scomposizione_tempi.png")
+        filename = f"sdcc_03_scomposizione_tempi_{suffix}.png" if suffix else "sdcc_03_scomposizione_tempi.png"
+        self._save(fig, filename)
 
     def plot_throughput(self):
-        """Throughput di addestramento (alberi/s) e di inferenza (campioni/s)."""
+        """
+        Throughput di addestramento (alberi/s) e di inferenza (campioni/s):
+        un grafico per OGNI run di scalabilita' trovata (carichi diversi non
+        vanno mescolati ne' scelti l'uno a scapito dell'altro).
+        """
         name = "Throughput"
-        run = self._pick_run(["scalability"])
+        runs = self._pick_scalability_runs()
+        if not runs:
+            self._skip(name, "nessuno scenario 'scalability' utilizzabile nei report")
+            return
+        for run in runs:
+            self._plot_throughput_for_run(run, name)
+
+    def _plot_throughput_for_run(self, run, name):
+        suffix = self._scale_suffix(run)
         series = self._scaling_series(run)
         if not series:
-            self._skip(name, "scenario 'scalability' assente o saltato")
+            self._skip(f"{name} ({suffix})", "scenario 'scalability' assente o saltato")
             return
 
         workers = np.array([p["workers"] for p in series], dtype=float)
@@ -1287,7 +1440,7 @@ class PlotGenerator:
         has_train = any(v is not None and v > 0 for v in train)
         has_infer = any(v is not None and v > 0 for v in infer)
         if not has_train and not has_infer:
-            self._skip(name, "nessun valore di throughput valido nei report")
+            self._skip(f"{name} ({suffix})", "nessun valore di throughput valido nei report")
             return
 
         n_panels = int(has_train) + int(has_infer)
@@ -1334,7 +1487,11 @@ class PlotGenerator:
             ax.set_axisbelow(True)
             ax.set_ylim(0, float(values.max()) * 1.15)
 
-        fig.suptitle(f"Throughput del sistema distribuito - {self._env_subtitle(run)}",
+        trees = self._trees_per_scale(run)
+        subtitle = self._env_subtitle(run)
+        if trees:
+            subtitle += f" - carico fisso di {trees} alberi"
+        fig.suptitle(f"Throughput del sistema distribuito - {subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
 
         # Il caveat sul federato e' scritto dallo scenario stesso: se c'e', va
@@ -1348,7 +1505,7 @@ class PlotGenerator:
                 "Throughput misurato a carico fisso: cresce con i worker fintanto che la "
                 "parte parallela domina il tempo totale.")
         self._footnote(fig, note + " " + self._provenance(run))
-        self._save(fig, "sdcc_04_throughput.png")
+        self._save(fig, f"sdcc_04_throughput_{suffix}.png")
 
     def plot_fault_tolerance_overhead(self):
         """

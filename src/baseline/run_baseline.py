@@ -2,15 +2,21 @@ import os
 import json
 import time
 import numpy as np
+import pandas as pd
 import pickle
 import optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)  # i tuoi print restano l'unico output
+
+import matplotlib
+matplotlib.use("Agg")  # nessun display interattivo richiesto: salviamo solo i .png su disco
+import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     mean_absolute_error, mean_squared_error, precision_score, r2_score,
     recall_score, roc_auc_score, precision_recall_curve, roc_curve, f1_score, confusion_matrix,
+    ConfusionMatrixDisplay,
 )
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.config import SystemConfig
@@ -313,6 +319,91 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
     best_fs, best_train_selected = feature_selection_cache[best_params["max_features"]]
     return best_params, results, best_fs, best_train_selected
 
+# ---------------------------------------------------------------------------
+# GRAFICI DI DIAGNOSTICA — DATASET REALE DI CLASSIFICAZIONE
+#
+# Tre funzioni indipendenti, ognuna salva un .png in PLOTS_DIR e non altera
+# alcun valore già calcolato nella pipeline (prendono in input solo le
+# strutture dati già prodotte da run_baseline: cm, oob_search_results,
+# feature_importance_scores, dizionario_feature).
+# ---------------------------------------------------------------------------
+
+def plot_confusion_matrix_real(cm, output_path, labels=("Benign", "Attacco"), soglia=None):
+    """Matrice di confusione sul test set (dataset reale, classificatore)."""
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    fig, ax = plt.subplots(figsize=(6, 5.5))
+    disp.plot(ax=ax, cmap="Blues", values_format="d", colorbar=True)
+    titolo = "Matrice di Confusione — Test Set (Dataset Reale)"
+    if soglia is not None:
+        titolo += f"\n(soglia di decisione = {soglia:.4f})"
+    ax.set_title(titolo)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"[OK] Grafico matrice di confusione salvato in: '{output_path}'")
+
+
+def plot_feature_importance_multicollinearity(feature_importance_scores, dizionario_feature,
+                                                importance_threshold, multicollinearity_distance_threshold,
+                                                output_path, top_n=25):
+
+    """
+    Diagramma a barre orizzontali dell'importanza (permutation OOB) delle
+    feature, colorate in base all'esito della feature selection a due
+    criteri (CICIDSFeatureSelector):
+      - rosso  = eliminata per multicollinearità (clustering gerarchico,
+                 distanza di soglia = multicollinearity_distance_threshold)
+      - grigio = eliminata per importanza sotto soglia (importance_threshold)
+      - blu    = feature salvata nel set finale
+
+    NOTA: il dendrogramma gerarchico vero e proprio (con la linea di taglio
+    alla soglia di distanza) viene già salvato da CICIDSFeatureSelector in
+    'feature_correlation_dendrogram_<max_features>.png' (vedi
+    dendrogram_plot_path in optuna_oob_hyperparameter_search) — questo
+    grafico è complementare: mostra l'EFFETTO del taglio (quali feature
+    sono sopravvissute) insieme al proprio punteggio di importanza.
+    """
+    salvate = set(dizionario_feature.get("salvate", []))
+    eliminate = set(dizionario_feature.get("eliminate", []))
+
+    scores_sorted = feature_importance_scores.sort_values(ascending=False).head(top_n)
+
+    colori = []
+    for feat in scores_sorted.index:
+        if feat in salvate:
+            colori.append("#1f77b4")   # blu: sopravvissuta a entrambi i criteri
+        elif feat in eliminate:
+            colori.append("#d62728")   # rosso: eliminata (multicollinearità e/o importanza)
+        else:
+            colori.append("#7f7f7f")   # grigio: non tracciata nel dizionario (fallback)
+
+    fig, ax = plt.subplots(figsize=(9, max(5, 0.32 * len(scores_sorted))))
+    y_pos = range(len(scores_sorted))
+    ax.barh(y_pos, scores_sorted.values, color=colori)
+    ax.set_yticks(list(y_pos))
+    ax.set_yticklabels(scores_sorted.index, fontsize=8)
+    ax.invert_yaxis()
+    ax.axvline(importance_threshold, color="black", linestyle="--", linewidth=1,
+               label=f"Soglia di importanza = {importance_threshold}")
+    ax.set_xlabel("Permutation importance OOB (percent increase error rate)")
+    ax.set_title(
+        f"Importanza feature (top {len(scores_sorted)}) e feature selection\n"
+        f"Soglia multicollinearità (distanza gerarchica) = {multicollinearity_distance_threshold}"
+    )
+
+    legend_handles = [
+        plt.Rectangle((0, 0), 1, 1, color="#1f77b4", label="Salvata (set finale)"),
+        plt.Rectangle((0, 0), 1, 1, color="#d62728", label="Eliminata (importanza e/o multicollinearità)"),
+        plt.Line2D([0], [0], color="black", linestyle="--", label=f"Soglia importanza = {importance_threshold}"),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"[OK] Grafico importanza feature / multicollinearità salvato in: '{output_path}'")
+
+
 def run_baseline():
     # --- CONFIGURAZIONE STILISTICA REPORT ---
     LUNGHEZZA_LINEA = 80
@@ -339,7 +430,7 @@ def run_baseline():
     # uniforme definita qui: RawCSVDataLoader la richiede solo se
     # target_rows_per_day è None (non il caso qui), e mantenerla come
     # variabile morta avrebbe solo suggerito un ruolo che non ha.
-    TARGET_ROWS_PER_DAY = 100_000
+    TARGET_ROWS_PER_DAY = 200_000
     # Feature selection: OOB permutation importance, fedele a Breiman (2001)
     # Sec. 10 — criterio primario, vedi CICIDSFeatureSelector.
     IMPORTANCE_THRESHOLD = 0.0
@@ -636,6 +727,10 @@ def run_baseline():
         io_time = time.perf_counter() - io_start_time
         print(f"[OK] Caricamento dati (I/O) completato in {io_time:.4f} secondi.")
 
+        print(f"\n • Prima riga del dataset grezzo caricato (shape totale: {df_raw.shape}):")
+        with pd.option_context("display.max_columns", None, "display.width", 200):
+            print(df_raw.head(1))
+
         preprocess_start_time = time.perf_counter()
         preprocessor = CICIDSPreprocessor(target_column=target_col)
         splitter = StratifiedDataSplitter(target_column=target_col, test_size=TEST_SIZE, random_state=RANDOM_SEED)
@@ -704,6 +799,8 @@ def run_baseline():
     print("-" * 60)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    PLOTS_DIR = os.path.join(OUTPUT_DIR, "plots")
+    os.makedirs(PLOTS_DIR, exist_ok=True)
     config_path_final = os.path.join(OUTPUT_DIR, "config_real.json")
     pickle_path_final = os.path.join(
         OUTPUT_DIR,
@@ -774,6 +871,17 @@ def run_baseline():
                   f"Iperparametri ottimali: {best_params}")
             tempo_medio_fit_tuning = float(np.mean([r["fit_time"] for r in oob_search_results]))
 
+            # --- Riga iniziale (rank 1) della tabella "migliori combinazioni per
+            # OOB F1-Score" stampata più avanti in FASE 5 (vedi report esteso) ---
+            _best_row = oob_search_results[0]
+            _p = _best_row["params"]
+            print(f"  {'Rank':<5} | {'n_est':<6} | {'depth':<6} | {'OOB Acc':<9} | {'OOB Prec':<9} | "
+                  f"{'OOB Rec':<9} | {'OOB F1':<9}")
+            print(f"  {1:<5} | {_p.get('n_estimators'):<6} | "
+                  f"{str(_p.get('max_depth')):<6} | {_best_row['oob_accuracy']*100:8.2f}% | "
+                  f"{_best_row['oob_precision']*100:8.2f}% | {_best_row['oob_recall']*100:8.2f}% | "
+                  f"{_best_row['oob_f1']*100:8.2f}%")
+
             # Applica al train/test set il set di feature calcolato per il
             # max_features della combinazione vincente (dalla cache interna
             # a optuna_oob_hyperparameter_search).
@@ -802,6 +910,21 @@ def run_baseline():
             X_val, y_val = None, None
         print(f" • Volume Train (DOPO la feature selection): {X_train.shape} | "
               f"Volume Test: {X_test.shape}")
+
+        if feature_importance_scores is not None:
+            try:
+                plot_feature_importance_multicollinearity(
+                    feature_importance_scores,
+                    dizionario_feature,
+                    importance_threshold=IMPORTANCE_THRESHOLD,
+                    multicollinearity_distance_threshold=MULTICOLLINEARITY_DISTANCE_THRESHOLD,
+                    output_path=os.path.join(PLOTS_DIR, "feature_importance_multicollinearity.png"),
+                    top_n=25,
+                )
+            except Exception as e:
+                import traceback
+                print(f"[ATTENZIONE] Grafico feature importance NON generato per un errore: {e}")
+                traceback.print_exc()
 
         # n_estimators: nessun raffinamento/override qui -- resta esattamente
         # il valore scelto da optuna_oob_hyperparameter_search insieme agli
@@ -1072,6 +1195,33 @@ def run_baseline():
     # solo COME viene calcolato il fit, non il risultato (stesso random_state),
     # quindi tree_clf_par serve unicamente da riferimento temporale.
 
+    # ---------------------------------------------------------
+    # Salvataggio dei tempi di riferimento su JSON dedicato, un file per
+    # numero di alberi (n_estimators varia fra le run di scalability: 100
+    # alberi e 400 alberi non sono confrontabili con lo stesso T_seq/T_1node).
+    # Il plotter legge questi JSON al posto del .pkl per i riferimenti di
+    # strong scaling: nessun pickle.load() richiesto solo per due numeri.
+    # ---------------------------------------------------------
+    n_alberi_baseline = hp["n_estimators"]
+    baseline_tempi_path = os.path.join(
+        OUTPUT_DIR, f"baseline_tempi_locali_{n_alberi_baseline}_alberi.json"
+    )
+    try:
+        with open(baseline_tempi_path, "w") as f:
+            json.dump({
+                "n_estimators": n_alberi_baseline,
+                "t_seq": t_seq,
+                "t_1node_parallel": t_1node_parallel,
+                "speedup_multicore": speedup_multicore,
+                "cpu_disponibili": cpu_disponibili,
+                "tree_type": user_tree_type,
+            }, f, indent=2)
+        print(f"[OK] Tempi di baseline locale salvati in '{baseline_tempi_path}'.")
+    except OSError as e:
+        print(f"[WARN] Impossibile salvare '{baseline_tempi_path}' ({e}): "
+              f"i grafici di scalability non avranno i riferimenti T_seq/T_1node "
+              f"per {n_alberi_baseline} alberi.")
+
     print("\n[LOCAL] Calcolo delle predizioni e latenza sul Test Set indipendente...")
     start_inferenza = time.perf_counter()
 
@@ -1168,6 +1318,20 @@ def run_baseline():
         cm = confusion_matrix(y_test, local_preds)
         tn, fp, fn, tp = cm.ravel()
         test_fpr = float(fp / (fp + tn)) if (fp + tn) > 0 else 0.0
+
+        if dataset_type == "real":
+            print(f"   [DEBUG] cm passata al grafico (stesso oggetto usato nel report FASE 5):\n{cm}")
+            try:
+                plot_confusion_matrix_real(
+                    cm,
+                    output_path=os.path.join(PLOTS_DIR, "confusion_matrix.png"),
+                    labels=("Benign", "Attacco"),
+                    soglia=decision_threshold,
+                )
+            except Exception as e:
+                import traceback
+                print(f"[ATTENZIONE] Grafico matrice di confusione NON generato per un errore: {e}")
+                traceback.print_exc()
 
         # Metriche a soglia di default (0.50), tenute SOLO per confronto in
         # relazione -- non sono quelle "ufficiali" del modello, che restano

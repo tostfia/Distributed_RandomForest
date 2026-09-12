@@ -392,8 +392,7 @@ def plot_oob_curve(rows, task, marker_n_estimators, out_prefix):
     ax.set_xlim(grid_vals[0], grid_vals[-1])
     ax.set_xlabel("n_estimators")
     ax.set_ylabel("OOB error rate")
-    ax.set_title(f"OOB error rate al crescere di n_estimators (warm_start) — {task}\n"
-                 "leggi a occhio dove la curva si appiattisce")
+    ax.set_title(f"OOB error rate al crescere di n_estimators — {task}\n")
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best', fontsize=8)
 
