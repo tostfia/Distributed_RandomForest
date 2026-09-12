@@ -83,7 +83,7 @@ class PlotGenerator:
                       "network_simulation", "inference_worker_fault")
 
     ENV_LABELS = {
-        "aws":    "AWS ECS Fargate",
+        "aws":    "AWS ",
         "docker": "Docker Compose (locale)",
         "local":  "Bare-metal (locale)",
     }
@@ -695,7 +695,6 @@ class PlotGenerator:
             ("Confronto metriche ML",             self.plot_ml_metrics_comparison),
             ("Curva di strong scaling",           self.plot_strong_scaling),
             ("Speedup ed efficienza",             self.plot_speedup_and_efficiency),
-            ("Scomposizione dei tempi (Amdahl)",  self.plot_time_breakdown),
             ("Throughput",                        self.plot_throughput),
             ("Overhead di fault tolerance",       self.plot_fault_tolerance_overhead),
             ("Confronto fra ambienti",            self.plot_environment_comparison),
@@ -1108,10 +1107,6 @@ class PlotGenerator:
 
         fig, ax = plt.subplots(figsize=(9.6, 6.0))
 
-        ax.plot(workers, totals, marker="o", markersize=8, linewidth=2.4,
-                color=PALETTE["primary"], label="Tempo totale (ETL + alberi + aggregazione + OOB)",
-                zorder=4)
-
         # Curva "soli alberi": solo se realmente strumentata. Se
         # 'training_only_instrumented' e' False il valore e' un placeholder pari
         # al totale (vedi ScalabilityScenario) e disegnarlo sarebbe fuorviante.
@@ -1120,15 +1115,10 @@ class PlotGenerator:
         if instrumented and all(v is not None for v in only):
             ax.plot(workers, np.array(only, dtype=float), marker="s", markersize=7,
                     linewidth=2.4, color=PALETTE["secondary"],
-                    label="Sola costruzione degli alberi (parte parallela)", zorder=4)
+                    label="Costruzione degli alberi ", zorder=4)
         else:
             print("[WARN] 'training_only_seconds' non strumentato (o assente) per almeno una "
                   "configurazione: ometto la curva della sola costruzione degli alberi.")
-
-        # Curva ideale: T(N) = T(N_base) * N_base / N.
-        ideal = totals[0] * workers[0] / workers
-        ax.plot(workers, ideal, linestyle="--", linewidth=1.8, color=PALETTE["neutral"],
-                label=f"Scaling ideale a partire da {int(workers[0])} worker", zorder=2)
 
         # Riferimenti della baseline locale: T_seq (monocore) e T_1node (multicore).
         # Presi dal JSON 'baseline_tempi_locali_<N>_alberi.json' che corrisponde
@@ -1156,18 +1146,16 @@ class PlotGenerator:
                             textcoords="offset points", ha="left", va="top",
                             fontsize=9, color=color, fontweight="bold")
 
-        for xi, yi in zip(workers, totals):
-            ax.annotate(f"{yi:.1f} s", xy=(xi, yi), xytext=(0, 10),
-                        textcoords="offset points", ha="center",
-                        fontsize=9.5, color=PALETTE["primary"])
-
         ax.set_xlabel("Numero di worker")
         ax.set_ylabel("Tempo di addestramento (secondi)")
         # set_xticks DOPO aver disegnato, e senza locator automatico: le
         # configurazioni testate sono 1,3,5,7 e non vanno interpolate con 2,4,6.
         ax.set_xticks(workers)
         ax.set_xticklabels([str(int(w)) for w in workers])
-        ceiling = max([float(totals.max()), float(ideal.max())] + reference_values)
+        ceiling_values = [float(totals.max())] + reference_values
+        if instrumented and all(v is not None for v in only):
+            ceiling_values.append(float(np.array(only, dtype=float).max()))
+        ceiling = max(ceiling_values)
         ax.set_ylim(0, ceiling * 1.22)
         ax.legend(loc="upper right")
         ax.set_axisbelow(True)
@@ -1233,16 +1221,15 @@ class PlotGenerator:
 
         ideal = workers / base_n
 
-        fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.6))
+        fig, ax = plt.subplots(figsize=(9.6, 6.0))
 
-        ax = axes[0]
         ax.plot(workers, ideal, linestyle="--", linewidth=1.9, color=PALETTE["neutral"],
                 marker="", label="Speedup ideale (lineare)", zorder=2)
         ax.plot(workers, speedup_total, marker="o", markersize=8, linewidth=2.4,
                 color=PALETTE["primary"], label="Speedup misurato (tempo totale)", zorder=4)
         if speedup_only is not None:
             ax.plot(workers, speedup_only, marker="s", markersize=7, linewidth=2.4,
-                    color=PALETTE["secondary"], label="Speedup della sola parte parallela", zorder=4)
+                    color=PALETTE["secondary"], label="Speedup ", zorder=4)
         ax.fill_between(workers, speedup_total, ideal, color=PALETTE["light"],
                         alpha=0.35, zorder=1, label="Perdita rispetto all'ideale")
 
@@ -1259,67 +1246,15 @@ class PlotGenerator:
         ax.legend(loc="upper left")
         ax.set_axisbelow(True)
 
-        ax = axes[1]
-        eff_source = speedup_only if speedup_only is not None else speedup_total
-        efficiency = eff_source / ideal
-        bars = ax.bar(workers, efficiency, width=0.55 if len(workers) > 2 else 0.35,
-                      color=[PALETTE["success"] if e >= 0.75
-                             else PALETTE["accent"] if e >= 0.5
-                             else PALETTE["secondary"] for e in efficiency],
-                      edgecolor="white", linewidth=1.1, zorder=3)
-        ax.axhline(1.0, linestyle="--", linewidth=1.6, color=PALETTE["neutral"], zorder=2)
-        ax.annotate("Efficienza ideale = 1.00", xy=(workers[-1], 1.0), xytext=(-4, 5),
-                    textcoords="offset points", ha="right", fontsize=9,
-                    color=PALETTE["neutral"], fontweight="bold")
-        for bar, e in zip(bars, efficiency):
-            ax.annotate(f"{e:.2f}", xy=(bar.get_x() + bar.get_width() / 2, e),
-                        xytext=(0, 4), textcoords="offset points", ha="center",
-                        fontsize=10, fontweight="bold", color="#404040")
-
-        which = "sola parte parallela" if speedup_only is not None else "tempo totale"
-        ax.set_title(f"Efficienza parallela ({which})", fontsize=13)
-        ax.set_xlabel("Numero di worker")
-        ax.set_ylabel("Efficienza = Speedup / N")
-        ax.set_xticks(workers)
-        ax.set_ylim(0, max(1.15, float(efficiency.max()) * 1.15))
-        ax.set_axisbelow(True)
-
         trees = self._trees_per_scale(run)
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
         fig.suptitle(f"Scalabilita' del sistema distribuito - {subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, "Lo speedup sul tempo totale e' limitato dalla frazione seriale "
-                            "(legge di Amdahl): l'ETL e l'aggregazione non si accorciano "
-                            "aggiungendo worker. L'efficienza misura quanto di ogni worker "
-                            "aggiunto viene effettivamente convertito in lavoro utile. " + self._provenance(run))
         self._save(fig, f"sdcc_02_speedup_efficienza_{suffix}.png")
 
-    def plot_time_breakdown(self):
-        """
-        Scomposizione del tempo per configurazione di worker (barre impilate):
-        e' la visualizzazione diretta della legge di Amdahl. Un grafico per
-        OGNI run di scalabilita' strumentata su piu' configurazioni di
-        worker; se nessuna lo e', ripiega su un'unica configurazione presa
-        da 'performance_and_metrics.timing_breakdown'.
-        """
-        name = "Scomposizione dei tempi (Amdahl)"
-        scal_runs = self._pick_scalability_runs()
-        usable_scal_runs = [
-            r for r in scal_runs
-            if len(self._scaling_series(r)) >= 2
-            and all(p["instrumented"] and p["train_only"] is not None for p in self._scaling_series(r))
-        ]
-        if usable_scal_runs:
-            for run in usable_scal_runs:
-                self._plot_time_breakdown_for_run(run, name)
-            return
-
-        # Nessuna run di scalabilita' strumentata su piu' configurazioni:
-        # ripiega su un'unica configurazione (performance_and_metrics).
-        run = self._pick_run(["scalability", "performance_and_metrics"])
-        self._plot_time_breakdown_for_run(run, name)
+    
 
     def _plot_time_breakdown_for_run(self, run, name):
         suffix = self._scale_suffix(run) if run else None
