@@ -124,6 +124,7 @@ locals {
       -e WORKER_HEARTBEAT_TIMEOUT=${var.worker_heartbeat_timeout} \
       -e RPC_SYNC_TIMEOUT_SECONDS=${var.rpc_sync_timeout_seconds}s \
       -e RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=${var.rpc_inference_sync_timeout_seconds}s \
+      -e CENTRALIZED_DATASET_MODE=${var.centralized_dataset_mode} \
       $EFS_MOUNT_PATH_ARG \
       ${local.image_uri} \
       python -m src.orchestrator.main

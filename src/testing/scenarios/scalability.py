@@ -70,7 +70,7 @@ class ScalabilityScenario(BaseTestScenario):
                 start_train = time.perf_counter()
                 self._reuse_dataset_if_available(payload, seed=123)
                 num_trees = self.orchestrator._execute_training_step(
-                    payload, start_alberi=0, target_alberi=target_trees, seed=123, skip_oob=True
+                    payload, start_alberi=0, target_alberi=target_trees, seed=123
                 )
                 train_duration = time.perf_counter() - start_train
                 self._mark_job_finished(payload["job_id"], alberi_addestrati=num_trees)

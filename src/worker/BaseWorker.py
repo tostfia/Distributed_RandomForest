@@ -270,7 +270,7 @@ class BaseWorker(Service, ABC):
 
     def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None,
                                      min_samples_split=2, class_weight=None, criterion=None,
-                                     bootstrap=None, max_samples=None, compute_oob=False):
+                                     bootstrap=None, max_samples=None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
@@ -306,30 +306,6 @@ class BaseWorker(Service, ABC):
         X, y = self._load_data(source_info)
         tree_class = self._get_tree_class()
 
-        # OOB DISTRIBUITA (12/9/2026): accumulo locale dei contributi OOB man
-        # mano che ogni albero viene costruito, invece di lasciare che
-        # l'Orchestratore rifaccia .predict() su OGNI albero in sequenza a
-        # fine training (collo di bottiglia misurato: 146-159s costanti,
-        # indipendenti dal numero di worker - la stima OOB oggi non scala
-        # affatto). Ogni worker calcola qui i propri contributi PARZIALI
-        # (oob_sum/oob_count, entrambi di lunghezza pari alle righe di X)
-        # usando gli alberi appena costruiti e X/y che ha gia' in memoria -
-        # zero trasferimento dati aggiuntivo. L'Orchestratore sommera' i
-        # contributi di tutti i task (vedi BaseOrchestrator._compute_oob_metrics_distributed).
-        #
-        # SCOPO LIMITATO DELIBERATAMENTE: solo regressore (tree_type ==
-        # "regressor") e solo se il worker espone 'self.dao' (cioe' solo
-        # CentralizedWorker - FederatedWorker non ha accesso al training set
-        # GLOBALE, solo al proprio shard, quindi non puo' contribuire a una
-        # stima OOB GLOBALE nello stesso modo). Il ramo classificatore
-        # richiederebbe coordinare lo spazio di classi globale tra worker
-        # PRIMA di poter sommare (ogni worker potrebbe vedere classi
-        # diverse nei propri alberi) - non affrontato in questa iterazione,
-        # ricade sul metodo sequenziale esistente (skip_oob invariato).
-        _oob_distributed_enabled = compute_oob and (tree_type == "regressor") and hasattr(self, "dao")
-        if _oob_distributed_enabled:
-            oob_sum_local = np.zeros(X.shape[0], dtype=np.float64)
-            oob_count_local = np.zeros(X.shape[0], dtype=np.int64)
 
         # 2. CALCOLO DINAMICO DEI CORE
         # Su ECS Fargate ogni task worker ha la propria CPU DEDICATA E ISOLATA
@@ -484,27 +460,6 @@ class BaseWorker(Service, ABC):
                           f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
                     _persist_batch(batch_trees, part_idx)
 
-                    if _oob_distributed_enabled:
-                        # Non fatale per design: un errore qui non deve MAI
-                        # invalidare un batch di alberi gia' persistito con
-                        # successo. Se fallisce, il task intero perdera' il
-                        # proprio contributo OOB (vedi 'oob_ready' nel return
-                        # finale) - l'Orchestratore rileva questo caso e
-                        # ricade sul metodo sequenziale per l'INTERO job,
-                        # non solo per questo task (nessun mix parziale).
-                        try:
-                            for _t in batch_trees:
-                                _oob_idx = getattr(_t, "oob_sample_indices_", None)
-                                if _oob_idx is not None and len(_oob_idx) > 0:
-                                    oob_sum_local[_oob_idx] += _t.predict(X[_oob_idx])
-                                    oob_count_local[_oob_idx] += 1
-                        except Exception as e_oob_acc:
-                            print(f"[{self.worker_name}] [OOB-WARN] Accumulo OOB locale fallito "
-                                  f"sul batch {part_idx} ({e_oob_acc}) - il task prosegue comunque, "
-                                  f"il contributo OOB di questo worker verra' scartato "
-                                  f"dall'Orchestratore.")
-                            _oob_distributed_enabled = False
-
                     # A questo punto 'batch_trees' esce di scope alla prossima
                     # iterazione: gli alberi già scritti su storage non restano
                     # più referenziati da nessuna struttura dati del worker.
@@ -537,35 +492,13 @@ class BaseWorker(Service, ABC):
         print(f"[+] [{self.worker_name}] Task completato e salvato in {len(parts_num_trees)} parti "
               f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
 
-        oob_ready = False
-        if _oob_distributed_enabled and oob_count_local.sum() > 0:
-            try:
-                job_id_guess = os.path.basename(source_info).replace("shared_train_", "").rsplit(".", 1)[0]
-                # Root di storage derivata da source_info stesso (funziona sia per
-                # 's3://bucket/distributed_trains/x.csv' sia per un path locale tipo
-                # './.local_storage/x.csv' - os.path.dirname tratta entrambi come
-                # semplici stringhe POSIX, nessuna differenza di comportamento tra
-                # i due schemi): risaliamo di due livelli (dal file al suo folder,
-                # dal folder al bucket/root) per affiancare 'oob_contributions' a
-                # 'distributed_trains', invece di annidarlo dentro.
-                storage_root = os.path.dirname(os.path.dirname(source_info))
-                oob_path = f"{storage_root}/oob_contributions/{job_id_guess}/oob_seed_{base_seed}.pkl"
-                payload = pickle.dumps({"oob_sum": oob_sum_local, "oob_count": oob_count_local})
-                self.dao.save_binary(oob_path, payload)
-                oob_ready = True
-                print(f"[{self.worker_name}] [OOB] Contributo OOB persistito su '{oob_path}' "
-                      f"({int((oob_count_local > 0).sum())} campioni coperti da almeno un albero di questo task).")
-            except Exception as e_oob_save:
-                print(f"[{self.worker_name}] [OOB-WARN] Salvataggio contributo OOB fallito ({e_oob_save}) - "
-                      f"l'Orchestratore ricadra' sul metodo sequenziale per l'intero job.")
-
         _release_memory_to_os()
         # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
         # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
         # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
         # più veloce e affidabile di un ritorno RPC su un payload di queste
         # dimensioni — vedi hang osservato in Scenario 2 (Scalabilità).
-        return {"ack": True, "num_trees": num_trees, "oob_ready": oob_ready}
+        return {"ack": True, "num_trees": num_trees}
 
     def exposed_predict_subset_forest(self, serialized_trees_or_key, serialized_X_test=None, tree_type=None, global_classes=None):
         """

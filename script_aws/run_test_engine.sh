@@ -43,6 +43,7 @@ ENV_REGION=$(get_env_var "AWS_DEFAULT_REGION")
 ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
 ENV_RPC_SYNC_TIMEOUT=$(get_env_var "RPC_SYNC_TIMEOUT_SECONDS")
 ENV_RPC_INFERENCE_SYNC_TIMEOUT=$(get_env_var "RPC_INFERENCE_SYNC_TIMEOUT_SECONDS")
+ENV_CENTRALIZED_DATASET_MODE=$(get_env_var "CENTRALIZED_DATASET_MODE")
 RPC_SYNC_TIMEOUT_SECONDS="${ENV_RPC_SYNC_TIMEOUT:-1800}"
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS="${ENV_RPC_INFERENCE_SYNC_TIMEOUT:-900}"
 
@@ -52,6 +53,7 @@ if [ "$ENV_ENV_MODE" != "aws" ]; then
 fi
 
 TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
+CENTRALIZED_DATASET_MODE="${ENV_CENTRALIZED_DATASET_MODE:-shared}"
 REGION="${ENV_REGION:-us-east-1}"
 NUM_WORKERS="${ENV_NUM_WORKERS:-2}"
 if [ -z "$ENV_BUCKET_NAME" ]; then
@@ -137,6 +139,7 @@ echo "===================================================================="
 echo " RUN TEST ENGINE (EC2 on-demand, $INSTANCE_TYPE)  -  ($REGION)"
 echo "===================================================================="
 echo " TRAINING_MODE : $TRAINING_MODE"
+echo " DATASET_MODE  : $CENTRALIZED_DATASET_MODE (solo se TRAINING_MODE=centralized)"
 echo " NUM_WORKERS   : $NUM_WORKERS"
 echo " SCENARIO      : $SCENARIO_CHOICE"
 echo "--------------------------------------------------------------------"
@@ -276,6 +279,7 @@ docker run --rm \
   -e DATASETS_BUCKET_NAME=${BUCKET_NAME} \
   -e RPC_SYNC_TIMEOUT_SECONDS=${RPC_SYNC_TIMEOUT_SECONDS}s \
   -e RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=${RPC_INFERENCE_SYNC_TIMEOUT_SECONDS}s \
+  -e CENTRALIZED_DATASET_MODE=${CENTRALIZED_DATASET_MODE} \
   -e SCENARIO=${SCENARIO_CHOICE} \
   \$EFS_MOUNT_PATH_ARG \
   ${ECR_REGISTRY}/${REPO_NAME}:latest \

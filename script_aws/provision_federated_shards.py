@@ -116,6 +116,13 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
             dataset_seed=123,
             target_rows_per_day=TARGET_ROWS_PER_DAY,
             tag_source_day=needs_day_tagging,
+            # BUGFIX (12/9/2026, stesso trovato in centralized.py): il bucket
+            # pubblico CICIDS2018 richiede accesso ANONIMO (confermato
+            # empiricamente - 'aws s3 ls' firmato nega AccessDenied,
+            # '--no-sign-request' funziona). Senza questo, fsspec userebbe
+            # accesso firmato di default e fallirebbe identicamente - bug
+            # gemello a quello di centralized.py, mai esercitato finora.
+            s3_anon=True,
         )
         splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
         splitter.split_and_shard(

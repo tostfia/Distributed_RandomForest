@@ -34,10 +34,8 @@ class DatasetDAO(ABC):
     @abstractmethod
     def load_binary(self, path: str) -> bytes:
         """Carica dati binari generici precedentemente salvati con save_binary.
-        Usato per artefatti piccoli non tabellari (es. vettori OOB parziali
-        per-worker, vedi BaseWorker.exposed_train_subset_forest e
-        BaseOrchestrator._compute_oob_metrics_distributed) dove pd.read_csv
-        non si applica."""
+        Usato per artefatti piccoli non tabellari dove pd.read_csv non si
+        applica (es. modelli pickle)."""
         pass
 
     @abstractmethod

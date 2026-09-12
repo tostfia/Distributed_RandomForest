@@ -8,6 +8,7 @@ import rpyc
 import queue
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rpyc.utils.classic import obtain
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -79,6 +80,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.current_job_id = None
         self.train_data_path = None
         self.test_data_path = None
+        # SHARDING DINAMICO (12/9/2026): None = modalita' 'shared' (default,
+        # comportamento identico a sempre - ogni worker scarica l'intero
+        # dataset). Se valorizzata (lista di path, uno per shard), la
+        # modalita' 'sharded' e' attiva per il job corrente: ogni worker
+        # scarica SOLO la propria fetta, assegnata dinamicamente per
+        # task_id (vedi _execute_training_step). Toggle via env var
+        # CENTRALIZED_DATASET_MODE ('shared'|'sharded').
+        self.train_data_shards = None
         self.chunk_sent_event = threading.Event()
         self._trees_cache = {}
         # Durata dell'ultima fase di preparazione dati (ETL). Serve agli scenari
@@ -101,14 +110,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
         #                             numero da confrontare con T_seq/T_1node.
         #   last_aggregation_seconds  ricomposizione della foresta globale e
         #                             salvataggio del modello sullo storage.
-        #   last_oob_seconds          stima Out-Of-Bag: ricarica il training
-        #                             set e ricalcola le predizioni, quindi è
-        #                             una diagnostica aggiuntiva, non parte
-        #                             dell'addestramento.
+        #   last_oob_seconds          RIMOSSA (12/9/2026): la stima OOB non
+        #                             viene più calcolata in nessun caso -
+        #                             restava un costo (fino a 150s+ nel
+        #                             metodo sequenziale) per un dato che
+        #                             nessun consumatore del sistema legge
+        #                             mai (le accuracy_metrics finali vengono
+        #                             sempre dall'inferenza reale sul test
+        #                             set). Attributo mantenuto SEMPRE a 0.0
+        #                             solo per compatibilità con lo schema
+        #                             dei report esistenti (scalability.py
+        #                             legge 'oob_estimation_seconds' via
+        #                             getattr con default 0.0).
         #
         # Totale di _execute_training_step ~=
-        #   last_etl_seconds + last_dispatch_seconds
-        #   + last_aggregation_seconds + last_oob_seconds
+        #   last_etl_seconds + last_dispatch_seconds + last_aggregation_seconds
         self.last_dispatch_seconds = 0.0
         self.last_aggregation_seconds = 0.0
         self.last_oob_seconds = 0.0
@@ -119,32 +135,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
         )
         self.checkpoint_dao = CheckpointDAOFactory.get_dao(self.environment)
 
-    def _load_training_matrix_for_oob(self, tree_type: str):
-        """
-        Ricarica il training set condiviso (self.train_data_path) riproducendo
-        ESATTAMENTE la stessa risoluzione della colonna target e lo stesso casting
-        usati da CentralizedWorker._load_data: è essenziale che l'ordine delle
-        righe risultante coincida con quello visto dai worker in fase di training,
-        perché gli indici OOB salvati su ogni albero sono posizionali rispetto a
-        QUELLA matrice.
-        """
-        dao = DatasetDAOFactory.get_dao(self.environment)
-        df = dao.load_dataset(self.train_data_path)
-
-        target_column = "Target" if tree_type == "regressor" else "Label"
-        actual_target = target_column if target_column in df.columns else (
-            "Target" if "Target" in df.columns else "Label"
-        )
-        feature_cols = [c for c in df.columns if c != actual_target]
-
-        X = df[feature_cols].to_numpy(dtype=np.float64)
-        y_df = df[actual_target]
-        if tree_type == "regressor":
-            y = y_df.to_numpy(dtype=np.float64)
-        else:
-            y = y_df.to_numpy(dtype=np.int64)
-        return X, y
-
     def _resolve_dataset_type(self, payload: dict) -> str:
         """Determina il tipo di dataset basandosi sul payload inviato dal Client."""
         dataset_type = payload.get("dataset_type")
@@ -152,7 +142,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             return str(dataset_type).strip().lower()
         return "real"
     
-    def _prepare_data(self, payload: dict, base_seed: int):
+    def _prepare_data(self, payload: dict, base_seed: int, num_shards: int = None):
         t0 = time.perf_counter()
         job_id = payload.get("job_id", "unknown_job")
         dataset_path = payload.get("dataset_path")
@@ -285,49 +275,147 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
-            train_data_path = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{job_id}.csv"
             test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{job_id}.csv"
         else:
-            train_data_path = f"./.local_storage/shared_train_{job_id}.csv"
             test_data_path = f"./.local_storage/shared_test_{job_id}.csv"
-            
+
         print(f"\n[{self.orchestrator_name}] Delega salvataggio a DatasetDAOFactory...")
         try:
             dao = DatasetDAOFactory.get_dao(self.environment)
-            dao.save_dataset(path=train_data_path, df=train_df)
+            # Il test set NON viene mai partizionato, indipendentemente dalla
+            # modalita': l'inferenza divide gli ALBERI tra worker (ogni worker
+            # valida l'intero test set con la propria fetta di alberi), non i
+            # dati - vedi _execute_inference_step. Nessuna ridondanza N-way
+            # da eliminare qui come invece accade per il training set.
             dao.save_dataset(path=test_data_path, df=test_df)
-            self.last_etl_seconds = time.perf_counter() - t0
-            print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
-            print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
 
-            # CACHE EFS (11/9/2026): scrittura best-effort, SOLO se
-            # EFS_MOUNT_PATH e' impostata (vedi orchestrator_ec2.tf) - se la
-            # variabile manca o la scrittura fallisce per qualunque motivo,
-            # non deve MAI far fallire il job: S3 sopra e' gia' il
-            # salvataggio canonico richiesto dalla traccia, questo e' solo
-            # un'ottimizzazione di velocita' per i worker che leggeranno lo
-            # stesso file (vedi dataset_dao.py per la logica di lettura/
-            # fallback lato worker). Solo train_df: e' quello che ogni
-            # worker scarica per il training (il collo di bottiglia
-            # misurato), non test_df (letto una sola volta dall'orchestrator
-            # stesso per l'inferenza, nessuna ridondanza da eliminare li').
-            efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
-            if efs_mount_path:
-                try:
-                    efs_cache_dir = os.path.join(efs_mount_path, "dataset_cache")
-                    os.makedirs(efs_cache_dir, exist_ok=True)
-                    efs_cache_path = os.path.join(efs_cache_dir, os.path.basename(train_data_path))
-                    # Scrittura atomica (tmp + replace): stesso pattern gia'
-                    # usato altrove nel progetto (es. BaseWorker._save_task_to_shared_storage)
-                    # per evitare che un worker legga un file a meta' scritto.
-                    tmp_path = f"{efs_cache_path}.tmp-{os.getpid()}"
-                    train_df.to_csv(tmp_path, index=False)
-                    os.replace(tmp_path, efs_cache_path)
-                    print(f"[{self.orchestrator_name}] [EFS] Cache scritta anche su "
-                          f"'{efs_cache_path}' (oltre a S3) per lettura veloce dai worker.")
-                except Exception as e_efs:
-                    print(f"[{self.orchestrator_name}] [EFS] [WARN] Scrittura cache fallita "
-                          f"({e_efs}) - i worker ricadranno su S3, nessun impatto sulla correttezza.")
+            if num_shards is not None and num_shards > 1:
+                # SHARDING DINAMICO (12/9/2026): seed fisso per riproducibilita'
+                # in entrambi i rami sotto. np.array_split copre l'INTERO
+                # array anche con resti non divisibili esattamente (es.
+                # 800000/3): ogni riga finisce in esattamente una fetta,
+                # nessuna persa o duplicata - vero per entrambi i rami.
+                print(f"[{self.orchestrator_name}] [SHARDING] Partizionamento train_df "
+                      f"({train_df.shape[0]} righe) in {num_shards} shard...")
+                rng = np.random.RandomState(base_seed)
+
+                if tree_type == "classifier":
+                    # STRATIFICATO (solo classificatore/reale, 12/9/2026):
+                    # shuffle e split SEPARATI per classe, poi distribuiti
+                    # proporzionalmente tra gli shard - invece di un unico
+                    # shuffle globale. Garantisce che ogni shard riceva
+                    # (quasi) esattamente la stessa proporzione di ciascuna
+                    # classe presente in train_df (gia' vicina a 1:1 grazie
+                    # all'undersampling a monte, vedi FASE 5 sopra), invece
+                    # di affidarsi alla sola probabilita' di uno shuffle non
+                    # stratificato. Il regressore (ramo else sotto) non ha
+                    # un concetto di classe: resta con lo shuffle puro.
+                    actual_target_shard = target_col if target_col in train_df.columns else (
+                        "Target" if "Target" in train_df.columns else "Label"
+                    )
+                    print(f"[{self.orchestrator_name}] [SHARDING] Split stratificato per classe "
+                          f"(target='{actual_target_shard}').")
+                    class_values = train_df[actual_target_shard].to_numpy()
+                    shard_indices = [np.array([], dtype=np.int64) for _ in range(num_shards)]
+                    for cls in np.unique(class_values):
+                        cls_positions = np.where(class_values == cls)[0]
+                        cls_shuffled = rng.permutation(cls_positions)
+                        cls_split = np.array_split(cls_shuffled, num_shards)
+                        for i in range(num_shards):
+                            shard_indices[i] = np.concatenate([shard_indices[i], cls_split[i]])
+                    # Rimescola ogni shard dopo la concatenazione per classe,
+                    # cosi' le righe non restano raggruppate per classe
+                    # all'interno dello shard (irrilevante per il training
+                    # dell'albero, solo per pulizia/uniformita').
+                    for i in range(num_shards):
+                        shard_indices[i] = rng.permutation(shard_indices[i])
+                else:
+                    # Regressore (sintetico): nessun concetto di classe da
+                    # rispettare - shuffle globale puro, split sequenziale
+                    # post-shuffle in num_shards fette.
+                    shuffled_idx = rng.permutation(train_df.shape[0])
+                    shard_indices = np.array_split(shuffled_idx, num_shards)
+
+                if self.environment == "aws":
+                    shard_paths = [
+                        f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{job_id}_shard_{i}.csv"
+                        for i in range(num_shards)
+                    ]
+                else:
+                    shard_paths = [
+                        f"./.local_storage/shared_train_{job_id}_shard_{i}.csv"
+                        for i in range(num_shards)
+                    ]
+
+                # Scrittura in PARALLELO, non sequenziale: stesso volume totale
+                # di byte del file unico di oggi, ma N upload concorrenti
+                # invece di uno solo - tiene il costo per-giro comparabile (o
+                # migliore) anche dovendo riscrivere gli shard ad ogni round
+                # di scaling (nessun riuso possibile tra round con
+                # worker_count diversi: il numero di shard cambia, quindi
+                # niente short-circuit qui, vedi _execute_training_step).
+                def _write_shard(i):
+                    shard_df = train_df.iloc[shard_indices[i]]
+                    dao.save_dataset(path=shard_paths[i], df=shard_df)
+                    return i
+
+                with ThreadPoolExecutor(max_workers=num_shards) as executor:
+                    futures = {executor.submit(_write_shard, i): i for i in range(num_shards)}
+                    for future in as_completed(futures):
+                        future.result()  # propaga eventuali eccezioni dei thread
+
+                self.last_etl_seconds = time.perf_counter() - t0
+                print(f"[DEBUG TIMING] _prepare_data (sharded, {num_shards} shard) completato in "
+                      f"{self.last_etl_seconds:.2f}s")
+                print(f"[{self.orchestrator_name}] [OK] {num_shards} shard di training + test set "
+                      f"archiviati correttamente.")
+
+                self.train_data_shards = shard_paths
+                self.train_data_path = None  # non usato in modalita' sharded
+            else:
+                if self.environment == "aws":
+                    train_data_path = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{job_id}.csv"
+                else:
+                    train_data_path = f"./.local_storage/shared_train_{job_id}.csv"
+                dao.save_dataset(path=train_data_path, df=train_df)
+                self.last_etl_seconds = time.perf_counter() - t0
+                print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
+                print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
+
+                # CACHE EFS (11/9/2026): scrittura best-effort, SOLO se
+                # EFS_MOUNT_PATH e' impostata (vedi orchestrator_ec2.tf) - se la
+                # variabile manca o la scrittura fallisce per qualunque motivo,
+                # non deve MAI far fallire il job: S3 sopra e' gia' il
+                # salvataggio canonico richiesto dalla traccia, questo e' solo
+                # un'ottimizzazione di velocita' per i worker che leggeranno lo
+                # stesso file (vedi dataset_dao.py per la logica di lettura/
+                # fallback lato worker). Solo train_df: e' quello che ogni
+                # worker scarica per il training (il collo di bottiglia
+                # misurato), non test_df (letto una sola volta dall'orchestrator
+                # stesso per l'inferenza, nessuna ridondanza da eliminare li').
+                # SOLO modalita' 'shared': in modalita' 'sharded' ogni worker
+                # legge una fetta DIVERSA, non c'e' ridondanza N-way da
+                # eliminare con una cache condivisa nello stesso modo.
+                efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
+                if efs_mount_path:
+                    try:
+                        efs_cache_dir = os.path.join(efs_mount_path, "dataset_cache")
+                        os.makedirs(efs_cache_dir, exist_ok=True)
+                        efs_cache_path = os.path.join(efs_cache_dir, os.path.basename(train_data_path))
+                        # Scrittura atomica (tmp + replace): stesso pattern gia'
+                        # usato altrove nel progetto (es. BaseWorker._save_task_to_shared_storage)
+                        # per evitare che un worker legga un file a meta' scritto.
+                        tmp_path = f"{efs_cache_path}.tmp-{os.getpid()}"
+                        train_df.to_csv(tmp_path, index=False)
+                        os.replace(tmp_path, efs_cache_path)
+                        print(f"[{self.orchestrator_name}] [EFS] Cache scritta anche su "
+                              f"'{efs_cache_path}' (oltre a S3) per lettura veloce dai worker.")
+                    except Exception as e_efs:
+                        print(f"[{self.orchestrator_name}] [EFS] [WARN] Scrittura cache fallita "
+                              f"({e_efs}) - i worker ricadranno su S3, nessun impatto sulla correttezza.")
+
+                self.train_data_path = train_data_path
+                self.train_data_shards = None
 
             # Stessa motivazione di 'del df_full' sopra: train_df/test_df sono
             # copie potenzialmente grandi (fino a ~800MB combinate per lo
@@ -339,36 +427,95 @@ class CentralizedOrchestrator(BaseOrchestrator):
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
         self.current_job_id = job_id
-        self.train_data_path = train_data_path
         self.test_data_path = test_data_path
 
-    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int, skip_oob: bool = True) -> int:
+    def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
         """
         Esegue lo step di addestramento distribuito centralizzato.
         Restituisce il numero REALE di alberi totali validati e salvati con successo.
 
-        skip_oob: se True (default, dal 12/9/2026), salta la stima
-        Out-Of-Bag a fine training (vedi blocco "STIMA OOB" più sotto).
-        DEFAULT CAMBIATO da False a True: le metriche di accuratezza
-        finali (accuracy_metrics nei report) vengono SEMPRE dall'inferenza
-        reale su un test set separato, mai dall'OOB - esattamente lo
-        stesso ruolo che l'OOB ha nella baseline locale
-        (run_baseline.py, optuna_oob_hyperparameter_search): solo proxy
-        economico per il TUNING degli iperparametri, mai usata per la
-        valutazione finale del modello. Calcolarla di default nel training
-        "normale" era quindi un costo pagato per un dato che nessun
-        consumatore del sistema legge mai. Chi ne avesse davvero bisogno
-        (es. un futuro percorso di tuning lato distribuito, analogo a
-        quello della baseline) può ancora richiederla esplicitamente
-        passando skip_oob=False. Costo se calcolata: ~150s+ osservati
-        empiricamente con il metodo sequenziale (10/9/2026), o il costo
-        dei contributi .predict() per-albero se si usa il metodo
-        distribuito (12/9/2026, solo regressore/centralized, vedi
-        BaseOrchestrator._compute_oob_metrics_distributed).
+        NOTA (12/9/2026): la stima Out-Of-Bag è stata rimossa interamente da
+        questo metodo (era presente come funzionalità opzionale, poi col
+        default per saltarla, ora rimossa del tutto). Le metriche di
+        accuratezza finali (accuracy_metrics nei report) vengono sempre
+        dall'inferenza reale su un test set separato, mai dall'OOB -
+        calcolarla non serviva a nessun consumatore del sistema.
         """
         expected_job_id = payload.get("job_id", "unknown_job")
+
+        # SHARDING DINAMICO (12/9/2026): toggle via env var, default 'shared'
+        # (comportamento identico a sempre). In modalita' 'sharded', il
+        # numero di shard = numero di worker rilevati IN QUESTO MOMENTO -
+        # serve quindi conoscerli PRIMA di generare/scrivere il dataset,
+        # a differenza della modalita' 'shared' dove l'ordine resta invariato
+        # (ETL, poi scoperta worker piu' sotto, invariata).
+        dataset_mode = os.environ.get("CENTRALIZED_DATASET_MODE", "shared").strip().lower()
+        sharded_mode = dataset_mode == "sharded"
+        early_num_workers = None
+        if sharded_mode:
+            print(f"[{self.orchestrator_name}] [SHARDING] Modalita' 'sharded' attiva - "
+                  f"scopro i worker PRIMA dell'ETL per sapere in quante fette partizionare.")
+            while True:
+                early_workers = ServiceRegistry.get_available_workers(self.environment)
+                if early_workers:
+                    early_num_workers = len(early_workers)
+                    print(f"[{self.orchestrator_name}] [SHARDING] {early_num_workers} worker rilevati "
+                          f"-> il dataset verra' partizionato in altrettante fette.")
+                    break
+                print(f"[{self.orchestrator_name}] [SHARDING] Nessun worker disponibile per la scoperta "
+                      f"anticipata. In attesa...")
+                time.sleep(10)
+
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
-        if self.train_data_path is None or self.current_job_id != expected_job_id:
+        if sharded_mode:
+            # Short-circuit basato su STORAGE (12/9/2026), non solo in-memoria:
+            # costruisce i path attesi per gli shard (stessa convenzione di
+            # _prepare_data) e controlla se esistono GIA' su storage. Questo
+            # copre DUE casi in un colpo solo:
+            #   1) round successivi sullo stesso job con lo stesso numero di
+            #      worker (stesso motivo della vecchia guardia in-memoria);
+            #   2) FAILOVER dell'orchestratore: un nuovo standby che prende
+            #      il comando e' un processo Python nuovo (self.train_data_shards
+            #      = None per costruzione, vedi __init__) - senza un controllo
+            #      su storage, pagherebbe sempre un re-sharding completo da
+            #      zero anche se gli shard del leader morto sono ancora li'
+            #      su S3, mentre la modalita' 'shared' lo evita gia' col suo
+            #      short-circuit (vedi ramo elif sotto) - BUCO TROVATO E
+            #      CHIUSO qui, non presente nella prima versione di oggi.
+            if self.environment == "aws":
+                expected_shards = [
+                    f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}_shard_{i}.csv"
+                    for i in range(early_num_workers)
+                ]
+                expected_test_sharded = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{expected_job_id}.csv"
+            else:
+                expected_shards = [
+                    f"./.local_storage/shared_train_{expected_job_id}_shard_{i}.csv"
+                    for i in range(early_num_workers)
+                ]
+                expected_test_sharded = f"./.local_storage/shared_test_{expected_job_id}.csv"
+
+            dao_check = DatasetDAOFactory.get_dao(self.environment)
+            # N chiamate exists() (head_object, non download): costo
+            # trascurabile (decine di ms l'una) rispetto alle centinaia di
+            # secondi di un re-sharding completo evitato nel caso migliore.
+            all_shards_exist = (
+                all(dao_check.exists(p) for p in expected_shards)
+                and dao_check.exists(expected_test_sharded)
+            )
+
+            if all_shards_exist:
+                print(f"[{self.orchestrator_name}] [SHARDING] [SHORT-CIRCUIT] {early_num_workers} shard "
+                      f"già presenti su storage per questo job (round successivo, o ripresa dopo un "
+                      f"failover dell'orchestratore) - nessuna rigenerazione.")
+                self.train_data_shards = expected_shards
+                self.train_data_path = None
+                self.test_data_path = expected_test_sharded
+                self.current_job_id = expected_job_id
+                self.last_etl_seconds = 0.0
+            else:
+                self._prepare_data(payload, seed, num_shards=early_num_workers)
+        elif self.train_data_path is None or self.current_job_id != expected_job_id:
             if self.environment == "aws":
                 expected_train = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}.csv"
                 expected_test = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{expected_job_id}.csv"
@@ -383,6 +530,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 self.train_data_path = expected_train
                 self.test_data_path = expected_test
                 self.current_job_id = expected_job_id
+                # Sicurezza contro stati stantii: se un job PRECEDENTE era in
+                # modalita' sharded, self.train_data_shards potrebbe ancora
+                # contenere path vecchi - azzerato esplicitamente qui, dato
+                # che siamo nel ramo 'shared' (sharded_mode=False).
+                self.train_data_shards = None
             else:
                 self._prepare_data(payload, seed)
         checkpoint_trees_path = self._resolve_trees_checkpoint_path(self.current_job_id)
@@ -537,18 +689,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
             results_lock = threading.Lock()
 
-            # OOB DISTRIBUITA (12/9/2026): traccia i seed dei task completati
-            # CON SUCCESSO (aggiunti solo dopo l'ack, vedi sotto) - servono
-            # per andare a ritrovare i contributi OOB persistiti dai worker
-            # (uno per task, vedi BaseWorker.exposed_train_subset_forest).
-            # Lock dedicato invece di riusare results_lock: questa lista viene
-            # scritta in un punto diverso (subito dopo l'ack, PRIMA della
-            # ricomposizione degli alberi) da dove results_lock protegge
-            # 'all_trained_trees' - tenerli separati evita di allargare la
-            # sezione critica di results_lock senza motivo.
-            completed_task_seeds = []
-            completed_task_seeds_lock = threading.Lock()
-
             # Lock DEDICATO alla persistenza del checkpoint, separato da
             # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
             # cioè dentro la stessa sezione critica che serve ad accodare gli
@@ -624,8 +764,22 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         try:
                             self.chunk_sent_event.set()
 
+                            # SHARDING DINAMICO: se attivo, ogni task riceve la
+                            # fetta corrispondente a 'task_id % numero di shard'
+                            # invece del dataset intero fisso. Il task_id
+                            # sopravvive INTATTO al riaccodamento in caso di
+                            # guasto (vedi 'task_queue.put((task_id, ...))' più
+                            # sotto nel blocco except): un worker che ne
+                            # sostituisce un altro morto ricalcola lo stesso
+                            # identico shard, nessuna modifica necessaria alla
+                            # logica di fault tolerance esistente.
+                            if self.train_data_shards:
+                                task_source_info = self.train_data_shards[task_id % len(self.train_data_shards)]
+                            else:
+                                task_source_info = source_info
+
                             ack_raw = worker_conn.root.train_subset_forest(
-                                source_info=source_info,
+                                source_info=task_source_info,
                                 num_trees=quota_chunk,       
                                 base_seed=chunk_seed,    
                                 max_depth=max_depth,
@@ -635,17 +789,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 class_weight=class_weight,
                                 criterion=criterion,
                                 bootstrap=bootstrap,
-                                max_samples=max_samples,
-                                # BUGFIX (12/9/2026): senza questo, il worker
-                                # accumulava SEMPRE i contributi OOB (costo
-                                # .predict() per albero) indipendentemente da
-                                # skip_oob - il parametro controllava solo se
-                                # l'Orchestratore CONSUMAVA il risultato a fine
-                                # training, non se il worker lo CALCOLAVA
-                                # durante. Il costo restava quindi sempre
-                                # presente in training_only_seconds anche con
-                                # skip_oob=True (default dal 12/9/2026).
-                                compute_oob=(not skip_oob)
+                                max_samples=max_samples
                             )
 
                             # Il worker NON restituisce più il blob degli alberi
@@ -662,20 +806,6 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                     f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                                 )
 
-                            # OOB DISTRIBUITA: registra il seed SOLO se il worker conferma
-                            # di aver persistito il proprio contributo OOB (oob_ready=True).
-                            # Un worker su una versione precedente del codice, o che non
-                            # supporta l'accumulo (tree_type != regressor), semplicemente
-                            # non include questo campo (dict.get -> default False) - nessun
-                            # errore, il job prosegue comunque, solo senza quel contributo
-                            # (la stima OOB distribuita a fine training vedra' 'ci sono
-                            # meno seed completati del previsto' solo se il conteggio totale
-                            # di task non combacia, ma qui tracciamo per task realmente
-                            # riuscito quindi anche questo resta coerente).
-                            if ack.get("oob_ready"):
-                                with completed_task_seeds_lock:
-                                    completed_task_seeds.append(chunk_seed)
-
                             # FIX: l'Orchestratore ricomponeva l'INTERO task in un
                             # colpo solo (load_task_trees_from_shared_storage), con
                             # 'tree_reconstruction_lock' a serializzare la
@@ -691,7 +821,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             # scende alla dimensione di UN batch worker, costante
                             # indipendentemente da quanto è grande CHUNK_SIZE.
                             part_iter = iter_task_parts_as_tree_lists(
-                                source_info, chunk_seed, quota_chunk,
+                                task_source_info, chunk_seed, quota_chunk,
                                 self.environment, self.orchestrator_name
                             )
                             received_any_part = False
@@ -1016,81 +1146,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 del all_trained_trees
                 gc.collect()
 
-                # ─── STIMA OOB (Breiman, 2001), "gratis" e non bloccante ───
-                # Se fallisce per qualunque motivo, non deve invalidare un training
-                # già completato e salvato con successo: solo log, nessun raise.
-                if not skip_oob:
-                    oob_start = time.perf_counter()
-                    try:
-                        # OOB DISTRIBUITA (12/9/2026): provata PRIMA del metodo
-                        # sequenziale originale. Se i worker hanno persistito i
-                        # propri contributi (tree_type=="regressor", vedi
-                        # BaseWorker), sommarli costa O(n_train_rows * n_task)
-                        # invece di richiamare .predict() su OGNI albero in
-                        # sequenza sull'Orchestratore (146-159s misurati,
-                        # indipendenti dal numero di worker - il vero motivo
-                        # per cui la OOB non scala oggi). ATTENZIONE: il
-                        # ricaricamento sotto (_load_training_matrix_for_oob)
-                        # NON è più leggero di prima - scarica comunque
-                        # l'intero CSV (~26-32s misurati) e scarta le feature,
-                        # tenendo solo target. Il guadagno di questo percorso
-                        # è SOLO l'eliminazione del loop .predict() sequenziale,
-                        # non del ricaricamento stesso - resterebbe un margine
-                        # ulteriore se in futuro si aggiungesse un metodo DAO
-                        # per caricare una sola colonna invece dell'intero file.
-                        oob_metrics = None
-                        if tree_type == "regressor" and completed_task_seeds:
-                            try:
-                                _, y_train_for_oob = self._load_training_matrix_for_oob(tree_type)
-                                oob_metrics = self._compute_oob_metrics_distributed(
-                                    job_id=self.current_job_id,
-                                    task_seeds=completed_task_seeds,
-                                    y_train=y_train_for_oob,
-                                    n_train_rows=y_train_for_oob.shape[0],
-                                    environment=self.environment
-                                )
-                            except Exception as e_oob_dist:
-                                print(f"   [{self.orchestrator_name}] [OOB-DISTRIBUTED] Tentativo fallito "
-                                      f"({e_oob_dist}) - ricado sul metodo sequenziale.")
-                                oob_metrics = None
-
-                        if oob_metrics is None:
-                            # Fallback: metodo sequenziale originale, invariato.
-                            # Ricopre sia il caso classificatore (mai tentato
-                            # in modalita' distribuita, vedi nota in BaseWorker)
-                            # sia qualunque fallimento del percorso distribuito
-                            # sopra (nessun contributo trovato, worker su
-                            # codice precedente, errore di lettura, ecc.).
-                            X_train_oob, y_train_oob = self._load_training_matrix_for_oob(tree_type)
-                            oob_metrics = self._compute_oob_metrics(
-                                tree_source=lambda: self._iter_checkpoint_trees(self.current_job_id),
-                                X_train=X_train_oob,
-                                y_train=y_train_oob,
-                                tree_type=tree_type
-                            )
-                        if oob_metrics is not None:
-                            self._save_metrics(self.current_job_id, "training_oob", {
-                                "job_id": self.current_job_id, "mode": "centralized", "phase": "training_oob",
-                                "tree_type": tree_type, "n_estimators": n_trees_for_report,
-                                "metrics": oob_metrics
-                            })
-                    except Exception as e_oob:
-                        print(f"   [{self.orchestrator_name}] [OOB-WARN] Stima OOB fallita (training non impattato): {e_oob}")
-                    finally:
-                        # Cronometrata anche in caso di fallimento: se l'OOB si
-                        # interrompe a metà, il tempo speso è comunque reale e non
-                        # va attribuito silenziosamente all'addestramento.
-                        self.last_oob_seconds = time.perf_counter() - oob_start
-                        print(f"[DEBUG TIMING] Stima OOB (ricarica training set + predizioni): "
-                              f"{self.last_oob_seconds:.2f}s.")
-                else:
-                    # last_oob_seconds resta 0.0 (già azzerato a inizio metodo,
-                    # riga ~450): nessun bisogno di riassegnarlo qui, ma un log
-                    # esplicito evita che chi legge i log si chieda perché
-                    # manchi la riga "[OOB-WARN]"/"Stima OOB" che si aspetta di vedere.
-                    print(f"[{self.orchestrator_name}] [OOB] Saltata su richiesta esplicita (skip_oob=True) "
-                          f"- scenario di solo timing/resilienza, non di accuratezza.")
-
+                # NOTA (12/9/2026): la stima OOB è stata rimossa interamente
+                # (era qui, con un fallback sequenziale + un percorso
+                # distribuito sperimentale). last_oob_seconds resta 0.0 dal
+                # reset a inizio metodo - nessun ricalcolo necessario.
                 print(f"[DEBUG TIMING] Riepilogo _execute_training_step -> "
                       f"ETL {self.last_etl_seconds:.2f}s | costruzione alberi "
                       f"{self.last_dispatch_seconds:.2f}s | aggregazione "

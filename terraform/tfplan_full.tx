@@ -1,53 +1,53 @@
 data.archive_file.rf_gateway_lambda: Reading...
 data.archive_file.rf_gateway_lambda: Read complete after 0s [id=c536cdf52a06e7ccabfd7caef5a0b2455060fa3f]
 data.aws_vpc.default: Reading...
-data.aws_region.current: Reading...
-data.aws_caller_identity.current: Reading...
-data.aws_iam_role.lab_role: Reading...
 aws_apigatewayv2_api.mljobs: Refreshing state... [id=erm0hah4h4]
 aws_ecr_repository.rf_distributed: Refreshing state... [id=rf-distributed]
-aws_dynamodb_table.workers_registry: Refreshing state... [id=workers_registry]
-aws_dynamodb_table.model_status: Refreshing state... [id=ModelStatus]
 aws_efs_file_system.dataset_cache: Refreshing state... [id=fs-0139b75e095f6abf1]
-aws_sqs_queue.federated_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/383056860320/federated_queue.fifo]
-data.aws_region.current: Read complete after 0s [id=us-east-1]
-aws_sqs_queue.centralized_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/383056860320/centralized_queue.fifo]
-data.aws_caller_identity.current: Read complete after 0s [id=383056860320]
-aws_dynamodb_table.orchestrators_registry: Refreshing state... [id=orchestrators_registry]
-aws_dynamodb_table.job_meta_data: Refreshing state... [id=JobMetadata]
-data.aws_iam_role.lab_role: Read complete after 1s [id=LabRole]
 aws_ecs_cluster.forest_cluster: Refreshing state... [id=arn:aws:ecs:us-east-1:383056860320:cluster/forest-cluster]
-aws_dynamodb_table.orchestrator_locks: Refreshing state... [id=OrchestratorLocks]
+aws_dynamodb_table.model_status: Refreshing state... [id=ModelStatus]
 aws_dynamodb_table.job_locks: Refreshing state... [id=JobLocks]
+aws_dynamodb_table.orchestrator_locks: Refreshing state... [id=OrchestratorLocks]
+aws_dynamodb_table.orchestrators_registry: Refreshing state... [id=orchestrators_registry]
 aws_dynamodb_table.worker_tasks: Refreshing state... [id=WorkerTasks]
+aws_dynamodb_table.job_meta_data: Refreshing state... [id=JobMetadata]
+data.aws_caller_identity.current: Reading...
+data.aws_caller_identity.current: Read complete after 0s [id=383056860320]
+aws_sqs_queue.federated_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/383056860320/federated_queue.fifo]
+data.aws_region.current: Reading...
+data.aws_region.current: Read complete after 0s [id=us-east-1]
+aws_dynamodb_table.workers_registry: Refreshing state... [id=workers_registry]
+aws_sqs_queue.centralized_queue: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/383056860320/centralized_queue.fifo]
+data.aws_iam_role.lab_role: Reading...
 aws_apigatewayv2_stage.default: Refreshing state... [id=$default]
-null_resource.docker_build_push: Refreshing state... [id=2001525445982327851]
-aws_lambda_function.rf_gateway: Refreshing state... [id=RFGatewayLambda]
+null_resource.docker_build_push: Refreshing state... [id=928659313860230084]
 data.aws_vpc.default: Read complete after 1s [id=vpc-0127ff888dfc3014b]
-data.aws_subnets.orchestrator_capable: Reading...
 data.aws_subnets.public: Reading...
+data.aws_subnets.orchestrator_capable: Reading...
 aws_security_group.rf_distributed: Refreshing state... [id=sg-0c87fb1be1f6f7d0f]
-data.aws_subnets.public: Read complete after 1s [id=us-east-1]
-data.aws_subnets.orchestrator_capable: Read complete after 1s [id=us-east-1]
-aws_security_group_rule.egress_all: Refreshing state... [id=sgrule-3279948649]
+data.aws_subnets.public: Read complete after 0s [id=us-east-1]
+data.aws_iam_role.lab_role: Read complete after 0s [id=LabRole]
+data.aws_subnets.orchestrator_capable: Read complete after 0s [id=us-east-1]
+aws_lambda_function.rf_gateway: Refreshing state... [id=RFGatewayLambda]
 aws_security_group_rule.efs_nfs_self_ingress: Refreshing state... [id=sgrule-1126720659]
-aws_efs_mount_target.dataset_cache["subnet-0d26cb0a2c791dc06"]: Refreshing state... [id=fsmt-03511269af0a559f9]
-aws_efs_mount_target.dataset_cache["subnet-0e374722e1ec81b09"]: Refreshing state... [id=fsmt-0ab750481fb1c7654]
-aws_efs_mount_target.dataset_cache["subnet-0cffa5e0ffebda472"]: Refreshing state... [id=fsmt-0ca04716d30f31e72]
+aws_security_group_rule.egress_all: Refreshing state... [id=sgrule-3279948649]
 aws_security_group_rule.rpc_self_ingress: Refreshing state... [id=sgrule-1629794204]
+aws_efs_mount_target.dataset_cache["subnet-0cffa5e0ffebda472"]: Refreshing state... [id=fsmt-0ca04716d30f31e72]
+aws_efs_mount_target.dataset_cache["subnet-0d26cb0a2c791dc06"]: Refreshing state... [id=fsmt-03511269af0a559f9]
+aws_launch_template.orchestrator: Refreshing state... [id=lt-02f4b5d1613c4cff3]
+aws_efs_mount_target.dataset_cache["subnet-0e374722e1ec81b09"]: Refreshing state... [id=fsmt-0ab750481fb1c7654]
 aws_efs_mount_target.dataset_cache["subnet-05d44fae2ace97a12"]: Refreshing state... [id=fsmt-069750eb20e4a70fe]
 aws_efs_mount_target.dataset_cache["subnet-0ceaf38169fcf556a"]: Refreshing state... [id=fsmt-032dc9e1cb207f737]
-aws_launch_template.orchestrator: Refreshing state... [id=lt-02f4b5d1613c4cff3]
 aws_efs_mount_target.dataset_cache["subnet-0e67552278ca55e51"]: Refreshing state... [id=fsmt-0d07df9e7e097bb51]
-aws_lambda_permission.apigw_invoke: Refreshing state... [id=AllowAPIGatewayInvoke]
-aws_apigatewayv2_integration.rf_gateway: Refreshing state... [id=zw2fogt]
-aws_apigatewayv2_route.post_centralized: Refreshing state... [id=j0gn6w1]
-aws_apigatewayv2_route.get_status: Refreshing state... [id=yvyorc5]
-aws_apigatewayv2_route.post_federated: Refreshing state... [id=45kt96u]
-aws_apigatewayv2_route.get_details: Refreshing state... [id=9qq7fw7]
 aws_ecs_task_definition.worker_centralized[0]: Refreshing state... [id=lab-worker-task]
 aws_autoscaling_group.orchestrator: Refreshing state... [id=orchestrator-asg]
+aws_lambda_permission.apigw_invoke: Refreshing state... [id=AllowAPIGatewayInvoke]
+aws_apigatewayv2_integration.rf_gateway: Refreshing state... [id=zw2fogt]
 aws_ecs_service.worker_centralized[0]: Refreshing state... [id=arn:aws:ecs:us-east-1:383056860320:service/forest-cluster/worker-service]
+aws_apigatewayv2_route.post_federated: Refreshing state... [id=45kt96u]
+aws_apigatewayv2_route.get_details: Refreshing state... [id=9qq7fw7]
+aws_apigatewayv2_route.post_centralized: Refreshing state... [id=j0gn6w1]
+aws_apigatewayv2_route.get_status: Refreshing state... [id=yvyorc5]
 
 Terraform used the selected providers to generate the following execution
 plan. Resource actions are indicated with the following symbols:
@@ -57,9 +57,9 @@ Terraform will perform the following actions:
 
   # null_resource.docker_build_push must be replaced
 -/+ resource "null_resource" "docker_build_push" {
-      ~ id       = "2001525445982327851" -> (known after apply)
+      ~ id       = "928659313860230084" -> (known after apply)
       ~ triggers = { # forces replacement
-          ~ "src_hash"        = "a06b1a082834fce01fb32b79cc87d50b5d04ae40" -> "16a0c53e141268ce17602607c5884106afcf6725"
+          ~ "src_hash"        = "72fcc17b8c4bc1e74c6d8f836f170803ed5bcdb1" -> "c8f380f12c5f2fd0e9293ef8e26c5b12b4e04ab6"
             # (2 unchanged elements hidden)
         }
     }

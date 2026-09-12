@@ -8,13 +8,19 @@ set -e
 
 REGION="us-east-1"
 CLUSTER_NAME="forest-cluster"
-DATASETS_BUCKET_NAME="rf-distributed-datasets-378857401407-us-east-1"
 
 # ---------------------------------------------------------------------
-# Rilevamento della modalità corrente dal .env, con la stessa priorità
-# usata da Terraform (TRAINING_MODE > default "centralized").
-# Serve solo per --purge-legacy-mode: capire quali service NON
-# appartengono alla modalità attualmente in uso.
+# Rilevamento di TRAINING_MODE e DATASETS_BUCKET_NAME dal .env, con la
+# stessa priorità usata da Terraform (TRAINING_MODE > default "centralized").
+# BUGFIX (12/9/2026): DATASETS_BUCKET_NAME era hardcoded su un account
+# AWS Academy Learner Lab precedente (le sessioni Learner Lab durano
+# ~4h, l'account cambia ad ogni nuovo Lab avviato) - il teardown
+# sembrava riuscire (nessun errore fatale, solo il fallback silenzioso
+# '|| echo' alle righe di pulizia S3 più sotto) ma in realtà non
+# ripuliva MAI il bucket realmente in uso. Ora: letto dal .env se
+# presente (stessa fonte di verità di run_test_engine.sh/deploy.sh),
+# altrimenti derivato dall'account ID corrente via STS - mai più
+# hardcoded.
 # ---------------------------------------------------------------------
 ENV_FILE=".env"
 if [ -f "$ENV_FILE" ]; then
@@ -24,10 +30,26 @@ if [ -f "$ENV_FILE" ]; then
   }
   ENV_TRAINING_MODE=$(get_env_var "TRAINING_MODE")
   TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
+  ENV_BUCKET_NAME=$(get_env_var "DATASETS_BUCKET_NAME")
 else
   echo "==> [ATTENZIONE] File $ENV_FILE non trovato: assumo TRAINING_MODE=centralized per --purge-legacy-mode."
   TRAINING_MODE="centralized"
+  ENV_BUCKET_NAME=""
 fi
+
+if [ -n "$ENV_BUCKET_NAME" ]; then
+  DATASETS_BUCKET_NAME="$ENV_BUCKET_NAME"
+else
+  echo "==> [ATTENZIONE] DATASETS_BUCKET_NAME non trovato nel .env: lo derivo dall'account AWS corrente."
+  CURRENT_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$REGION" 2>/dev/null || echo "")
+  if [ -z "$CURRENT_ACCOUNT_ID" ]; then
+    echo "[ERRORE] Impossibile determinare il bucket: DATASETS_BUCKET_NAME assente dal .env"
+    echo "         e credenziali AWS non valide per derivarlo dall'account corrente."
+    exit 1
+  fi
+  DATASETS_BUCKET_NAME="rf-distributed-datasets-${CURRENT_ACCOUNT_ID}-${REGION}"
+fi
+echo "    Bucket target per la pulizia S3: $DATASETS_BUCKET_NAME"
 
 echo "==> [1/6] Arresto di eventuali task one-off del test-engine ancora attivi..."
 STRAY_ENGINE_TASKS=$(aws ecs list-tasks --cluster "$CLUSTER_NAME" \
@@ -288,11 +310,19 @@ done
 #
 # Prefissi PULITI ad ogni teardown (dati temporanei/di run, rigenerabili
 # automaticamente al prossimo test):
-#   - distributed_trains/  (chunk di training caricati per il job)
+#   - distributed_trains/  (chunk di training caricati per il job, inclusi
+#                            gli shard '_shard_N.csv' dal 12/9/2026: stesso
+#                            prefisso padre, nessuna riga aggiuntiva serviva)
 #   - distributed_tests/   (chunk di test caricati per il job)
 #   - tasks/                (stato/metadati dei singoli task RPC)
 #   - checkpoints/          (normalmente auto-pulito a fine job riuscito,
 #                            qui ripuliamo eventuali orfani da job falliti/interrotti)
+#   - oob_contributions/    (12/9/2026: codice morto, la stima OOB
+#                            distribuita e' stata rimossa interamente da
+#                            centralized.py/BaseWorker.py/BaseOrchestrator.py
+#                            - nessun nuovo file verra' mai piu' scritto qui,
+#                            pulito solo per rimuovere eventuali residui di
+#                            test precedenti a quella rimozione)
 #
 # Prefissi SALVAGUARDATI di default (mai toccati da questo script):
 #   - real/                 dataset sorgente
@@ -304,7 +334,7 @@ done
 #   - metrics/, test_reports/  risultati dei test, servono per i confronti
 # ---------------------------------------------------------------------
 echo "==> [6/6] Pulizia degli artefatti temporanei di test su S3..."
-for prefix in "distributed_trains/" "distributed_tests/" "tasks/" "checkpoints/"; do
+for prefix in "distributed_trains/" "distributed_tests/" "tasks/" "checkpoints/" "oob_contributions/"; do
   aws s3 rm "s3://$DATASETS_BUCKET_NAME/$prefix" --recursive --region "$REGION" > /dev/null 2>&1 \
     && echo "    Ripulito: $prefix" \
     || echo "    (${prefix}: già vuoto o non presente)"
