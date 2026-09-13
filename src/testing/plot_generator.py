@@ -469,7 +469,8 @@ class PlotGenerator:
 
         def sort_key(r):
             trees = self._trees_per_scale(r) or 0
-            return (self.ENV_PRIORITY.index(r["env"]), trees, r["file"])
+            variant = self._variant_tag_from_filename(r["file"], trees)
+            return (self.ENV_PRIORITY.index(r["env"]), trees, r.get("mode") or "", variant, r["file"])
 
         return sorted(candidates, key=sort_key)
 
@@ -480,10 +481,26 @@ class PlotGenerator:
         e' l'informazione che conta davvero (e' cio' che rende due run non
         confrontabili); se non e' deducibile dalla scenario_description si
         ripiega su ambiente + nome file, che restano comunque univoci.
+
+        Include ANCHE la modalita' (federated/centralized), se nota, e il tag
+        di variante generico ricavato dal nome del file: due run con lo
+        stesso numero di alberi ma modalita' o esperimento diversi (es.
+        '..._federato_200_alberi.json' vs '..._centralizzato_200_alberi.json',
+        oppure '..._shared_200_alberi.json' vs '..._sharded_200_alberi.json')
+        devono restare distinguibili nel nome del PNG, anche se quella parola
+        NON compare di nuovo nel sottotitolo (vedi _variant_label, che la
+        toglie apposta per non ripeterla lì).
         """
         trees = self._trees_per_scale(run)
         if trees:
-            return f"{trees}_alberi"
+            suffix = f"{trees}_alberi"
+            mode = run.get("mode")
+            if mode and mode != "unknown":
+                suffix += f"_{mode}"
+            variant = self._variant_tag_from_filename(run["file"], trees)
+            if variant:
+                suffix += f"_{variant}"
+            return suffix
         return f"{run['env']}_{os.path.splitext(run['file'])[0]}"
 
     @staticmethod
@@ -1152,10 +1169,19 @@ class PlotGenerator:
         # configurazioni testate sono 1,3,5,7 e non vanno interpolate con 2,4,6.
         ax.set_xticks(workers)
         ax.set_xticklabels([str(int(w)) for w in workers])
-        ceiling_values = [float(totals.max())] + reference_values
-        if instrumented and all(v is not None for v in only):
+        # L'asse Y si dimensiona solo su cio' che e' EFFETTIVAMENTE disegnato
+        # (curva "soli alberi" + riferimenti baseline): 'totals' (tempo
+        # totale) non e' piu' plottato, quindi non deve piu' influenzare la
+        # scala, o il grafico si allarga per fare spazio a una curva invisibile.
+        only_drawn = instrumented and all(v is not None for v in only)
+        ceiling_values = list(reference_values)
+        if only_drawn:
             ceiling_values.append(float(np.array(only, dtype=float).max()))
-        ceiling = max(ceiling_values)
+        else:
+            # Nessuna curva disegnata a parte i riferimenti: usiamo 'totals'
+            # solo come ripiego per non lasciare l'asse vuoto.
+            ceiling_values.append(float(totals.max()))
+        ceiling = max(ceiling_values) if ceiling_values else 1.0
         ax.set_ylim(0, ceiling * 1.22)
         ax.legend(loc="upper right")
         ax.set_axisbelow(True)
@@ -1163,6 +1189,9 @@ class PlotGenerator:
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
+        variant = self._variant_label(run)
+        if variant:
+            subtitle += f" ({variant})"
         self._titles(fig, ax, "Strong scaling: tempo di addestramento a carico costante", subtitle)
         self._footnote(fig, "Il divario fra curva misurata e curva ideale e' l'overhead "
                             "distribuito: parte seriale (ETL, aggregazione, OOB) piu' costo "
@@ -1179,6 +1208,40 @@ class PlotGenerator:
             if token.isdigit():
                 return int(token)
         return None
+
+    @staticmethod
+    def _variant_tag_from_filename(filename: str, trees=None) -> str:
+        """
+        Estrae dal nome del file cio' che lo distingue da altri file con lo
+        STESSO numero di alberi: si tolgono le parole di servizio ('test',
+        'report', 'scalability'/'scalabilita'', 'alberi'), l'estensione e il
+        numero di alberi stesso (gia' rappresentato altrove nel suffisso).
+
+        Serve a evitare che file con carico identico ma esperimento diverso -
+        es. 'test_scalability_shared_200_alberi.json' e
+        'test_scalability_sharded_200_alberi.json' - producano lo stesso nome
+        di grafico ('sdcc_01_strong_scaling_200_alberi.png'), col secondo file
+        processato che sovrascrive silenziosamente i grafici del primo.
+        """
+        stem = os.path.splitext(os.path.basename(filename))[0].lower()
+        boilerplate = {"test", "report", "scalability", "scalabilita", "alberi", "tree", "trees",
+                       # Gia' mostrate nel sottotitolo da _env_subtitle() tramite
+                       # _infer_mode_from_filename(): includerle anche nel tag di
+                       # variante le farebbe comparire due volte nello stesso titolo.
+                       "centralized", "centralizzato", "federated", "federato"}
+        kept = []
+        for token in stem.split("_"):
+            if not token or token in boilerplate:
+                continue
+            if token.isdigit() and trees is not None and int(token) == int(trees):
+                continue
+            kept.append(token)
+        return "_".join(kept)
+
+    def _variant_label(self, run) -> str:
+        """Etichetta leggibile della variante, per i sottotitoli dei grafici (vuota se non distinguibile)."""
+        variant = self._variant_tag_from_filename(run["file"], self._trees_per_scale(run))
+        return variant.replace("_", " ") if variant else ""
 
     def plot_speedup_and_efficiency(self):
         """
@@ -1250,6 +1313,9 @@ class PlotGenerator:
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
+        variant = self._variant_label(run)
+        if variant:
+            subtitle += f" ({variant})"
         fig.suptitle(f"Scalabilita' del sistema distribuito - {subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._save(fig, f"sdcc_02_speedup_efficienza_{suffix}.png")
@@ -1338,7 +1404,9 @@ class PlotGenerator:
                    for p in phases]
         fig.legend(handles=handles, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.14),
                    frameon=True)
-        fig.suptitle(f"Scomposizione del tempo di addestramento - {self._env_subtitle(run)}",
+        variant = self._variant_label(run) if run else ""
+        breakdown_subtitle = self._env_subtitle(run) + (f" ({variant})" if variant else "")
+        fig.suptitle(f"Scomposizione del tempo di addestramento - {breakdown_subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
         self._footnote(fig, "Solo la fascia blu si riduce all'aumentare dei worker: le fasi "
                             "seriali restano pressoche' costanti e, crescendo in quota "
@@ -1426,6 +1494,9 @@ class PlotGenerator:
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
+        variant = self._variant_label(run)
+        if variant:
+            subtitle += f" ({variant})"
         fig.suptitle(f"Throughput del sistema distribuito - {subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
 
