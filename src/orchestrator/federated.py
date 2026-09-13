@@ -14,7 +14,6 @@ import numpy as np
 import re
 
 from rpyc.utils.classic import obtain
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import precision_recall_curve, roc_auc_score
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 from src.shared.utilities.task_storage import load_task_trees_from_shared_storage
@@ -22,7 +21,7 @@ from src.orchestrator.BaseOrchestrator import BaseOrchestrator, env_timeout_seco
 from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.config import SystemConfig
 
-BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1")
 
 # Timeout (in secondi) per le chiamate RPC sincrone verso i worker. Configurabile via
 # .env / variabile d'ambiente per poter alzarlo su AWS (dove un singolo worker può

@@ -29,7 +29,7 @@ from src.shared.utilities.task_storage import (
 )
 
 TEST_SIZE = 0.2
-BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1")
 # Stesso valore di run_baseline.py (TARGET_ROWS_PER_DAY): campionamento
 # RIBILANCIATO per giorno di cattura invece di una sample_fraction uniforme
 # sull'intero dataset (che farebbe dominare il campione dal giorno più
@@ -38,7 +38,23 @@ BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket
 # "protetti" (Infiltration), attivo dentro RawCSVDataLoader ogni volta che
 # target_rows_per_day non è None -- nessuna configurazione aggiuntiva
 # richiesta qui per beneficiarne.
-TARGET_ROWS_PER_DAY = 100_000
+TARGET_ROWS_PER_DAY = 200_000
+# SHARDING FISSO REALE (13/9/2026): solo per tree_type == "classifier" (il
+# dataset reale, CICIDS). A differenza del sintetico (dove num_shard =
+# num_worker rilevati DINAMICAMENTE, vedi 'early_num_workers' più sotto),
+# qui il numero di shard e' FISSO e indipendente da quanti worker sono
+# attivi in un dato giro - permette di riusare gli STESSI file shard tra
+# configurazioni diverse (es. scenario di scalabilita' 3/5/7/10 worker),
+# invece di rigenerarli ad ogni giro (misurato empiricamente il 12/9/2026:
+# senza shard fissi, l'ETL reale - mai riusabile tra round con num_worker
+# diverso - rende 'sharded' fino a ~17x PIU' LENTO di 'shared' in totale,
+# nonostante training_only_seconds piu' basso). 20 = valore piu' alto in
+# 'scalability_test.worker_counts_to_test' di test_config.json ([3,5,7,10])
+# raddoppiato: garantisce che la configurazione con PIU' worker (10) riceva
+# un numero di shard ESATTAMENTE divisibile (20/10=2, nessuno sbilanciamento),
+# non solo "arrotondato" - il caso che senza shard fissi soffriva di piu' il
+# degrado di qualita' (ogni worker vedeva 1 solo shard su 10, il minimo).
+REAL_FIXED_SHARDS = 20
 # Stessi valori di run_baseline.py: senza allinearli qui, il train
 # distribuito e quello della baseline locale sarebbero addestrati su
 # distribuzioni/feature-set diversi, invalidando il confronto delle
@@ -88,6 +104,20 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # task_id (vedi _execute_training_step). Toggle via env var
         # CENTRALIZED_DATASET_MODE ('shared'|'sharded').
         self.train_data_shards = None
+        # CACHE DELL'INTERMEDIO (12/9/2026, fix): train_df/test_df dopo
+        # l'intera pipeline pesante (download CSV grezzo, binarizzazione,
+        # split stratificato, preprocessing, undersampling per il reale) ma
+        # PRIMA dello sharding finale. Round successivi con lo STESSO
+        # base_seed/dataset_type/tree_type riusano questi invece di rifare
+        # da zero il lavoro pesante - solo lo shuffle+scrittura finale
+        # (economico) va rifatto per un num_shards diverso. Prima di questo
+        # fix, la modalita' 'sharded' rifaceva l'INTERA pipeline ad ogni
+        # round di scaling, anche quando l'unica cosa a cambiare era il
+        # numero di worker - sprecando il lavoro pesante (~350-415s
+        # misurati sul reale) che non dipende affatto da num_shards.
+        self._cached_prepared_key = None
+        self._cached_prepared_train_df = None
+        self._cached_prepared_test_df = None
         self.chunk_sent_event = threading.Event()
         self._trees_cache = {}
         # Durata dell'ultima fase di preparazione dati (ETL). Serve agli scenari
@@ -149,7 +179,39 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload)
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
-        target_col = "Target" if  tree_type == "regressor" else "Label"
+        # Spostato qui (13/9/2026, bugfix): serve anche nel ramo cache-hit
+        # subito sotto, non solo nel percorso di calcolo fresco piu' avanti -
+        # calcolarlo una sola volta qui evita di doverlo ripetere in entrambi.
+        target_col = "Target" if tree_type == "regressor" else "Label"
+
+        # CACHE HIT (12/9/2026, fix): se un round precedente ha gia' prodotto
+        # train_df/test_df con GLI STESSI parametri che determinano il loro
+        # contenuto (dataset_type/tree_type/base_seed/dataset_path - non
+        # num_shards, che riguarda solo il passo finale), riusali invece di
+        # rifare l'intera pipeline pesante (download CSV grezzo,
+        # binarizzazione, split stratificato, preprocessing, undersampling).
+        # Risparmio misurato sul reale: ~350-415s evitati per ogni round di
+        # scaling successivo al primo.
+        prepared_key = (dataset_type, tree_type, base_seed, dataset_path)
+        if (self._cached_prepared_key == prepared_key
+                and self._cached_prepared_train_df is not None
+                and self._cached_prepared_test_df is not None):
+            print(f"[{self.orchestrator_name}] [PREPARE-CACHE] Parametri identici al round "
+                  f"precedente (dataset_type={dataset_type}, seed={base_seed}) - riuso "
+                  f"train_df/test_df gia' pronti, salto l'intera pipeline ETL pesante.")
+            train_df = self._cached_prepared_train_df
+            test_df = self._cached_prepared_test_df
+            # BUGFIX (13/9/2026): mancavano tree_type/target_col/prepared_key
+            # rispetto alla vera firma di _save_prepared_data (vedi sotto) -
+            # il valore di t0 scivolava nello slot di tree_type, lasciando
+            # gli ultimi 3 parametri realmente vuoti (TypeError osservato in
+            # produzione: "missing 3 required positional arguments").
+            # Ordine ora IDENTICO alla chiamata gemella del percorso fresco
+            # (fine del metodo).
+            self._save_prepared_data(train_df, test_df, job_id, base_seed, num_shards,
+                                      tree_type, target_col, prepared_key, t0,
+                                      from_cache=True)
+            return
 
         splitter = src.shared.utilities.datasplitter.StratifiedDataSplitter(target_column=target_col, test_size=TEST_SIZE, random_state=base_seed)
 
@@ -193,6 +255,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 data_url=dataset_path,
                 dataset_seed=base_seed,
                 target_rows_per_day=TARGET_ROWS_PER_DAY,
+                # NOTA (13/9/2026): s3_anon rimosso - era stato aggiunto il
+                # 12/9/2026 per leggere direttamente dal bucket pubblico
+                # CICIDS2018 (cse-cic-ids2018), che richiede accesso
+                # anonimo. Da quando il dataset viene invece caricato una
+                # tantum sul NOSTRO bucket privato (vedi upload_dataset.sh,
+                # test_config.json: dataset_path punta a
+                # s3://<bucket-nostro>/real/), s3_anon=True sarebbe
+                # CONTROPRODUCENTE: forzerebbe accesso anonimo anche contro
+                # il bucket privato, che lo nega (AccessDenied) - esattamente
+                # il bug osservato il 13/9/2026, causato da un residuo del
+                # fix precedente rimasto per errore in una copia di lavoro
+                # non aggiornata. Default s3_anon=False (accesso firmato
+                # normale) è quello corretto qui.
             )
             df_raw = loader.load()
             
@@ -273,6 +348,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                       f"disponibile da config_real.json: uso il set completo (69 feature circa). "
                       f"Esegui prima run_baseline.py per un confronto allineato alla baseline.")
 
+        self._save_prepared_data(train_df, test_df, job_id, base_seed, num_shards,
+                                  tree_type, target_col, prepared_key, t0, from_cache=False)
+
+    def _save_prepared_data(self, train_df, test_df, job_id: str, base_seed: int,
+                             num_shards, tree_type: str, target_col: str,
+                             prepared_key: tuple, t0: float, from_cache: bool):
+        """Salva train_df/test_df (via DAO, con sharding opzionale) e, se
+        questa e' una computazione FRESCA (from_cache=False), aggiorna la
+        cache dell'intermedio per i round successivi con parametri identici.
+        Estratto da _prepare_data (12/9/2026) per essere richiamabile sia
+        dal percorso cache-hit sia da quello di computazione normale, senza
+        duplicare la logica di salvataggio/sharding.
+        """
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
             test_data_path = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{job_id}.csv"
@@ -349,11 +437,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
                 # Scrittura in PARALLELO, non sequenziale: stesso volume totale
                 # di byte del file unico di oggi, ma N upload concorrenti
-                # invece di uno solo - tiene il costo per-giro comparabile (o
-                # migliore) anche dovendo riscrivere gli shard ad ogni round
-                # di scaling (nessun riuso possibile tra round con
-                # worker_count diversi: il numero di shard cambia, quindi
-                # niente short-circuit qui, vedi _execute_training_step).
+                # invece di uno solo.
                 def _write_shard(i):
                     shard_df = train_df.iloc[shard_indices[i]]
                     dao.save_dataset(path=shard_paths[i], df=shard_df)
@@ -366,7 +450,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
                 self.last_etl_seconds = time.perf_counter() - t0
                 print(f"[DEBUG TIMING] _prepare_data (sharded, {num_shards} shard) completato in "
-                      f"{self.last_etl_seconds:.2f}s")
+                      f"{self.last_etl_seconds:.2f}s{' [da cache]' if from_cache else ''}")
                 print(f"[{self.orchestrator_name}] [OK] {num_shards} shard di training + test set "
                       f"archiviati correttamente.")
 
@@ -379,7 +463,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     train_data_path = f"./.local_storage/shared_train_{job_id}.csv"
                 dao.save_dataset(path=train_data_path, df=train_df)
                 self.last_etl_seconds = time.perf_counter() - t0
-                print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s")
+                print(f"[DEBUG TIMING] _prepare_data completato in {self.last_etl_seconds:.2f}s"
+                      f"{' [da cache]' if from_cache else ''}")
                 print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
 
                 # CACHE EFS (11/9/2026): scrittura best-effort, SOLO se
@@ -417,12 +502,22 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 self.train_data_path = train_data_path
                 self.train_data_shards = None
 
-            # Stessa motivazione di 'del df_full' sopra: train_df/test_df sono
-            # copie potenzialmente grandi (fino a ~800MB combinate per lo
-            # scenario sintetico) che altrimenti resterebbero vive fino al
-            # ritorno della funzione, a ridosso dell'inizio del dispatch di
-            # training (vedi _execute_training_step, chiamato subito dopo).
-            del train_df, test_df
+            # CACHE DELL'INTERMEDIO (12/9/2026, fix): solo se questa e' stata
+            # una computazione FRESCA (non gia' servita dalla cache) -
+            # altrimenti train_df/test_df SONO GIA' gli oggetti in cache,
+            # riassegnarli sarebbe un no-op innocuo ma inutile. A differenza
+            # del comportamento precedente (del train_df, test_df
+            # incondizionato subito dopo il salvataggio), ora li MANTENIAMO
+            # vivi in memoria sull'orchestratore per essere riusati da round
+            # futuri con parametri identici - costo di memoria accettato
+            # (un'unica copia extra, ordine di grandezza comparabile a
+            # quanto gia' tenuto in memoria durante un singolo round oggi),
+            # a fronte del risparmio di tempo enorme (l'intera pipeline
+            # pesante evitata nei round successivi).
+            if not from_cache:
+                self._cached_prepared_key = prepared_key
+                self._cached_prepared_train_df = train_df
+                self._cached_prepared_test_df = test_df
             gc.collect()
         except Exception as e:
             raise IOError(f"[{self.orchestrator_name}] Errore critico nel salvataggio dei dataset tramite DAO: {e}")
@@ -442,16 +537,22 @@ class CentralizedOrchestrator(BaseOrchestrator):
         calcolarla non serviva a nessun consumatore del sistema.
         """
         expected_job_id = payload.get("job_id", "unknown_job")
+        # Risolto qui (non solo più avanti, dove viene ri-letto per altri usi
+        # nello stesso metodo - ridondante ma innocuo) perché serve SUBITO,
+        # prima ancora dell'ETL, per decidere fisso-vs-dinamico sotto.
+        hp = payload.get("hyperparameters", {})
+        tree_type = hp.get("tree_type", "classifier")
 
-        # SHARDING DINAMICO (12/9/2026): toggle via env var, default 'shared'
-        # (comportamento identico a sempre). In modalita' 'sharded', il
-        # numero di shard = numero di worker rilevati IN QUESTO MOMENTO -
-        # serve quindi conoscerli PRIMA di generare/scrivere il dataset,
-        # a differenza della modalita' 'shared' dove l'ordine resta invariato
+        # SHARDING (12/9/2026 dinamico, esteso 13/9/2026 con un numero
+        # fisso solo per il reale): toggle via env var, default 'shared'
+        # (comportamento identico a sempre). In modalita' 'sharded', serve
+        # conoscere i worker PRIMA di generare/scrivere il dataset - a
+        # differenza della modalita' 'shared' dove l'ordine resta invariato
         # (ETL, poi scoperta worker piu' sotto, invariata).
         dataset_mode = os.environ.get("CENTRALIZED_DATASET_MODE", "shared").strip().lower()
         sharded_mode = dataset_mode == "sharded"
         early_num_workers = None
+        effective_num_shards = None
         if sharded_mode:
             print(f"[{self.orchestrator_name}] [SHARDING] Modalita' 'sharded' attiva - "
                   f"scopro i worker PRIMA dell'ETL per sapere in quante fette partizionare.")
@@ -459,12 +560,30 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 early_workers = ServiceRegistry.get_available_workers(self.environment)
                 if early_workers:
                     early_num_workers = len(early_workers)
-                    print(f"[{self.orchestrator_name}] [SHARDING] {early_num_workers} worker rilevati "
-                          f"-> il dataset verra' partizionato in altrettante fette.")
+                    print(f"[{self.orchestrator_name}] [SHARDING] {early_num_workers} worker rilevati.")
                     break
                 print(f"[{self.orchestrator_name}] [SHARDING] Nessun worker disponibile per la scoperta "
                       f"anticipata. In attesa...")
                 time.sleep(10)
+
+            # NUMERO DI SHARD (13/9/2026): fisso (REAL_FIXED_SHARDS) solo
+            # per il classificatore/reale - permette il riuso dei file tra
+            # round con num_worker diverso (vedi commento sulla costante).
+            # Il regressore/sintetico resta con num_shard = num_worker
+            # rilevati, comportamento dinamico invariato dal 12/9/2026: le
+            # dimensioni ridotte del sintetico rendono l'ETL cosi' economico
+            # (< 1s di generazione) da non giustificare la complessita' in
+            # piu' dello schema fisso, che qui varrebbe solo a scapito di
+            # una divisione statistica per shard meno naturale.
+            if tree_type == "classifier":
+                effective_num_shards = REAL_FIXED_SHARDS
+                print(f"[{self.orchestrator_name}] [SHARDING] Classificatore/reale -> "
+                      f"{REAL_FIXED_SHARDS} shard FISSI (indipendenti dal numero di worker "
+                      f"di questo giro), per permettere il riuso tra round diversi.")
+            else:
+                effective_num_shards = early_num_workers
+                print(f"[{self.orchestrator_name}] [SHARDING] Regressore/sintetico -> "
+                      f"{early_num_workers} shard (dinamico, pari al numero di worker).")
 
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
         if sharded_mode:
@@ -485,13 +604,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
             if self.environment == "aws":
                 expected_shards = [
                     f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}_shard_{i}.csv"
-                    for i in range(early_num_workers)
+                    for i in range(effective_num_shards)
                 ]
                 expected_test_sharded = f"s3://{BUCKET_NAME}/distributed_tests/shared_test_{expected_job_id}.csv"
             else:
                 expected_shards = [
                     f"./.local_storage/shared_train_{expected_job_id}_shard_{i}.csv"
-                    for i in range(early_num_workers)
+                    for i in range(effective_num_shards)
                 ]
                 expected_test_sharded = f"./.local_storage/shared_test_{expected_job_id}.csv"
 
@@ -505,7 +624,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             )
 
             if all_shards_exist:
-                print(f"[{self.orchestrator_name}] [SHARDING] [SHORT-CIRCUIT] {early_num_workers} shard "
+                print(f"[{self.orchestrator_name}] [SHARDING] [SHORT-CIRCUIT] {effective_num_shards} shard "
                       f"già presenti su storage per questo job (round successivo, o ripresa dopo un "
                       f"failover dell'orchestratore) - nessuna rigenerazione.")
                 self.train_data_shards = expected_shards
@@ -514,7 +633,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 self.current_job_id = expected_job_id
                 self.last_etl_seconds = 0.0
             else:
-                self._prepare_data(payload, seed, num_shards=early_num_workers)
+                self._prepare_data(payload, seed, num_shards=effective_num_shards)
         elif self.train_data_path is None or self.current_job_id != expected_job_id:
             if self.environment == "aws":
                 expected_train = f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}.csv"
@@ -764,17 +883,39 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         try:
                             self.chunk_sent_event.set()
 
-                            # SHARDING DINAMICO: se attivo, ogni task riceve la
-                            # fetta corrispondente a 'task_id % numero di shard'
-                            # invece del dataset intero fisso. Il task_id
-                            # sopravvive INTATTO al riaccodamento in caso di
-                            # guasto (vedi 'task_queue.put((task_id, ...))' più
-                            # sotto nel blocco except): un worker che ne
-                            # sostituisce un altro morto ricalcola lo stesso
-                            # identico shard, nessuna modifica necessaria alla
-                            # logica di fault tolerance esistente.
+                            # BUGFIX RPYC (13/9/2026): una lista Python passata
+                            # come argomento RPC viene trasmessa da RPyC PER
+                            # RIFERIMENTO (un "netref", proxy remoto verso
+                            # l'oggetto sull'Orchestratore), non per valore -
+                            # a differenza delle stringhe, sempre trasmesse
+                            # per valore. Qualunque confronto/uso della
+                            # "lista" lato worker (es. self._cached_source ==
+                            # source_info in CentralizedWorker._load_data)
+                            # scatena quindi una NUOVA chiamata remota
+                            # sincrona verso l'Orchestratore stesso - fragile,
+                            # e fallisce con EOFError ("stream has been
+                            # closed") se la connessione originale nel
+                            # frattempo non è più disponibile (osservato in
+                            # produzione, scenario reale/sharded con più
+                            # shard per worker). Il sintetico non aveva MAI
+                            # esibito questo bug perché con shard==worker la
+                            # lista collassa sempre a 1 elemento (vedi 'if
+                            # len==1' sotto), diventando una stringa PRIMA
+                            # della chiamata RPC - solo il reale (più shard
+                            # per worker) produceva liste con più di un
+                            # elemento, mai convertite a stringa.
+                            # FIX: mai una lista sulla rete - codificata come
+                            # stringa unica delimitata da '|' (i path S3 di
+                            # questo progetto non contengono mai quel
+                            # carattere), decodificata lato worker in
+                            # CentralizedWorker._load_data.
                             if self.train_data_shards:
-                                task_source_info = self.train_data_shards[task_id % len(self.train_data_shards)]
+                                _n_shards = len(self.train_data_shards)
+                                _assigned_shards = [
+                                    self.train_data_shards[j] for j in range(_n_shards)
+                                    if j % num_workers == task_id % num_workers
+                                ]
+                                task_source_info = "|".join(_assigned_shards)
                             else:
                                 task_source_info = source_info
 
@@ -789,7 +930,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 class_weight=class_weight,
                                 criterion=criterion,
                                 bootstrap=bootstrap,
-                                max_samples=max_samples
+                                max_samples=max_samples,
+                                job_id=self.current_job_id
                             )
 
                             # Il worker NON restituisce più il blob degli alberi
@@ -820,8 +962,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             # caricare la successiva: il picco di ricomposizione
                             # scende alla dimensione di UN batch worker, costante
                             # indipendentemente da quanto è grande CHUNK_SIZE.
+                            # BUGFIX (13/9/2026): stesso problema/soluzione di
+                            # BaseWorker.py's 'storage_key_source' - questa
+                            # funzione deriva il prefisso di storage dal NOME
+                            # FILE (source_info), non dai dati veri. Con lo
+                            # sharding fisso del reale, task_source_info puo'
+                            # essere una LISTA (piu' shard uniti) - crasherebbe
+                            # identicamente al bug lato worker corretto sopra.
+                            # DEVE combaciare ESATTAMENTE con quanto sintetizza
+                            # il worker per scrivere (stesso self.current_job_id,
+                            # stesso formato 'shared_train_{job_id}.csv'),
+                            # altrimenti orchestratore e worker leggerebbero/
+                            # scriverebbero su chiavi diverse.
+                            storage_key_for_reread = f"shared_train_{self.current_job_id}.csv"
                             part_iter = iter_task_parts_as_tree_lists(
-                                task_source_info, chunk_seed, quota_chunk,
+                                storage_key_for_reread, chunk_seed, quota_chunk,
                                 self.environment, self.orchestrator_name
                             )
                             received_any_part = False

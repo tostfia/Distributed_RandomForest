@@ -270,10 +270,29 @@ class BaseWorker(Service, ABC):
 
     def exposed_train_subset_forest(self, source_info, num_trees, base_seed, max_depth=None, tree_type=None, max_features=None,
                                      min_samples_split=2, class_weight=None, criterion=None,
-                                     bootstrap=None, max_samples=None):
+                                     bootstrap=None, max_samples=None, job_id: str = None):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
+        # SHARDING FISSO REALE (13/9/2026): source_info può ora essere una
+        # LISTA di path (più shard uniti, vedi CentralizedWorker._load_data)
+        # invece di una singola stringa. Le funzioni di task_storage.py
+        # (save_task_part_to_shared_storage, save_task_manifest) derivano
+        # però il prefisso di storage dei PEZZI DI ALBERO dal NOME DEL FILE
+        # dataset (_derive_job_id, che fa os.path.basename(source_info) -
+        # crasherebbe su una lista, stesso bug della riga 824/'source_info
+        # None' del 12/9/2026). Disaccoppiato qui: 'job_id' è passato ora
+        # ESPLICITAMENTE dall'Orchestratore (self.current_job_id, stabile
+        # per l'intero job, sopravvive identico a qualunque riassegnazione
+        # di task dopo un guasto - stessa garanzia già verificata per
+        # task_id) invece di essere indovinato dal nome del file dataset.
+        # 'storage_key_source' sintetizza una stringa nel formato che
+        # _derive_job_id si aspetta, così le tre funzioni di task_storage.py
+        # restano INVARIATE (nessuna modifica a quel file). Fallback su
+        # source_info se job_id non viene passato (retro-compatibilità con
+        # eventuali altri chiamanti che non lo forniscono - solo se
+        # source_info è comunque una stringa, non una lista, in quel caso).
+        storage_key_source = f"shared_train_{job_id}.csv" if job_id else source_info
         if tree_type is not None:
             self.tree_type = tree_type
         # Se l'Orchestratore non specifica max_features (manifesti vecchi/non
@@ -296,7 +315,7 @@ class BaseWorker(Service, ABC):
               f"max_samples={effective_max_samples} "
               f"({'da richiesta' if bootstrap is not None else 'da configurazione di boot'}).")
         cached_task_bytes = load_task_from_shared_storage(
-            source_info, base_seed, num_trees, self.environment, self.worker_name
+            storage_key_source, base_seed, num_trees, self.environment, self.worker_name
         )
         if cached_task_bytes is not None:
             print(f"[{self.worker_name}] [SHORT-CIRCUIT] Task già pronto nello storage. Invio solo ack "
@@ -396,7 +415,7 @@ class BaseWorker(Service, ABC):
             serialized_part = pickle.dumps(batch_trees)
             try:
                 save_task_part_to_shared_storage(
-                    source_info, base_seed, num_trees, part_idx,
+                    storage_key_source, base_seed, num_trees, part_idx,
                     serialized_part, self.environment, self.worker_name
                 )
             except Exception as e:
@@ -481,7 +500,7 @@ class BaseWorker(Service, ABC):
         # costo di memoria è trascurabile.
         try:
             save_task_manifest(
-                source_info, base_seed, num_trees, parts_num_trees,
+                storage_key_source, base_seed, num_trees, parts_num_trees,
                 self.environment, self.worker_name
             )
         except Exception as e:

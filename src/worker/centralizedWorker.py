@@ -55,9 +55,22 @@ class CentralizedWorker(BaseWorker):
         
         """Carica il dataset centralizzato delegando al DAO e lo trasforma in matrici NumPy.
         Args:
-            source_info (str): URL S3 o path locale passato dinamicamente dall'Orchestratore.
+            source_info (str): URL S3 o path locale. Se contiene '|', è
+            l'unione di PIÙ shard (13/9/2026, sharding fisso per il reale:
+            quando ci sono meno worker attivi degli shard totali, ogni
+            worker riceve più shard assegnati, codificati in un'unica
+            stringa delimitata dall'Orchestratore - MAI una lista Python:
+            RPyC trasmette le liste per riferimento/netref, non per valore,
+            causando EOFError se il worker prova a usarle dopo che la
+            connessione originale si è chiusa. Vedi bugfix in centralized.py,
+            dispatch loop, stesso giorno.
         """
-        
+        is_multi = "|" in source_info
+        # Decodifica UNA volta qui: entrambi i punti sotto (calcolo cache e
+        # caricamento vero e proprio) iterano su questa lista LOCALE, mai
+        # sulla stringa 'source_info' carattere per carattere.
+        shard_list = source_info.split("|") if is_multi else None
+
         # CACHE SU CONTENUTO invece che su URL esatto (11/9/2026): la cache
         # precedente confrontava 'source_info' (l'URL S3 completo) - ma ogni
         # job genera un URL diverso (es. 'shared_train_test_scal_3_....csv'
@@ -76,8 +89,18 @@ class CentralizedWorker(BaseWorker):
         # nel caso peggiore (contenuto diverso, serve comunque scaricare) è
         # trascurabile rispetto al beneficio nel caso migliore (contenuto
         # identico, download evitato del tutto).
+        #
+        # CASO LISTA (13/9/2026): somma dei content_length di TUTTI gli shard
+        # assegnati - stesso principio (confronto economico, nessun
+        # download per il solo controllo), sommato invece che singolo. Una
+        # collisione tra combinazioni diverse di shard con la STESSA somma
+        # è statisticamente trascurabile per questo uso (cache di velocità,
+        # non di correttezza) e comunque mai osservata empiricamente.
         try:
-            content_length = self.dao.get_content_length(source_info)
+            if is_multi:
+                content_length = sum(self.dao.get_content_length(p) for p in shard_list)
+            else:
+                content_length = self.dao.get_content_length(source_info)
         except Exception as e:
             # Se il controllo leggero fallisce per qualunque motivo (rete,
             # permessi, DAO locale senza supporto), non deve bloccare il
@@ -93,18 +116,31 @@ class CentralizedWorker(BaseWorker):
             and self._cached_X is not None
             and self._cached_y is not None
         ):
-            print(f"[CentralizedWorker] Dati già in cache (stessa dimensione file: "
-                  f"{content_length} byte) - nessun ri-download nonostante l'URL "
-                  f"diverso da quello del job precedente.")
+            print(f"[CentralizedWorker] Dati già in cache (stessa dimensione totale: "
+                  f"{content_length} byte) - nessun ri-download nonostante l'URL/lista "
+                  f"diversa da quella del job precedente.")
             self._cached_source = source_info  # aggiornato per coerenza/debug
             return self._cached_X, self._cached_y
 
         if self._cached_source == source_info and self._cached_X is not None and self._cached_y is not None:
             print("[CentralizedWorker] Utilizzo dei dati già caricati in cache.")
             return self._cached_X, self._cached_y
-        print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da: {source_info}")
 
-        df: pd.DataFrame = self.dao.load_dataset(source_info)
+        if is_multi:
+            print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da "
+                  f"{len(shard_list)} shard: {shard_list}")
+            # Shard scaricati e concatenati in un unico DataFrame prima
+            # dell'estrazione X/y sotto: stessa logica di risoluzione target/
+            # feature applicata UNA volta al risultato unito, non ripetuta
+            # per shard (tutti gli shard condividono lo stesso schema di
+            # colonne per costruzione, essendo partizioni dello stesso
+            # dataset già processato dall'Orchestratore).
+            dfs = [self.dao.load_dataset(p) for p in shard_list]
+            df: pd.DataFrame = pd.concat(dfs, ignore_index=True)
+            del dfs
+        else:
+            print(f"[CentralizedWorker] Richiesta di caricamento dati tramite DAO da: {source_info}")
+            df: pd.DataFrame = self.dao.load_dataset(source_info)
 
         if self.is_regression():
             self.target_column = "Target"
