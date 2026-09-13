@@ -4,7 +4,7 @@ Sistema distribuito per il **training** e l'**inferenza** di modelli Random Fore
 
 Il sistema segue un'architettura **master-worker**: un *orchestrator* centrale distribuisce l'addestramento dei singoli alberi della foresta su più nodi *worker*, in due modalità:
 
-- **Centralizzata**: il dataset è caricato su uno storage condiviso (S3) e i worker addestrano porzioni della foresta sui medesimi dati.
+- **Centralizzata**: il dataset è caricato su uno storage condiviso e i worker addestrano porzioni della foresta sui medesimi dati.
 - **Federata**: il dataset è pre-partizionato e distribuito sui nodi; ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i modelli.
 
 Sono supportati due ambienti di esecuzione, alternativi o combinabili:
@@ -13,7 +13,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 |---|---|---|
 | **Locale** | `run_local.sh` | Sviluppo rapido, debugging diretto sul sistema host e simulazione di condizioni di rete con `tc netem`  |
 | **Docker Compose** | `run_docker.sh` | Test in ambiente containerizzato e isolato, verifica dell'interazione multi-nodo e validazione delle configurazioni prima del deploy cloud. |
-| **AWS** | `run_aws.sh` | Esecuzione "reale" su infrastruttura cloud, per gli esperimenti di scalabilità richiesti dal progetto |
+| **AWS** | `run_aws.sh` | Esecuzione reale su infrastruttura cloud, per gli esperimenti di scalabilità richiesti dal progetto |
 
 ---
 
@@ -64,8 +64,6 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 ├── upload_dataset.sh          # upload multipart con retry verso S3
 └── aws_creds.sh               # helper per impostare le credenziali AWS Academy Learner Lab
 ```
-
-> Se la struttura reale del tuo repository differisce da questa (nomi cartelle, script mancanti/aggiunti), aggiorna questa sezione prima di pubblicarlo.
 
 ---
 
@@ -273,17 +271,14 @@ Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tf
   - **`sharded`**: il dataset viene partizionato e ogni worker scarica solo una fetta, per ridurre il traffico di rete per worker. Il criterio di partizionamento **dipende dal tipo di dataset**, non è lo stesso in entrambi i casi:
     - **Sintetico**: numero di shard = numero di worker rilevati al momento (dinamico, un worker = uno shard).
     - **Reale**: numero di shard **fisso** (indipendente dal numero di worker, per permettere il riuso degli stessi file tra round di scaling diversi), e ogni worker può ricevere **più shard**, che unisce localmente prima del training — necessario perché con pochi worker attivi un solo shard fisso conterrebbe troppi pochi dati per albero, con impatto misurabile sull'accuratezza (in particolare sul recall, in un task di classificazione con classe minoritaria).
-
-    Entrambe le sotto-modalità introducono un compromesso statistico rispetto a `shared` (bootstrap per-shard invece che sull'intero dataset): per i dettagli, i numeri misurati empiricamente e le scelte di design (perché due criteri diversi, perché il reale ha bisogno dell'unione multi-shard) vedi **[`terraform/README.md`, sezione sullo sharding](terraform/README.md)**.
-- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
+- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards. py` e `provision_local_shards.py`). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
 | **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
 
 
-
-La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
+La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito, usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
 
 ---
 
@@ -335,9 +330,6 @@ Se invece ti serve un reset totale, anche di queste due eccezioni, va fatto a ma
 In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
 
 ---
-
-
-
 
 ## Autori
 
