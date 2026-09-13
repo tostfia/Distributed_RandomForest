@@ -199,7 +199,7 @@ aws ecs update-service --cluster forest-cluster --service worker-service \
 **Worker, modalità `federated`** (N service separati, uno per indice — ognuno
 ospita al massimo un solo task, quindi qui non "quanti" ma "tutti o nessuno"):
 ```bash
-for i in $(seq 1 10); do   # 10 = num_workers
+for i in $(seq 1 10); do
   aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
     --desired-count 1 --region us-east-1 > /dev/null
 done
