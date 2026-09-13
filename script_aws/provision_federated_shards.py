@@ -36,16 +36,7 @@ from src.shared.utilities.federated_data_splitter import FederatedDataSplitter
 
 DEFAULT_BUCKET = os.environ.get("DATASETS_BUCKET_NAME")
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
-# Stesso valore di run_baseline.py/centralized.py/provision_local_shards.py:
-# campionamento ribilanciato per giorno invece di sample_fraction=0.05
-# uniforme -- vedi provision_local_shards.py per la motivazione completa
-# (gemello locale di questo script, deve restare allineato).
-# AGGIORNATO (13/9/2026) da 100_000 a 200_000, per restare coerente col
-# valore usato in centralized.py per i confronti reale/sharded più recenti -
-# un disallineamento qui renderebbe centralized e federated non comparabili
-# sullo stesso dataset reale (dimensione campione diversa).
 TARGET_ROWS_PER_DAY = 200_000
-
 
 DEFAULT_PARTITION_STRATEGY = "iid"
 
