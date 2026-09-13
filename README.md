@@ -13,7 +13,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 |---|---|---|
 | **Locale** | `run_local.sh` | Sviluppo rapido, debugging diretto sul sistema host e simulazione di condizioni di rete con `tc netem`  |
 | **Docker Compose** | `run_docker.sh` | Test in ambiente containerizzato e isolato, verifica dell'interazione multi-nodo e validazione delle configurazioni prima del deploy cloud. |
-| **AWS** | `run_aws.sh` | Esecuzione reale su infrastruttura cloud, per gli esperimenti di scalabilità richiesti dal progetto |
+| **AWS** | `run_aws.sh` | Esecuzione su infrastruttura cloud per gli esperimenti di scalabilità richiesti dal progetto |
 
 ---
 
@@ -36,13 +36,28 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 ```
 .
 ├── src/
-│   ├── client/            # entry point utente (sottomissione job, inferenza)
-│   ├── orchestrator/  # coordinatore centrale (distribuzione, aggregazione, stato)
-│   ├── worker/             # nodo di calcolo (addestramento locale dei singoli alberi)
-│   ├── baseline/           # addestramento locale non distribuito, usato come riferimento
-│   ├── shared/config.py    # caricamento configurazione da .env
-│   └── testing/            # test engine di sistema (scenari 1-9) e generazione grafici
-├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, API Gateway) — vedi terraform/README.md
+│   ├── client/              # entry point utente (sottomissione job, inferenza) — main.py
+│   ├── orchestrator/        # coordinatore centrale — main.py, BaseOrchestrator.py, centralized.py, federated.py
+│   ├── worker/               # nodo di calcolo — main.py, BaseWorker.py, centralizedWorker.py, federatedWorker.py
+│   ├── dataset/              # layer DAO per storage dati/checkpoint/metriche (S3 o locale)
+│   │   ├── dataset_dao.py            # accesso al dataset (S3/locale), caching, pyarrow
+│   │   ├── dataset_dao_factory.py    # selezione DAO in base ad ENV_MODE
+│   │   ├── checkpoint_dao.py         # persistenza checkpoint di training
+│   │   └── metrics_dao.py            # persistenza metriche/report
+│   ├── baseline/             # addestramento locale non distribuito, usato come riferimento — run_baseline.py e diagnostica
+│   ├── shared/                # utilità condivise tra client/orchestrator/worker
+│   │   ├── config.py                 # caricamento configurazione da .env
+│   │   ├── factory.py                # factory generiche (worker/orchestrator per ambiente)
+│   │   ├── binding/                  # ServiceRegistry e binding RPyC
+│   │   ├── sharedmodels/             # modelli dati condivisi
+│   │   ├── mock_aws/                 # mock locali dei servizi AWS (per esecuzione senza cloud)
+│   │   └── utilities/                # loader dataset, splitter, task_storage, ecc.
+│   └── testing/               # test engine di sistema
+│       ├── engine.py                 # entry point, selezione scenario
+│       ├── scenarios/                # implementazione dei singoli scenari (1-9)
+│       ├── plot_generator.py         # scenario 9, grafici da report salvati
+│       └── test_config.json          # configurazione degli scenari di test
+├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, API Gateway, EFS) — vedi terraform/README.md
 ├── script_local/            # script per l'esecuzione locale
 │   ├── run_local.sh              # avvio bare-metal senza Docker, multi-terminale
 │   ├── run_docker.sh             # avvio Docker Compose RACCOMANDATO: provisioning + rete + limiti CPU/RAM da .env
@@ -56,7 +71,13 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   ├── provision_federated_shards.py # provisioning offline degli shard federati su S3
 │   ├── teardown.sh                   # scala i Service a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
 │   └── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
-├── dataset_cache/            # cache locale dei dataset (CICIDS reale + sintetico)
+├── outputs_baseline/         # manifesti/modelli prodotti da run_baseline.py: config_real.json, config_synthetic.json
+│                             # (feature selection + iperparametri, fonte di verità condivisa col training distribuito)
+├── dataset_cache/            # cache locale dei CSV grezzi del dataset reale (CICIDS)
+├── synthetic/                # cache locale del dataset sintetico generato
+├── saved_models/             # modelli distribuiti salvati (generati a runtime)
+├── workers_cache/            # cache locale lato worker (generata a runtime)
+├── test_reports/             # report dei test engine (local/ e aws/, generati a runtime)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -64,6 +85,8 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 ├── upload_dataset.sh          # upload multipart con retry verso S3
 └── aws_creds.sh               # helper per impostare le credenziali AWS Academy Learner Lab
 ```
+
+> Le cartelle `outputs_baseline/`, `dataset_cache/`, `synthetic/`, `saved_models/`, `workers_cache/`, `test_reports/` sono in gran parte popolate a runtime (modelli, cache, report).
 
 ---
 
@@ -114,8 +137,6 @@ cp .env.example .env
 | **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. |
 | **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se DATASET_TYPE=synthetic. |
 | **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per TRAINING_MODE=centralized (ignorata in federated). `shared` (default): ogni worker scarica l'intero dataset. `sharded`: il dataset viene partizionato, ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
-
-
 
 
 ### 4. Prepara i permessi delle cartelle dati locali
@@ -271,14 +292,15 @@ Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tf
   - **`sharded`**: il dataset viene partizionato e ogni worker scarica solo una fetta, per ridurre il traffico di rete per worker. Il criterio di partizionamento **dipende dal tipo di dataset**, non è lo stesso in entrambi i casi:
     - **Sintetico**: numero di shard = numero di worker rilevati al momento (dinamico, un worker = uno shard).
     - **Reale**: numero di shard **fisso** (indipendente dal numero di worker, per permettere il riuso degli stessi file tra round di scaling diversi), e ogni worker può ricevere **più shard**, che unisce localmente prima del training — necessario perché con pochi worker attivi un solo shard fisso conterrebbe troppi pochi dati per albero, con impatto misurabile sull'accuratezza (in particolare sul recall, in un task di classificazione con classe minoritaria).
-- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards. py` e `provision_local_shards.py`). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
+- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
 | **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
 
 
-La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito, usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
+
+La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
 
 ---
 
