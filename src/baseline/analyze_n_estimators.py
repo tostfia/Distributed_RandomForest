@@ -118,7 +118,7 @@ DEFAULT_GRID = list(range(MIN_ESTIMATORS, MAX_ESTIMATORS + 1, STEP_ESTIMATORS))
 # CLASSIFICAZIONE -- dataset reale CICIDS
 # ---------------------------------------------------------------------------
 CLF_TARGET_COL = "Label"
-CLF_TARGET_ROWS_PER_DAY = 100_000  # stesso valore di run_baseline.py
+CLF_TARGET_ROWS_PER_DAY = 200_000  # stesso valore di run_baseline.py
 CLF_UNDERSAMPLING_RATIO = 1.0
 CLF_CONFIG_PATH = os.path.join("outputs_baseline", "config_real.json")
 CLF_DIAGNOSTIC_SUBSAMPLE_SIZE = 100_000
