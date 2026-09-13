@@ -1,0 +1,86 @@
+# =============================================================================
+#  Distributed Random Forest - Template di configurazione
+# =============================================================================
+#  Copiare questo file in '.env' e valorizzarlo per il proprio ambiente:
+#
+#      cp .env.example .env
+#
+#  Il '.env' reale NON va versionato (vedi .gitignore): contiene valori
+#  specifici dell'account AWS. Questo template invece è tracciato ed è la
+#  documentazione di riferimento dei parametri di deployment.
+#
+#  NOTA: le credenziali AWS non stanno qui. In locale vengono lette da
+#  ~/.aws/credentials; per il deploy Terraform (account AWS Academy Learner
+#  Lab) vanno esportate come variabili d'ambiente prima di 'terraform apply'
+#  (vedi README.md, sezione "Credenziali AWS"); sulle task Fargate arrivano
+#  dal ruolo IAM del task (LabRole).
+# =============================================================================
+
+
+# --- MODALITÀ DI ESECUZIONE --------------------------------------------------
+
+RUNNING_IN_DOCKER=true
+TRAINING_MODE=federated
+ENV_MODE=aws
+
+SYNTHETIC_N_SAMPLES=1000000
+DATASET_TYPE=real
+
+#Può essere 'sharded' (dataset distribuito tra i worker) o 'shared' (dataset replicato su tutti i worker)
+CENTRALIZED_DATASET_MODE=sharded 
+
+# --- DIMENSIONAMENTO DEL CLUSTER ---------------------------------------------
+
+NUM_WORKERS=10
+WORKER_CORES=1
+
+WORKER_CPUS=1
+ORCHESTRATOR_CPUS=0.5
+WORKER_MEM_LIMIT=2048m
+ORCHESTRATOR_MEM_LIMIT=1024m
+
+IMAGE_NAME=rf-worker-local:latest
+
+EC2_ID=local
+
+MY_UID=1000
+MY_GID=1000
+
+# --- SUPERVISOR DEI WORKER FEDERATI ------------------------------------------
+
+FED_SUPERVISOR_MAX_RESTARTS=0
+FED_SUPERVISOR_BACKOFF_SECONDS=3
+FED_SUPERVISOR_BACKOFF_MAX_SECONDS=60
+
+# MISURATO EMPIRICAMENTE su AWS l'11/9/2026: un rimpiazzo Fargate reale
+# (ENI attach + pull immagine + boot container) ha impiegato 81s dal kill
+# alla 'steady state'. Con 60s il timeout scattava ~19s troppo presto,
+# escludendo il worker rimpiazzato dalla metrica anche se sarebbe rientrato
+# in tempo. 120s lascia margine sopra gli 81s osservati.
+FED_WORKER_WAIT_TIMEOUT_SECONDS=120
+
+
+# --- PARTIZIONAMENTO FEDERATO (solo TRAINING_MODE=federated, DATASET_TYPE=real) --
+#--- PARTITION_STRATEGY=by_day oppure PARTITION_STRATEGY=iid -------------------------------------------------------------
+PARTITION_STRATEGY=iid
+
+# --- TIMEOUT RPC -------------------------------------------------------------
+
+RPC_SYNC_TIMEOUT_SECONDS=1800
+RPC_INFERENCE_SYNC_TIMEOUT_SECONDS=900
+
+
+# --- SORGENTI DATI -----------------------------------------------------------
+
+DATASET_LOCAL_PATH=./dataset_cache
+
+DEFAULT_DATASET_S3_URL="s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/"
+
+
+# --- RISORSE AWS (specifiche dell'account: NON committare i valori reali) -----
+
+DATASETS_BUCKET_NAME=rf-distributed-datasets-383056860320-us-east-1
+
+AWS_DEFAULT_REGION=us-east-1
+
+API_GATEWAY_URL=https://erm0hah4h4.execute-api.us-east-1.amazonaws.com
