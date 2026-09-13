@@ -115,6 +115,7 @@ cp .env.example .env
 | **ENV_MODE** | `local/aws` | Obbligatoria. Ambiente di esecuzione (local per Docker/host, aws per Fargate/EC2/S3). |
 | **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. |
 | **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se DATASET_TYPE=synthetic. |
+| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per TRAINING_MODE=centralized (ignorata in federated). `shared` (default): ogni worker scarica l'intero dataset. `sharded`: il dataset viene partizionato, ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
 
 
 
@@ -267,7 +268,13 @@ aws logs tail /ec2/rf-test-engine --follow --region <REGION>   # segui i log in 
 
 Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tfvars` per AWS):
 
-- **`centralized`**: dataset unico su S3 (o storage locale), il coordinatore distribuisce la costruzione dei singoli alberi tra i worker, che leggono tutti gli stessi dati.
+- **`centralized`**: dataset unico su S3 (o storage locale), il coordinatore distribuisce la costruzione dei singoli alberi tra i worker. Due sotto-modalità, selezionate da `CENTRALIZED_DATASET_MODE` nel `.env`:
+  - **`shared`** (default): ogni worker scarica l'**intero** dataset — comportamento storico, identico per qualunque `DATASET_TYPE`.
+  - **`sharded`**: il dataset viene partizionato e ogni worker scarica solo una fetta, per ridurre il traffico di rete per worker. Il criterio di partizionamento **dipende dal tipo di dataset**, non è lo stesso in entrambi i casi:
+    - **Sintetico**: numero di shard = numero di worker rilevati al momento (dinamico, un worker = uno shard).
+    - **Reale**: numero di shard **fisso** (indipendente dal numero di worker, per permettere il riuso degli stessi file tra round di scaling diversi), e ogni worker può ricevere **più shard**, che unisce localmente prima del training — necessario perché con pochi worker attivi un solo shard fisso conterrebbe troppi pochi dati per albero, con impatto misurabile sull'accuratezza (in particolare sul recall, in un task di classificazione con classe minoritaria).
+
+    Entrambe le sotto-modalità introducono un compromesso statistico rispetto a `shared` (bootstrap per-shard invece che sull'intero dataset): per i dettagli, i numeri misurati empiricamente e le scelte di design (perché due criteri diversi, perché il reale ha bisogno dell'unione multi-shard) vedi **[`terraform/README.md`, sezione sullo sharding](terraform/README.md)**.
 - **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
 
 | Variabile | Valori ammessi | Descrizione |
