@@ -40,7 +40,11 @@ OUTPUTS_BASELINE_DIR = "outputs_baseline"
 # campionamento ribilanciato per giorno invece di sample_fraction=0.05
 # uniforme -- vedi provision_local_shards.py per la motivazione completa
 # (gemello locale di questo script, deve restare allineato).
-TARGET_ROWS_PER_DAY = 100_000
+# AGGIORNATO (13/9/2026) da 100_000 a 200_000, per restare coerente col
+# valore usato in centralized.py per i confronti reale/sharded più recenti -
+# un disallineamento qui renderebbe centralized e federated non comparabili
+# sullo stesso dataset reale (dimensione campione diversa).
+TARGET_ROWS_PER_DAY = 200_000
 
 
 DEFAULT_PARTITION_STRATEGY = "iid"
@@ -116,13 +120,14 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
             dataset_seed=123,
             target_rows_per_day=TARGET_ROWS_PER_DAY,
             tag_source_day=needs_day_tagging,
-            # BUGFIX (12/9/2026, stesso trovato in centralized.py): il bucket
-            # pubblico CICIDS2018 richiede accesso ANONIMO (confermato
-            # empiricamente - 'aws s3 ls' firmato nega AccessDenied,
-            # '--no-sign-request' funziona). Senza questo, fsspec userebbe
-            # accesso firmato di default e fallirebbe identicamente - bug
-            # gemello a quello di centralized.py, mai esercitato finora.
-            s3_anon=True,
+            # NOTA (13/9/2026): s3_anon rimosso, stesso motivo di
+            # centralized.py (vedi commit gemello) - il dataset reale va
+            # letto dal NOSTRO bucket privato (popolato una tantum con
+            # upload_dataset.sh sotto real/), non piu' dal bucket pubblico
+            # CICIDS2018 direttamente. s3_anon=True forzerebbe accesso
+            # anonimo anche contro il bucket privato, che lo nega
+            # (AccessDenied) - assicurati che --data-folder punti a
+            # 's3://<bucket-nostro>/real/', mai al bucket pubblico.
         )
         splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
         splitter.split_and_shard(
