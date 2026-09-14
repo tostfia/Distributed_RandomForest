@@ -19,6 +19,7 @@ e il path (locale o "s3://...") viene risolto correttamente in entrambi
 i casi.
 """
 
+import json
 import os
 import pickle
 from abc import ABC, abstractmethod
@@ -52,6 +53,27 @@ class CheckpointDAO(ABC):
         """Cancella l'oggetto in `path`. Idempotente: non fallisce se assente."""
         raise NotImplementedError
 
+    @abstractmethod
+    def save_json(self, path: str, obj) -> None:
+        """Come `save`, ma serializza in JSON testuale invece che pickle.
+
+        Pensato per manifesti come config_<dataset_type>.json, che devono
+        restare leggibili/ispezionabili a mano (in locale su disco, su AWS
+        aprendo l'oggetto S3 dalla console) e non solo caricabili da questo
+        stesso DAO.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_json(self, path: str):
+        """Carica e deserializza il JSON in `path`.
+
+        Solleva FileNotFoundError se l'oggetto non esiste, in modo
+        uniforme sia per il backend locale sia per quello S3 (stesso
+        contratto di `load`).
+        """
+        raise NotImplementedError
+
 
 class LocalCheckpointDAO(CheckpointDAO):
     """Backend per ambiente 'local' (Docker Compose / test in sviluppo).
@@ -81,6 +103,20 @@ class LocalCheckpointDAO(CheckpointDAO):
     def delete(self, path: str) -> None:
         if os.path.exists(path):
             os.remove(path)
+
+    def save_json(self, path: str, obj) -> None:
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp_path = f"{path}.tmp-{os.getpid()}"
+        with open(tmp_path, "w") as f:
+            json.dump(obj, f, indent=2)
+        os.replace(tmp_path, path)
+
+    def load_json(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        with open(path, "r") as f:
+            return json.load(f)
 
 
 class S3CheckpointDAO(CheckpointDAO):
@@ -135,6 +171,22 @@ class S3CheckpointDAO(CheckpointDAO):
             error_code = e.response.get("Error", {}).get("Code", "")
             if error_code not in ("404", "NoSuchKey"):
                 raise
+
+    def save_json(self, path: str, obj) -> None:
+        bucket, key = self._parse(path)
+        body = json.dumps(obj, indent=2).encode("utf-8")
+        self._client.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+
+    def load_json(self, path: str):
+        bucket, key = self._parse(path)
+        try:
+            response = self._client.get_object(Bucket=bucket, Key=key)
+            return json.loads(response["Body"].read())
+        except self._ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in ("NoSuchKey", "404"):
+                raise FileNotFoundError(path) from e
+            raise
 
 
 class CheckpointDAOFactory:

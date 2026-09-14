@@ -5,6 +5,7 @@ if [ -f .env ]; then
     ENV_NUM_WORKERS=$(grep -E "^[[:space:]]*NUM_WORKERS[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_TRAINING_MODE=$(grep -E "^[[:space:]]*TRAINING_MODE[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_PARTITION_STRATEGY=$(grep -E "^[[:space:]]*PARTITION_STRATEGY[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
+    ENV_TREE_ALLOCATION_STRATEGY=$(grep -E "^[[:space:]]*TREE_ALLOCATION_STRATEGY[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DAY_COLUMN=$(grep -E "^[[:space:]]*DAY_COLUMN[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DATASET_TYPE=$(grep -E "^[[:space:]]*DATASET_TYPE[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
     ENV_DATASET_LOCAL_PATH=$(grep -E "^[[:space:]]*DATASET_LOCAL_PATH[[:space:]]*=" .env | cut -d '=' -f 2- | tr -d ' ')
@@ -56,6 +57,17 @@ if [ "$TRAINING_MODE" = "federated" ]; then
     # chiaramente prima di procedere.
     RESOLVED_PARTITION_STRATEGY="${ENV_PARTITION_STRATEGY:-iid}"
     echo "[PROVISIONING] Strategia di partizionamento: ${RESOLVED_PARTITION_STRATEGY} (da PARTITION_STRATEGY in .env, default 'iid' se assente)"
+
+    # Non consumata dal provisioning (che decide solo come sono fatti gli
+    # shard, non come vengono pesati gli alberi in training): esportata qui
+    # solo perché arrivi come variabile d'ambiente al container test-engine,
+    # dove BaseTestScenario._resolve_federated_partitioning la legge per
+    # decidere tree_allocation_strategy nel payload del job (vedi
+    # base.py/performance.py). Se docker-compose.yml carica già .env
+    # interamente nel container (env_file), questo export è ridondante ma
+    # innocuo; se non lo fa, è quello che garantisce che la variabile arrivi.
+    export TREE_ALLOCATION_STRATEGY="${ENV_TREE_ALLOCATION_STRATEGY:-proportional}"
+    echo "[PROVISIONING] Allocazione alberi: ${TREE_ALLOCATION_STRATEGY} (da TREE_ALLOCATION_STRATEGY in .env, default 'proportional' se assente)"
 
     PROVISION_ARGS=(--force --num-workers "$NUM_WORKERS" --dataset-type "$RESOLVED_DATASET_TYPE" --partition-strategy "$RESOLVED_PARTITION_STRATEGY")
     if [ -n "$ENV_DATASET_LOCAL_PATH" ]; then

@@ -1184,6 +1184,36 @@ class BaseOrchestrator(ABC):
         if removed:
             print(f"[{self.orchestrator_name}] [CHECKPOINT] Rimosse {removed} parti del checkpoint alberi.")
 
+    def _resolve_baseline_config_path(self, dataset_type: str) -> str:
+        """
+        Path del manifesto config_<dataset_type>.json prodotto da
+        run_baseline.py, risolto per ambiente con LO STESSO pattern già usato
+        da _resolve_model_dir/_resolve_threshold_path in federated.py:
+        'local' -> filesystem (con lo stesso fallback su project_root usato
+        storicamente, per compatibilità con run_baseline.py lanciato da
+        working directory diverse), 'aws' -> S3, stesso bucket dataset,
+        prefisso 'outputs_baseline/'. run_baseline.py carica lì la copia
+        S3 dopo aver scritto quella locale (vedi run_baseline.py).
+
+        Unico punto di verità per questo path: usato sia da
+        read_selected_features_from_config sia da
+        read_decision_threshold_from_config, che quindi si comportano allo
+        stesso modo in ogni ambiente -- niente più guard 'if environment ==
+        aws: None' nei chiamanti (select_from_config in federated.py,
+        equivalente in centralized.py).
+        """
+        config_filename = f"config_{dataset_type}.json"
+
+        if self.environment == "aws":
+            return f"s3://{BUCKET_NAME}/outputs_baseline/{config_filename}"
+
+        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+        if os.path.exists(config_path):
+            return config_path
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
+        return os.path.join(project_root, "outputs_baseline", config_filename)
+
     def read_selected_features_from_config(self, dataset_type: str = "real"):
         """
         Legge 'feature_selezionate' dal manifesto config_<dataset_type>.json,
@@ -1196,37 +1226,34 @@ class BaseOrchestrator(ABC):
         già fatto dalla baseline (un fit di RF + permutation importance),
         e in generale rischierebbe di produrre un set di feature diverso da
         quello della baseline anche a parità di iperparametri, invalidando
-        il confronto. Stesso percorso di ricerca file di
+        il confronto.
+
+        Passa per self.checkpoint_dao (via _resolve_baseline_config_path)
+        invece di os.path/open diretti: stesso comportamento in locale e su
+        AWS, niente più guard nei chiamanti. Stesso path di
         read_decision_threshold_from_config.
 
         Ritorna None (mai un'eccezione) se il file non esiste o la chiave è
         assente/vuota: il chiamante deve ricadere sul set di feature completo,
         con un avviso esplicito (mai un fallback silenzioso).
         """
-        config_filename = f"config_{dataset_type}.json"
-        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+        config_path = self._resolve_baseline_config_path(dataset_type)
 
-        if not os.path.exists(config_path):
-            current_file_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
-            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
-
-        if not os.path.exists(config_path):
-            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato in "
-                  f"nessuno dei percorsi cercati: nessuna feature selezionata da riusare.")
+        if not self.checkpoint_dao.exists(config_path):
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] Config non trovata in {config_path}: "
+                  f"nessuna feature selezionata da riusare.")
             return None
 
         try:
-            with open(config_path, "r") as f:
-                config_dati = json.load(f)
+            config_dati = self.checkpoint_dao.load_json(config_path)
         except Exception as e:
-            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_filename} fallita: {e}")
+            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_path} fallita: {e}")
             return None
 
         feature_selezionate = config_dati.get("feature_selezionate", None)
         if not feature_selezionate:
             print(f"[{self.orchestrator_name}] [ATTENZIONE] 'feature_selezionate' assente o vuoto "
-                  f"in {config_filename}.")
+                  f"in {config_path}.")
             return None
 
         print(f"[{self.orchestrator_name}] Config caricata da {config_path}. "
@@ -1237,11 +1264,14 @@ class BaseOrchestrator(ABC):
         """
         Legge 'decision_threshold' dal manifesto config_<dataset_type>.json,
         scritto da run_baseline.py DOPO la calibrazione finale della soglia
-        (vedi VALIDATION_SIZE_FOR_THRESHOLD in run_baseline.py). Stesso
-        pattern/percorso di ricerca file di FederatedOrchestrator.select_from_config
-        (che legge 'feature_selezionate' dallo stesso file), qui condiviso in
-        BaseOrchestrator perché serve sia al percorso centralizzato sia a
-        quello federato.
+        (vedi VALIDATION_SIZE_FOR_THRESHOLD in run_baseline.py). Stesso path
+        di read_selected_features_from_config (che legge 'feature_selezionate'
+        dallo stesso file), qui condiviso in BaseOrchestrator perché serve
+        sia al percorso centralizzato sia a quello federato.
+
+        Passa per self.checkpoint_dao (via _resolve_baseline_config_path)
+        invece di os.path/open diretti: stesso comportamento in locale e su
+        AWS, niente più guard nei chiamanti.
 
         Ritorna None (mai un'eccezione) se il file non esiste, non è ancora
         stato aggiornato con la soglia (run di run_baseline.py precedente
@@ -1249,30 +1279,23 @@ class BaseOrchestrator(ABC):
         deve ricadere sul comportamento di default (soglia implicita 0.50),
         esattamente come già succede se 'feature_selezionate' è assente.
         """
-        config_filename = f"config_{dataset_type}.json"
-        config_path = os.path.join(os.getcwd(), "outputs_baseline", config_filename)
+        config_path = self._resolve_baseline_config_path(dataset_type)
 
-        if not os.path.exists(config_path):
-            current_file_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.abspath(os.path.join(current_file_dir, "../../../.."))
-            config_path = os.path.join(project_root, "outputs_baseline", config_filename)
-
-        if not os.path.exists(config_path):
-            print(f"[{self.orchestrator_name}] [ATTENZIONE] {config_filename} non trovato: "
+        if not self.checkpoint_dao.exists(config_path):
+            print(f"[{self.orchestrator_name}] [ATTENZIONE] Config non trovata in {config_path}: "
                   f"nessuna soglia di decisione da riusare, ricado sul default (0.50).")
             return None
 
         try:
-            with open(config_path, "r") as f:
-                config_dati = json.load(f)
+            config_dati = self.checkpoint_dao.load_json(config_path)
         except Exception as e:
-            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_filename} fallita: {e}")
+            print(f"[{self.orchestrator_name}] [ERRORE] Lettura {config_path} fallita: {e}")
             return None
 
         threshold = config_dati.get("decision_threshold")
         if threshold is None:
             print(f"[{self.orchestrator_name}] [ATTENZIONE] 'decision_threshold' assente in "
-                  f"{config_filename} (manifesto prodotto da una versione precedente di "
+                  f"{config_path} (manifesto prodotto da una versione precedente di "
                   f"run_baseline.py?): ricado sul default (0.50). Rilancia run_baseline.py "
                   f"per rigenerarlo con la soglia inclusa.")
             return None
@@ -1469,3 +1492,36 @@ class BaseOrchestrator(ABC):
                 }
 
             return metrics
+    def _sample_predictions(self, y_test: np.ndarray, final_predictions: np.ndarray,
+                         tree_type: str, sample_size: int = 5000, seed: int = 42) -> dict:
+        """
+        Campiona (y_true, y_pred) per lo scatter 'predetto vs reale' della relazione.
+
+        Solo per la regressione: per la classificazione la confusion matrix è già
+        la vista corretta. Restituisce un campione, MAI la popolazione intera --
+        su un test set da ~1.000.000 di istanze finirebbe dentro il JSON di report
+        che PlotGenerator legge, gonfiandolo enormemente per un guadagno di
+        leggibilità nullo (uno scatter con 1M di punti è comunque illeggibile).
+
+        Non solleva mai: un campione mancante deve solo far saltare il grafico
+        (vedi PlotGenerator._skip), non l'inferenza che l'ha prodotto.
+        """
+        if tree_type == "classifier":
+            return None
+        try:
+            y_test = np.asarray(y_test, dtype=np.float64)
+            final_predictions = np.asarray(final_predictions, dtype=np.float64)
+            n = y_test.shape[0]
+            if n == 0:
+                return None
+            rng = np.random.RandomState(seed)
+            idx = rng.choice(n, size=sample_size, replace=False) if n > sample_size else np.arange(n)
+            return {
+                "y_true": y_test[idx].tolist(),
+                "y_pred": final_predictions[idx].tolist(),
+                "sample_size": int(len(idx)),
+                "population_size": int(n),
+            }
+        except Exception as e:
+            print(f"[{self.orchestrator_name}] [METRICS-WARN] Campionamento predizioni fallito: {e}")
+            return None

@@ -63,7 +63,7 @@ RANDOM_STATE = 123
 # dell'ESPERIMENTO (non del modello) e va quindi tracciato insieme al resto della
 # configurazione dell'esperimento (es. nel config JSON prodotto da run_baseline.py),
 # non hard-codato qui come gli altri parametri sopra.
-DEFAULT_PARTITION_STRATEGY = "per_day"
+DEFAULT_PARTITION_STRATEGY = "iid"
 
 
 BASE_CACHE_DIR = "./workers_cache"
@@ -225,7 +225,7 @@ def main() -> None:
                         help="Rigenera e sovrascrive gli shard anche se già presenti su disco.")
     parser.add_argument("--partition-strategy", type=str,
                         default=os.environ.get("PARTITION_STRATEGY", DEFAULT_PARTITION_STRATEGY),
-                        choices=["iid", "dirichlet", "by_day"],
+                        choices=["iid", "by_day"],
                         help="Strategia di partizionamento tra i worker: 'iid' (default, storica), "
                              "'by_day' (partizionamento naturale per file/giorno di origine).")
     parser.add_argument("--day-column", type=str, default=os.environ.get("DAY_COLUMN"),

@@ -150,8 +150,30 @@ class BaseTestScenario(ABC):
         return dict(self._resolved_hp)
 
     def _resolve_federated_partitioning(self) -> dict:
-        
-        default = {"strategy": "iid","tree_allocation": "proportional"}
+        """
+        Strategia di partizionamento REALMENTE usata per generare gli shard su
+        disco/S3, letta dal manifesto scritto dal provisioning
+        (provision_local_shards.py / provision_federated_shards.py) — stessa
+        fonte e stesso path di main.py._read_partitioning_manifest.
+
+        BUG CORRETTO (14/9/2026): prima leggeva la chiave 'federated_partitioning'
+        da outputs_baseline/config_real.json, manifesto scritto da run_baseline.py
+        che quella chiave non produce MAI: la lettura tornava quindi sempre {},
+        e questo metodo ricadeva SEMPRE sul default ('iid'/'proportional'),
+        indipendentemente da come erano stati davvero generati gli shard
+        (osservato con provisioning 'by_day': lo scenario di performance
+        dichiarava comunque 'iid' nel payload).
+
+        'tree_allocation' non fa parte del manifesto di provisioning (è una
+        scelta a livello di esperimento/training, non di sharding dei dati):
+        resta configurabile via env var TREE_ALLOCATION_STRATEGY (letta da
+        run_test.sh da .env, stesso pattern di PARTITION_STRATEGY), default
+        'proportional' se assente/non valida.
+        """
+        default = {"strategy": "iid", "tree_allocation": "proportional"}
+
+        env_tree_allocation = os.environ.get("TREE_ALLOCATION_STRATEGY", "").strip().lower()
+        tree_allocation = env_tree_allocation if env_tree_allocation in ("proportional", "equal") else "proportional"
 
         dataset_type = self.config.get("dataset_type", "real")
         if dataset_type != "real":
@@ -160,24 +182,43 @@ class BaseTestScenario(ABC):
             # comunque per ricadere su un'allocazione equa dopo una probe RPC a
             # vuoto (vedi WARN "Nessuna dimensione di shard rilevata" in
             # federated.py._allocate_tree_quotas). Dichiariamo 'equal' esplicitamente
-            # così quella probe inutile viene saltata del tutto (vedi
-            # tree_allocation_strategy == "equal" in
-            # FederatedOrchestrator._execute_training_step).
-            return {"strategy": "iid",  "tree_allocation": "equal"}
+            # così quella probe inutile viene saltata del tutto -- A MENO che
+            # l'utente non l'abbia forzata esplicitamente via env var.
+            return {"strategy": "iid", "tree_allocation": env_tree_allocation or "equal"}
 
-        manifest_path = os.path.join(BASELINE_MANIFEST_DIR, "config_real.json")
-        if not os.path.exists(manifest_path):
-            return default
+        environment = getattr(self.orchestrator, "environment", "local")
+        manifest = None
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f) or {}
-        except (json.JSONDecodeError, OSError):
-            return default
+            if environment == "aws":
+                bucket_name = os.environ.get(
+                    "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+                )
+                s3_client = boto3.client("s3")
+                resp = s3_client.get_object(Bucket=bucket_name, Key="federated_shards/_manifest.json")
+                manifest = json.loads(resp["Body"].read())
+            else:
+                manifest_path = os.path.join("./workers_cache", ".provisioning_manifest.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f)
+        except (ClientError, json.JSONDecodeError, OSError) as e:
+            print(f"[TEST CONFIG] [ATTENZIONE] Impossibile leggere il manifesto di provisioning "
+                  f"({e}): ricado sul default ('{default['strategy']}').")
+            manifest = None
 
-        partitioning = manifest.get("federated_partitioning") or {}
+        if not manifest:
+            print(f"[TEST CONFIG] [ATTENZIONE] Nessun manifesto di provisioning trovato: uso il "
+                  f"default '{default['strategy']}'. Esegui il provisioning prima di questo scenario "
+                  f"per un risultato tracciato correttamente.")
+            return {**default, "tree_allocation": tree_allocation}
+
+        strategy = manifest.get("partition_strategy", "iid")
+        print(f"[TEST CONFIG] Partizionamento federato letto dal manifesto di provisioning: "
+              f"strategy='{strategy}' | tree_allocation='{tree_allocation}'"
+              + (" (da TREE_ALLOCATION_STRATEGY in .env)" if env_tree_allocation else " (default)") + ".")
         return {
-            "strategy": partitioning.get("strategy", "iid"),
-            "tree_allocation": partitioning.get("tree_allocation", "proportional"),
+            "strategy": strategy,
+            "tree_allocation": tree_allocation,
         }
 
     def _augment_payload_with_partitioning(self, payload: dict) -> dict:

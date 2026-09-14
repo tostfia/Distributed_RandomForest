@@ -526,7 +526,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             partitioning_info = {
                 "strategy": payload.get("partition_strategy", "iid"),
                 "alpha": payload.get("partition_alpha"),
-                "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
+                "tree_allocation": payload.get("tree_allocation_strategy", "equal"),
             }
             print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
                   f"strategy='{partitioning_info.get('strategy', 'iid')}'"
@@ -567,7 +567,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                 task_id_counter += 1
                 sub_start = sub_end
 
-            feature_selezionate = (None if self.environment == "aws" else self.select_from_config(self._resolve_dataset_type(payload)))
+            # select_from_config ora passa per checkpoint_dao (locale o S3):
+            # stesso comportamento in ogni ambiente, niente più guard su 'aws'.
+            feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
 
@@ -954,10 +956,9 @@ class FederatedOrchestrator(BaseOrchestrator):
         # 1+ GB) veniva ritrasmesso per intero via RPC UNA VOLTA PER OGNI
         # WORKER — peggio ancora del path centralizzato, dove almeno la
         # foresta viene divisa in chunk tra i worker invece di essere ripetuta.
-        feature_selezionate = (
-            None if self.environment == "aws"
-            else self.select_from_config(self._resolve_dataset_type(payload))
-        )
+        # select_from_config ora passa per checkpoint_dao (locale o S3):
+        # stesso comportamento in ogni ambiente, niente più guard su 'aws'.
+        feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
         # Soglia di decisione: proviamo PRIMA quella calibrata specificamente sul
         # modello federato (vedi _calibrate_federated_threshold, eseguita a fine
         # training se tree_type='classifier') -- calcolata sul validation set
@@ -981,15 +982,14 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         if decision_threshold is None:
             # Vedi VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py:
-            # stesso pattern di feature_selezionate sopra, incluso il guard su AWS
-            # (il file locale config_<dataset_type>.json non esiste sul container
-            # dell'orchestratore in quell'ambiente). None -> ogni worker ricade sul
+            # stesso pattern di feature_selezionate sopra. read_decision_threshold_from_config
+            # passa per checkpoint_dao (locale o S3, vedi BaseOrchestrator._resolve_baseline_config_path)
+            # quindi si comporta identicamente in ogni ambiente, incluso 'aws' -- se il
+            # manifesto non è stato caricato su S3 da run_baseline.py, ritorna semplicemente
+            # None (come in locale se il file non esiste) e ogni worker ricade sul
             # comportamento di default (argmax/soglia implicita 0.50), vedi
             # FederatedWorker.exposed_predict_subset_forest.
-            decision_threshold = (
-                None if self.environment == "aws"
-                else self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
-            )
+            decision_threshold = self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
             if decision_threshold is not None:
                 print(f"[{self.orchestrator_name}] [FALLBACK] Nessuna soglia federata calibrata "
                       f"disponibile per questo job: uso quella della baseline ({decision_threshold}).")
@@ -1219,6 +1219,11 @@ class FederatedOrchestrator(BaseOrchestrator):
             tree_type=tree_type,
             y_probs=y_probs_array
         )
+        prediction_sample = self._sample_predictions(
+            np.array(y_true_global, dtype=y_true_dtype),
+            np.array(y_pred_global, dtype=np.float64),
+            tree_type,
+        )
 
         metrics_per_worker = {}
         for w_idx, r in results_by_worker.items():
@@ -1292,7 +1297,8 @@ class FederatedOrchestrator(BaseOrchestrator):
             "failed_workers": list(failed_workers),
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
-            "metrics": metrics
+            "metrics": metrics,
+            "prediction_sample": prediction_sample,
         }
 
     def _reconstruct_and_save_global_model(self, all_trained_trees: list, tree_type: str) -> tuple:

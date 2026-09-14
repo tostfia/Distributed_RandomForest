@@ -315,7 +315,7 @@ def handle_inference():
         training_entry_for_job.get("partition_strategy", "iid") if training_entry_for_job else "iid"
     )
     inference_tree_allocation_strategy = (
-        training_entry_for_job.get("tree_allocation_strategy", "proportional") if training_entry_for_job else "proportional"
+        training_entry_for_job.get("tree_allocation_strategy", "equal") if training_entry_for_job else "equal"
     )
     inference_dataset_type = (
         job_details.get("dataset_type")

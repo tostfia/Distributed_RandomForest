@@ -264,8 +264,12 @@ class TestEngine:
             output_dir = "./test_reports/docker"
         else:
             output_dir = "./test_reports/local"
+        
         test_name = "all_tests" if len(self.global_reports) != 1 else next(iter(self.global_reports.keys()))
-        suffix = f"_n{self.n_samples_label}" if self.n_samples_label else ""
+        task_tag = self.config.get("selected_task", "classifier")
+        suffix = f"_{task_tag}"
+        if self.n_samples_label:
+            suffix += f"_n{self.n_samples_label}"
         output_path = os.path.join(output_dir, f"test_report_{test_name}{suffix}.json")
 
         try:

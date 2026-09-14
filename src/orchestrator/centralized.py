@@ -1598,11 +1598,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
             tree_type=tree_type,
             y_probs=y_probs
         )
+        prediction_sample = self._sample_predictions(y_test, final_predictions, tree_type)
         self._save_metrics(job_id, "inference", {
             "job_id": job_id, "mode": "centralized", "phase": "inference",
             "tree_type": tree_type, "testing_set_size": X_test.shape[0],
             "timings": {"total_inference_time": total_inference_time, "rpc_inference_time": rpc_inference_time},
-            "metrics": metrics
+            "metrics": metrics,
+            "prediction_sample": prediction_sample,
         })
         if hasattr(self, 'state_manager') and self.state_manager:
             try:

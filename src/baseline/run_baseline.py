@@ -20,6 +20,42 @@ from sklearn.metrics import (
 )
 from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.config import SystemConfig
+from src.dataset.checkpoint_dao import CheckpointDAOFactory
+
+# Stesso bucket/convenzione env var di federated.py e BaseOrchestrator.py: il
+# manifesto va sincronizzato lì perché l'orchestratore su AWS (container
+# Fargate/EC2) non ha accesso al filesystem locale di questa macchina, quindi
+# non può leggere './outputs_baseline/config_<dataset_type>.json' come fa in
+# locale (vedi BaseOrchestrator._resolve_baseline_config_path).
+BASELINE_CONFIG_BUCKET_NAME = os.environ.get(
+    "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+)
+
+
+def _sync_baseline_config_to_s3(config_data: dict, config_filename: str) -> None:
+    """
+    Duplica su S3 il manifesto ATTIVO appena scritto su disco locale, così
+    BaseOrchestrator.read_selected_features_from_config/
+    read_decision_threshold_from_config trovano la stessa cosa sia in
+    locale sia su AWS (stesso path risolto da
+    BaseOrchestrator._resolve_baseline_config_path).
+
+    Non solleva mai eccezioni verso il chiamante: run_baseline.py deve poter
+    girare anche su una macchina senza credenziali AWS configurate (uso
+    puramente locale) senza che questo passo faccia fallire l'intera run --
+    in quel caso il cluster su AWS semplicemente non troverà la copia S3 e
+    read_*_from_config ricadrà sul comportamento di default, con un
+    [ATTENZIONE] esplicito lato orchestratore, esattamente come se il file
+    non fosse mai stato scritto.
+    """
+    s3_path = f"s3://{BASELINE_CONFIG_BUCKET_NAME}/outputs_baseline/{config_filename}"
+    try:
+        CheckpointDAOFactory.get_dao("aws").save_json(s3_path, config_data)
+        print(f"[OK] Manifesto sincronizzato anche su '{s3_path}' (per il cluster AWS).")
+    except Exception as e:
+        print(f"[ATTENZIONE] Impossibile sincronizzare il manifesto su S3 ({s3_path}): {e}. "
+              f"Il percorso locale resta valido; il cluster AWS, se usato, ricadrà sul "
+              f"comportamento di default finché questa sync non va a buon fine.")
 
 # Import delle utility condivise e del loader con campionamento probabilistico
 from src.shared.utilities.loader.raw_csvdataloader import RawCSVDataLoader
@@ -977,6 +1013,7 @@ def run_baseline():
         with open(config_path_final, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
         print(f"[OK] Manifesto 'config_real.json' salvato correttamente in: '{config_path_final}'")
+        _sync_baseline_config_to_s3(config_data, "config_real.json")
 
     elif user_tree_type == "classifier":
         print("\n>>> FASE 2: SALTATA — riuso iperparametri ottenuti dal tuning sul dataset reale")
@@ -1036,6 +1073,7 @@ def run_baseline():
         with open(config_path_synthetic, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
         print(f"[OK] Manifesto sintetico ATTIVO ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+        _sync_baseline_config_to_s3(config_data, "config_synthetic.json")
 
         config_path_synthetic_task = os.path.join(OUTPUT_DIR, f"config_synthetic_{user_tree_type}.json")
         with open(config_path_synthetic_task, "w", encoding="utf-8") as f:
@@ -1121,6 +1159,7 @@ def run_baseline():
         with open(config_path_synthetic, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
         print(f"[OK] Manifesto sintetico ATTIVO ({user_tree_type}) salvato in: '{config_path_synthetic}'")
+        _sync_baseline_config_to_s3(config_data, "config_synthetic.json")
 
         config_path_synthetic_task = os.path.join(OUTPUT_DIR, f"config_synthetic_{user_tree_type}.json")
         with open(config_path_synthetic_task, "w", encoding="utf-8") as f:
@@ -1405,6 +1444,7 @@ def run_baseline():
                 print(f"[OK] Soglia di decisione persistita in '{REAL_CONFIG_PATH}' "
                       f"(decision_threshold, soglia_vincolata_fpr) per il riuso da "
                       f"centralized.py/federated.py.")
+                _sync_baseline_config_to_s3(existing_config, "config_real.json")
             except Exception as e:
                 print(f"[ATTENZIONE] Impossibile aggiornare '{REAL_CONFIG_PATH}' con la "
                       f"soglia di decisione: {e}. Il percorso distribuito ricadrà sul "

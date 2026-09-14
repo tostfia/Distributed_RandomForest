@@ -1,0 +1,64 @@
+{
+  "performance_and_metrics": {
+    "scenario_description": "Valutazione delle prestazioni pure di addestramento in esecuzione local.",
+    "status": "SUCCESS",
+    "execution_mode": "local",
+    "duration_seconds": 9.6115,
+    "timing_breakdown": {
+      "etl_seconds": 0.0,
+      "training_only_seconds": 6.3872,
+      "aggregation_seconds": 0.6844,
+      "oob_estimation_seconds": 0.0,
+      "_NOTA": "training_only_seconds e' il termine confrontabile con la baseline (T_seq monocore / T_1node multicore). duration_seconds include anche ETL, aggregazione e stima OOB, che la baseline non esegue.",
+      "unaccounted_seconds": 2.5399
+    },
+    "trees_built": 200,
+    "throughput_trees_per_sec": 20.8083,
+    "throughput_trees_per_sec_training_only": 31.3126,
+    "model_accuracy_metrics": {
+      "accuracy": 0.9426941031639421,
+      "precision": 0.9738112370330395,
+      "recall": 0.8165751134463817,
+      "f1_score": 0.8882887440944612,
+      "auc": 0.9738233876157097,
+      "confusion_matrix": [
+        [
+          203819,
+          1747
+        ],
+        [
+          14592,
+          64961
+        ]
+      ],
+      "classification_report": {
+        "0": {
+          "precision": 0.9331901781503679,
+          "recall": 0.9915015128961014,
+          "f1-score": 0.9614625321656599,
+          "support": 205566.0
+        },
+        "1": {
+          "precision": 0.9738112370330395,
+          "recall": 0.8165751134463817,
+          "f1-score": 0.8882887440944612,
+          "support": 79553.0
+        },
+        "accuracy": 0.9426941031639421,
+        "macro avg": {
+          "precision": 0.9535007075917037,
+          "recall": 0.9040383131712415,
+          "f1-score": 0.9248756381300606,
+          "support": 285119.0
+        },
+        "weighted avg": {
+          "precision": 0.9445241372947715,
+          "recall": 0.9426941031639421,
+          "f1-score": 0.9410458136641638,
+          "support": 285119.0
+        }
+      },
+      "testing_set_size": 285119
+    }
+  }
+}

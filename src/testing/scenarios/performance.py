@@ -45,7 +45,7 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         throughput = num_trees / duration if duration > 0 else 0
         training_only = timing["training_only_seconds"]
         throughput_training_only = (num_trees / training_only) if training_only > 0 else 0
-        accuracy_metrics = self._run_inference_and_get_metrics(payload, task_type)
+        accuracy_metrics, prediction_sample = self._run_inference_and_get_metrics(payload, task_type)
 
         return {
             "scenario_description": f"Valutazione delle prestazioni pure di addestramento in esecuzione {execution_mode}.",
@@ -56,7 +56,8 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "trees_built": num_trees,
             "throughput_trees_per_sec": round(throughput, 4),
             "throughput_trees_per_sec_training_only": round(throughput_training_only, 4),
-            "model_accuracy_metrics": accuracy_metrics
+            "model_accuracy_metrics": accuracy_metrics,
+            "prediction_sample": prediction_sample,
         }
     def _build_payload(self):
         hp = self._resolve_hyperparameters()
@@ -80,10 +81,12 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         modalità): non serve nessun link/alias temporaneo.
         """
         accuracy_metrics = {}
+        prediction_sample = None
         try:
             result = self.orchestrator._execute_inference_step(payload) or {}
             accuracy_metrics = dict(result.get("metrics", {}))
             accuracy_metrics["testing_set_size"] = result.get("testing_set_size", 0)
+            prediction_sample = result.get("prediction_sample")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -97,4 +100,4 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             else:
                 accuracy_metrics = {"mean_squared_error": 0.0}
 
-        return accuracy_metrics
+        return accuracy_metrics, prediction_sample

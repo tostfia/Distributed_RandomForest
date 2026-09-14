@@ -407,7 +407,7 @@ class PlotGenerator:
         data = self._scenarios(run).get(name)
         return data if isinstance(data, dict) else None
 
-    def _pick_run(self, required_names, mode=None, prefer="env"):
+    def _pick_run(self, required_names, mode=None,task=None, prefer="env"):
         """
         Sceglie LA run (cioe' il file, cioe' la sessione di test) da cui
         prendere i dati per UN grafico.
@@ -428,6 +428,8 @@ class PlotGenerator:
         best, best_key = None, None
         for run in self.runs:
             if mode is not None and run["mode"] != mode:
+                continue
+            if task is not None and task not in run["fingerprint"]["tasks"]:
                 continue
             scenarios = run["scenarios"]
             coverage = sum(1 for n in required_names if self._is_usable(scenarios.get(n)))
@@ -710,6 +712,7 @@ class PlotGenerator:
             ("Feature Importance",                self.plot_feature_importance),
             ("Matrice di confusione",             self.plot_confusion_matrix),
             ("Confronto metriche ML",             self.plot_ml_metrics_comparison),
+            ("Predetto vs Reale (regressione)",   self.plot_regression_scatter),   
             ("Curva di strong scaling",           self.plot_strong_scaling),
             ("Speedup ed efficienza",             self.plot_speedup_and_efficiency),
             ("Throughput",                        self.plot_throughput),
@@ -1795,6 +1798,58 @@ class PlotGenerator:
                             "sensibile al RTT: piu' chiamate per job, piu' il ritardo si "
                             "accumula sul percorso critico. " + self._provenance(run))
         self._save(fig, "cmp_02_latenza_rete.png")
+
+
+
+    def plot_regression_scatter(self):
+        """Predetto vs Reale per il task di regressione, via hexbin (dataset grande)."""
+        name = "Predetto vs Reale (regressione)"
+
+        run = self._pick_run(("performance_and_metrics",), task="regressione")
+        if run is None:
+            self._skip(name, "nessun report di 'performance_and_metrics' per un task di regressione")
+            return
+
+        perf = self._scenario("performance_and_metrics", run)
+        sample = perf.get("prediction_sample") if isinstance(perf, dict) else None
+        if not isinstance(sample, dict) or not sample.get("y_true") or not sample.get("y_pred"):
+            self._skip(name, "campione di predizioni assente nel report (job non ancora "
+                            "rieseguito con la nuova versione)")
+            return
+
+        y_true = np.array(sample["y_true"], dtype=np.float64)
+        y_pred = np.array(sample["y_pred"], dtype=np.float64)
+        if y_true.size == 0 or y_true.shape != y_pred.shape:
+            self._skip(name, "campione di predizioni malformato (shape y_true/y_pred incoerenti)")
+            return
+
+        metrics, _ = self._find_accuracy_metrics(run)
+        r2 = self._get_float(metrics, "r2")
+
+        fig, ax = plt.subplots(figsize=(6.4, 6.0))
+        lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+
+        hb = ax.hexbin(y_true, y_pred, gridsize=60, cmap="Blues", mincnt=1)
+        ax.plot(lims, lims, color=PALETTE["secondary"], linewidth=1.4,
+                linestyle="--", label="Predizione perfetta (y = x)")
+
+        fig.colorbar(hb, ax=ax, label="Numero di campioni")
+        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_xlabel("Valore reale"); ax.set_ylabel("Valore predetto")
+        ax.set_aspect("equal", adjustable="box")
+        ax.legend(loc="upper left")
+
+        title = "Predetto vs Reale - Regressione"
+        if r2 is not None:
+            title += f" (R² = {r2:.4f})"
+        self._titles(fig, ax, title, self._env_subtitle(run))
+
+        population = sample.get("population_size")
+        pop_note = f" (popolazione test: {population:,})" if population else ""
+        self._footnote(fig, f"Campione casuale di {len(y_true):,} predizioni su un totale di "
+                            f"{sample.get('sample_size', len(y_true)):,}{pop_note}. "
+                            f"{self._provenance(run)}")
+        self._save(fig, "ml_05_scatter_predetto_reale.png")
 
 
 if __name__ == "__main__":
