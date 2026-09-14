@@ -145,13 +145,13 @@ e avviare un test.
 
 Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 
-> ⚠️ **L'apply crea l'infrastruttura ma la lascia ferma** (vedi sezione 6):
+> **L'apply crea l'infrastruttura ma la lascia ferma** (vedi sezione 6):
 > nessun worker né istanza orchestrator è in esecuzione subito dopo un
 > `apply` pulito. Avvia entrambi prima di lanciare qualunque test — un job
 > inviato a un'infrastruttura ferma resta semplicemente in coda SQS senza
 > che nessuno lo reclami, senza un errore esplicito che lo segnali.
 
-> ⚠️ **Prima di lanciare qualunque script, aggiorna `API_GATEWAY_URL` nel
+> **Prima di lanciare qualunque script, aggiorna `API_GATEWAY_URL` nel
 > `.env`** con il valore mostrato nell'output `next_steps` dell'apply appena
 > fatto. Questo endpoint **cambia a ogni ricreazione dello stack** (nuovo
 > apply dopo un `destroy`, o dopo un reset dell'account Lab): se lasci il
