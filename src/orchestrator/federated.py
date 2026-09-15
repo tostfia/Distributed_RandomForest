@@ -1298,6 +1298,8 @@ class FederatedOrchestrator(BaseOrchestrator):
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
             "metrics": metrics,
+            "metrics_per_worker": metrics_per_worker,   # <-- aggiungi
+            "metrics_macro": metrics_macro,   
             "prediction_sample": prediction_sample,
         }
 

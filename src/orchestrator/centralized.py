@@ -1625,7 +1625,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
             "testing_set_size": int(X_test.shape[0]),
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
-            "metrics": metrics
+            "metrics": metrics,
+            "prediction_sample": prediction_sample,
         }
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):

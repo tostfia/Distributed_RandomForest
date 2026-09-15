@@ -712,7 +712,8 @@ class PlotGenerator:
             ("Feature Importance",                self.plot_feature_importance),
             ("Matrice di confusione",             self.plot_confusion_matrix),
             ("Confronto metriche ML",             self.plot_ml_metrics_comparison),
-            ("Predetto vs Reale (regressione)",   self.plot_regression_scatter),   
+            ("Predetto vs Reale (regressione)",   self.plot_regression_scatter),  
+            ("Residui (regressione)",             self.plot_regression_residuals), 
             ("Curva di strong scaling",           self.plot_strong_scaling),
             ("Speedup ed efficienza",             self.plot_speedup_and_efficiency),
             ("Throughput",                        self.plot_throughput),
@@ -1850,6 +1851,50 @@ class PlotGenerator:
                             f"{sample.get('sample_size', len(y_true)):,}{pop_note}. "
                             f"{self._provenance(run)}")
         self._save(fig, "ml_05_scatter_predetto_reale.png")
+
+    def plot_regression_residuals(self):
+        """Residui (predetto - reale) vs valore reale, via hexbin."""
+        name = "Residui (regressione)"
+
+        run = self._pick_run(("performance_and_metrics",), task="regressione")
+        if run is None:
+            self._skip(name, "scenario 'performance_and_metrics' non disponibile per un task di regressione")
+            return
+
+        perf = self._scenario("performance_and_metrics", run)
+        sample = perf.get("prediction_sample") if isinstance(perf, dict) else None
+        if not isinstance(sample, dict) or not sample.get("y_true") or not sample.get("y_pred"):
+            self._skip(name, "campione di predizioni assente nel report")
+            return
+
+        y_true = np.array(sample["y_true"], dtype=np.float64)
+        y_pred = np.array(sample["y_pred"], dtype=np.float64)
+        if y_true.size == 0 or y_true.shape != y_pred.shape:
+            self._skip(name, "campione di predizioni malformato (shape y_true/y_pred incoerenti)")
+            return
+
+        residuals = y_pred - y_true
+
+        fig, ax = plt.subplots(figsize=(7.2, 5.2))
+        hb = ax.hexbin(y_true, residuals, gridsize=60, cmap="Blues", mincnt=1)
+        ax.axhline(0.0, color=PALETTE["secondary"], linewidth=1.4, linestyle="--",
+                label="Residuo nullo (predizione perfetta)")
+
+        fig.colorbar(hb, ax=ax, label="Numero di campioni")
+        ax.set_xlabel("Valore reale")
+        ax.set_ylabel("Residuo (predetto − reale)")
+        ax.legend(loc="upper right")
+
+        mean_res = float(residuals.mean())
+        std_res = float(residuals.std())
+        self._titles(fig, ax, "Residui del modello - Regressione", self._env_subtitle(run))
+
+        population = sample.get("population_size")
+        pop_note = f" (popolazione test: {population:,})" if population else ""
+        self._footnote(fig, f"Campione di {len(y_true):,} predizioni{pop_note}. "
+                            f"Media residui: {mean_res:+.3f}, deviazione standard: {std_res:.3f}. "
+                            f"{self._provenance(run)}")
+        self._save(fig, "ml_06_residui_regressione.png")
 
 
 if __name__ == "__main__":

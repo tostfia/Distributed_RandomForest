@@ -45,7 +45,7 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
         throughput = num_trees / duration if duration > 0 else 0
         training_only = timing["training_only_seconds"]
         throughput_training_only = (num_trees / training_only) if training_only > 0 else 0
-        accuracy_metrics, prediction_sample = self._run_inference_and_get_metrics(payload, task_type)
+        accuracy_metrics, prediction_sample, per_worker_metrics, macro_metrics = self._run_inference_and_get_metrics(payload, task_type)
 
         return {
             "scenario_description": f"Valutazione delle prestazioni pure di addestramento in esecuzione {execution_mode}.",
@@ -58,6 +58,8 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             "throughput_trees_per_sec_training_only": round(throughput_training_only, 4),
             "model_accuracy_metrics": accuracy_metrics,
             "prediction_sample": prediction_sample,
+            "metrics_per_worker": per_worker_metrics,
+            "metrics_macro": macro_metrics,
         }
     def _build_payload(self):
         hp = self._resolve_hyperparameters()
@@ -87,6 +89,8 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             accuracy_metrics = dict(result.get("metrics", {}))
             accuracy_metrics["testing_set_size"] = result.get("testing_set_size", 0)
             prediction_sample = result.get("prediction_sample")
+            per_worker_metrics = result.get("metrics_per_worker")   # None in centralizzato
+            macro_metrics = result.get("metrics_macro")  
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -100,4 +104,4 @@ class PerformanceAndMetricsScenario(BaseTestScenario):
             else:
                 accuracy_metrics = {"mean_squared_error": 0.0}
 
-        return accuracy_metrics, prediction_sample
+        return accuracy_metrics, prediction_sample, per_worker_metrics, macro_metrics
