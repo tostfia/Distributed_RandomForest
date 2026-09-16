@@ -1545,16 +1545,34 @@ class CentralizedOrchestrator(BaseOrchestrator):
         for t in threads:
             t.join()
         
-        try:
-            if failed_tasks:
-                raise RuntimeError(f"Inferenza parziale: {len(failed_tasks)} chunk non completati.")
-            if not task_queue.empty():
-                raise RuntimeError("Task in coda orfani: tutti i worker sono crashati.")
-        finally:
+        # FAULT TOLERANCE (fix): un chunk di alberi mancante non deve abortire
+        # l'intera inferenza. Con l'aggregazione a soft voting usata qui (media
+        # delle predizioni per-albero), una foresta con meno alberi resta un
+        # ensemble valido, solo con meno alberi che votano — esattamente
+        # l'"esito parziale" richiesto dalla traccia. PRIMA di questo fix, il
+        # blocco sollevava un'eccezione non appena 'failed_tasks' o
+        # 'task_queue' non erano vuoti, uscendo dalla funzione PRIMA di
+        # raggiungere l'aggregazione e il return con "status": "PARTIAL" più
+        # sotto: quel ramo restava di fatto irraggiungibile in ogni caso di
+        # guasto. Ci fermiamo ora solo se non è stato raccolto NESSUN chunk:
+        # lì non c'è foresta da aggregare, quindi resta un fallimento vero.
+        if not predictions_chunks:
             with self.connessioni_lock:
                 for conn in self.connessioni_attive:
                     try: conn.close()
                     except Exception: pass
+            raise RuntimeError("Inferenza fallita: nessun worker ha completato un chunk (0 alberi disponibili).")
+
+        if failed_tasks or not task_queue.empty():
+            orphaned = task_queue.qsize()
+            print(f"[{self.orchestrator_name}] [WARN] Inferenza PARZIALE: {len(failed_tasks)} chunk falliti "
+                  f"definitivamente, {orphaned} mai tentati. Procedo con i {len(predictions_chunks)} chunk "
+                  f"raccolti (foresta ridotta, ma ensemble valido).")
+
+        with self.connessioni_lock:
+            for conn in self.connessioni_attive:
+                try: conn.close()
+                except Exception: pass
 
         rpc_inference_time = time.perf_counter() - rpc_start_time
 
@@ -1621,7 +1639,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # la suite di test locale — deve poter leggere le metriche reali dal valore di
         # ritorno, invece di affidarsi a un monkey-patch interno fragile.
         return {
-            "status": "SUCCESS" if not failed_tasks else "PARTIAL",
+            "status": "SUCCESS" if (not failed_tasks and task_queue.empty()) else "PARTIAL",
             "testing_set_size": int(X_test.shape[0]),
             "total_inference_time": total_inference_time,
             "rpc_inference_time": rpc_inference_time,
