@@ -4,7 +4,7 @@
 # PROBLEMA MISURATO: in modalita' centralized, ogni worker scarica l'INTERO
 # dataset condiviso da S3 (fino a ~1.5 GB), anche quando N worker fanno tutti
 # lo stesso identico download per lo stesso job - costo di rete fisso per
-# worker, misurato in ~16s a testa l'11/9/2026 (vedi dataset_dao.py, timing
+# worker, misurato in ~16s a testa (vedi dataset_dao.py, timing
 # strumentato). Con N worker, significa N download ridondanti dello stesso
 # file.
 #

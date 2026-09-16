@@ -702,12 +702,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         except queue.Empty:
                         # Se la coda è temporaneamente vuota ma il target globale di alberi non è raggiunto,
                         # i worker non devono terminare prematuramente (per gestire eventuali crash o task reinseriti).
-                        # FIX (punto 6): la terminazione è consentita SOLO a training completato. Prima si
-                        # usciva anche quando questo era l'ultimo worker attivo rimasto (num_worker_attivi
-                        # <= 1) -- ma se in seguito un suo task fosse stato riaccodato per un fallimento,
-                        # nessun thread sarebbe rimasto a consumarlo: il controllo di sicurezza esistente
-                        # subito dopo (raise RuntimeError) scatta solo con active_worker_names VUOTO, non
-                        # con un solo worker rimasto ma uscito prematuramente dal polling.
+                        # La terminazione è consentita SOLO a training completato.
                             with results_lock:
                                 total_attuali = len(all_trained_trees)
 
@@ -884,8 +879,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                             self._trees_cache[self.current_job_id] = all_trained_trees
                                             print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Parte di Task {task_id} archiviata. Progressivo in RAM/Storage: {current_total} alberi.")
 
-                                            # FIX (punto 5): l'heartbeat va scritto SOLO se il
-                                            # checkpoint fisico e' andato a buon fine -- spostato
+                                            # L'heartbeat va scritto SOLO se il
+                                            # checkpoint fisico e' andato a buon fine; spostato
                                             # DENTRO il try, altrimenti DynamoDB dichiarerebbe
                                             # alberi_addestrati=current_total anche quando
                                             # _persist_trees_delta e' appena fallito (vedi except

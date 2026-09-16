@@ -469,33 +469,10 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             hp = payload.get("hyperparameters", {})
             tree_type = hp.get("tree_type", "classifier")
-            # FIX: 'class_weight' era già supportato lato worker
-            # (exposed_train_local_federated_forest / build_single_tree in
-            # federatedWorker.py: se presente negli hyperparameters, viene
-            # passato al DecisionTreeClassifier), ma non veniva MAI impostato
-            # qui -- restava sempre None, cioè nessun bilanciamento per
-            # nessun albero. Rilevante soprattutto con partition_strategy
-            # non-IID come 'by_day', dove il rapporto Benign/Attacco di un
-            # singolo shard può essere molto diverso da quello globale (es.
-            # worker con 13 o 7 soli campioni della classe minoritaria):
-            # 'balanced' pesa ogni classe in proporzione inversa alla sua
-            # frequenza LOCALE, così anche gli alberi di un worker con shard
-            # fortemente sbilanciato non collassano semplicemente sulla
-            # classe locale maggioritaria. Rispetta comunque un valore
-            # esplicito nel manifesto (hp), se presente; il default
-            # 'balanced' si applica solo ai classificatori, mai alla
-            # regressione (class_weight non ha senso lì).
+        
             class_weight = hp.get("class_weight", "balanced" if tree_type == "classifier" else None)
 
-            # FIX: con dataset_type='synthetic', ogni worker generava un
-            # numero FISSO di campioni (166666, il fallback hardcoded in
-            # _load_synthetic_data quando 'n_samples' non è tra gli
-            # hyperparameters ricevuti) indipendentemente da quanti worker
-            # sono effettivamente attivi -- coincidenza numerica con
-            # 1.000.000/6, non un calcolo dinamico: con un numero di worker
-            # diverso da 6, la somma dei dati "visti" dal federato smetteva
-            # di corrispondere al totale usato dal centralizzato, rendendo i
-            # due esperimenti non più confrontabili sullo stesso volume dati.
+ 
             # Qui leggiamo il totale da config_synthetic.json (stesso valore
             # che il centralizzato usa per intero) e lo ripartiamo in quote
             # il più possibile uguali tra i worker REALMENTE attivi in questo
@@ -670,10 +647,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # di rispondere (vedi federatedWorker.py,
                         # exposed_train_local_federated_forest), e qui ci
                         # limitiamo a un piccolo ack + rilettura diretta dallo
-                        # storage. Stesso fix già applicato al path centralizzato
-                        # per evitare l'hang osservato quando RPyC deve
-                        # trasportare un payload sincrono molto grande come
-                        # valore di ritorno (Scenario 2 - Scalabilità).
+                        # storage. 
                         ack = obtain(ack_raw)
                         if not isinstance(ack, dict) or not ack.get("ack"):
                             raise RuntimeError(
@@ -689,15 +663,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # 'load_task_trees_from_shared_storage' ritorna gli alberi
                         # già deserializzati, evitando il giro superfluo
                         # oggetti->bytes->oggetti che load_task_from_shared_storage
-                        # avrebbe richiesto qui (stesso fix applicato al path
-                        # centralizzato dopo l'OOM osservato sull'Orchestratore).
+    
                         #
                         # 'tree_reconstruction_lock' (definito in BaseOrchestrator,
                         # condiviso con il path centralizzato) serializza QUESTA fase
                         # tra i thread worker, per evitare che più task vengano
-                        # ricomposti in RAM nello stesso istante -- stesso fix
-                        # applicato a centralized.py dopo l'OOM osservato anche con
-                        # 16GB di memoria sull'Orchestratore.
+                        # ricomposti in RAM nello stesso istante 
                         synthetic_source_info = f"shared_train_{self.current_job_id}.csv"
                         with self.tree_reconstruction_lock:
                             result_trees = load_task_trees_from_shared_storage(
@@ -738,16 +709,8 @@ class FederatedOrchestrator(BaseOrchestrator):
                                     self._trees_cache[self.current_job_id] = snapshot
                                     print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Task {task_id} archiviato. Progressivo in RAM/Storage: {current_total} alberi.")
 
-                                    # FIX (punto 5): l'heartbeat va scritto SOLO se il
-                                    # checkpoint fisico e' andato a buon fine -- spostato DENTRO
-                                    # il try, altrimenti DynamoDB dichiarerebbe
-                                    # alberi_addestrati=current_total anche quando
-                                    # _persist_trees_delta e' appena fallito (vedi except
-                                    # sotto), cioe' piu' alberi di quelli davvero recuperabili
-                                    # dal checkpoint in caso di failover. checkpoint_lock_state
-                                    # ["count"] (appena aggiornato sopra) e' la fonte di verita'
-                                    # di quanto e' STATO persistito, non di quanto si STAVA per
-                                    # persistere.
+                                    # L'heartbeat va scritto SOLO se il
+                                    # checkpoint fisico e' andato a buon fine 
                                     if hasattr(self, 'state_manager') and self.state_manager:
                                         try:
                                             self.state_manager.update_request_status(
@@ -839,21 +802,6 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia federata fallita "
                           f"(non bloccante, l'inferenza ricadrà sulla soglia della baseline): {e_thr}")
 
-            # FIX MEMORIA: NON passare più 'alberi_reali=collected_trees' qui.
-            # Il commento originale in _save_checkpoint diceva esplicitamente che
-            # quel ramo era pensato per non essere MAI esercitato in condizioni
-            # normali ("BaseOrchestrator chiama _save_checkpoint senza
-            # 'alberi_reali'") -- ma passandolo qui veniva invece eseguito ad
-            # OGNI round completato con successo, ri-serializzando l'INTERA
-            # foresta un'altra volta (dopo che era già stata scritta un albero
-            # alla volta in model_dir da _reconstruct_and_save_global_model, e
-            # dopo che era già stata salvata incrementalmente durante il round
-            # da _persist_trees_delta ad ogni task completato). Tre copie
-            # ridondanti dello stesso lavoro, proprio nel momento in cui
-            # 'collected_trees' occupa già il picco di RAM del round: è una
-            # delle cause dell'OOM osservato sull'orchestratore. Il checkpoint
-            # leggero (stato/contatori, senza gli alberi) resta comunque
-            # salvato da super()._save_checkpoint(...) dentro _save_checkpoint.
             self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
 
             # Libera subito la cache in-memoria di questo job: serviva solo per
@@ -895,15 +843,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         inference_start_time = time.perf_counter()
 
-        # FIX allineamento path: qui si ricostruiva il path a mano con
-        # os.path.join(self.models_dir, ...), un attributo non impostato da
-        # questa classe (probabile residuo di un'implementazione precedente)
-        # e comunque con una convenzione di naming diversa da quella usata in
-        # fase di training (manca il prefisso 'model_' e, su AWS, il
-        # sottopercorso 'saved_models/federated/'). Il training salva sempre
-        # tramite _resolve_model_dir/_resolve_model_path (vedi più sotto in
-        # questo file), quindi l'inferenza deve leggere dagli stessi identici
-        # resolver, non da un path costruito in modo indipendente.
+     
         trees_dir = self._resolve_model_dir(job_id)
         model_pkl = self._resolve_model_path(job_id)
         meta_path = self._resolve_model_meta_path(job_id)
@@ -934,9 +874,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         # deserializzare l'intero modello: qui serve solo per loggare/taggare
         # le metriche e per 'global_classes' nel payload ai worker — sono loro
         # (non l'orchestratore) a scaricare e deserializzare gli alberi veri e
-        # propri per predire (vedi 'model_path' passato più sotto). Fallback al
-        # caricamento completo per compatibilità con modelli salvati PRIMA di
-        # questo fix (nessun file '.meta' ancora presente per quel job).
+        # propri per predire (vedi 'model_path' passato più sotto). 
         global_classes = None
         if self.checkpoint_dao.exists(meta_path):
             meta = self.checkpoint_dao.load(meta_path)
@@ -946,7 +884,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                   f"Numero totale di alberi: {total_trees}")
         else:
             print(f"[{self.orchestrator_name}] [WARN] Metadati leggeri non trovati per questo job "
-                  f"(modello salvato prima di questo fix?): fallback al caricamento completo di "
+                  f"(fallback al caricamento completo di "
                   f"{self._resolve_model_dir(job_id)}...")
             fallback_model = self.checkpoint_dao.load(self._resolve_model_path(job_id))
             total_trees = len(fallback_model.estimators_)
@@ -1342,14 +1280,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             # materializzare tutti i 100 alberi insieme in RAM.
             model_dir = self._resolve_model_dir(self.current_job_id)
             total_trees = len(all_trained_trees)
-            # FIX MEMORIA: prima questo ciclo scriveva ogni albero su disco ma
-            # lasciava TUTTI i riferimenti vivi nella lista 'all_trained_trees'
-            # fino alla fine -- quindi per tutta la durata del ciclo la RAM
-            # doveva comunque contenere l'intera foresta (100 alberi in
-            # questo test), proprio nel momento di picco. Sostituendo ogni
-            # elemento con None non appena è stato persistito, il refcount
-            # dell'albero scende a zero e il garbage collector di CPython può
-            # liberarlo subito, invece che solo all'uscita dalla funzione.
+
             # gc.collect() periodico (ogni 10 alberi, stesso batch_size usato
             # per lo streaming in inferenza in federatedWorker.py) forza il
             # rilascio effettivo della memoria invece di aspettare che il GC
@@ -1430,12 +1361,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                   f"Nessuna soglia federata calcolata.")
             return None
 
-        # FIX: prima si passava 'model_path' (il vecchio blob monolitico),
-        # ma da quando il training salva un file per albero in 'model_dir'
-        # (vedi _reconstruct_and_save_global_model), 'model_path' non viene
-        # più scritto su disco -- il worker lo avrebbe cercato invano. Il
-        # caricamento va fatto in streaming da model_dir/num_trees, come già
-        # avviene per l'inferenza vera e propria (exposed_predict_subset_forest).
+
         model_dir = self._resolve_model_dir(job_id)
         if num_trees is None:
             # Fallback: se il chiamante non lo passa esplicitamente (es. in
@@ -1598,18 +1524,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         return best_threshold
 
     def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
-        """
-        FIX (punto 2): rimosso il parametro 'alberi_reali' e il ramo che lo
-        gestiva -- era codice morto (BaseOrchestrator._save_checkpoint non
-        accetta 'alberi_reali'; il salvataggio fisico degli alberi passa
-        SEMPRE da _persist_trees_delta nel dispatch incrementale, vedi
-        _execute_training_step). Il commento originale del ramo diceva
-        esplicitamente "oggi mai esercitato" -- e infatti l'unica volta in
-        cui era stato passato per davvero (vedi FIX MEMORIA più sopra,
-        'alberi_reali=collected_trees' rimosso dalla chiamata a
-        _save_checkpoint a fine round) causava una tripla serializzazione
-        dell'intera foresta, contribuendo all'OOM osservato sull'orchestratore.
-        """
+   
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
 
     def _clean_checkpoint(self, job_id: str):

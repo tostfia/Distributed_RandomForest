@@ -281,13 +281,7 @@ class OrchestratorFailoverScenario(BaseTestScenario):
 
     def run(self) -> dict:
 
-        # BUGFIX: leggeva erroneamente il blocco 'fault_tolerance' (parametri
-        # dello scenario 4, Guasto Worker), che non contiene nessuna delle tre
-        # chiavi usate da QUESTO scenario. Il risultato era che
-        # max_wait_for_training_start_seconds/failover_detection_margin_seconds/
-        # max_monitor_timeout_seconds ricadevano sempre sui default hardcoded
-        # (400/90/790) sotto, IGNORANDO silenziosamente qualunque valore
-        # impostato in test_config.json sotto 'orchestrator_failover'.
+       
         ft_cfg = _merge_aws_overrides(self.config, "orchestrator_failover")
 
         orch_leader = self.orchestrator

@@ -224,8 +224,7 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
                 # Nome distinto per max_features: senza questo, la seconda
                 # chiamata a questa cache (per l'altro valore di
                 # max_features) sovrascriverebbe silenziosamente il
-                # dendrogramma della prima (bug corretto in
-                # CICIDSFeatureSelector).
+                # dendrogramma della prima 
                 dendrogram_plot_path=f"feature_correlation_dendrogram_{max_features}.png",
             )
             train_selected = fs.fit_transform(train_df)

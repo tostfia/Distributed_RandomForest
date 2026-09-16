@@ -515,10 +515,9 @@ class FederatedWorker(BaseWorker):
         # che il prossimo round arrivi via RPC e trovi meno margine del
         # previsto.
         gc.collect()
-        # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore li
-        # rilegge dallo storage condiviso con lo stesso 'source_info' sintetico
-        # (vedi federated.py). Stesso fix già applicato al path centralizzato per
-        # evitare l'hang su payload grandi come valore di ritorno RPC sincrono.
+        # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore
+        # rilegge gli alberi dallo storage condiviso con lo stesso 'source_info' sintetico
+
         return {"ack": True, "num_trees": n_estimators_local}
 
     def _resolve_selected_features(self, dataset_type: str, hyperparameters: dict):
