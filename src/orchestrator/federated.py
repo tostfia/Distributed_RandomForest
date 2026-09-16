@@ -1597,21 +1597,20 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         return best_threshold
 
-    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
+        """
+        FIX (punto 2): rimosso il parametro 'alberi_reali' e il ramo che lo
+        gestiva -- era codice morto (BaseOrchestrator._save_checkpoint non
+        accetta 'alberi_reali'; il salvataggio fisico degli alberi passa
+        SEMPRE da _persist_trees_delta nel dispatch incrementale, vedi
+        _execute_training_step). Il commento originale del ramo diceva
+        esplicitamente "oggi mai esercitato" -- e infatti l'unica volta in
+        cui era stato passato per davvero (vedi FIX MEMORIA più sopra,
+        'alberi_reali=collected_trees' rimosso dalla chiamata a
+        _save_checkpoint a fine round) causava una tripla serializzazione
+        dell'intera foresta, contribuendo all'OOM osservato sull'orchestratore.
+        """
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
-
-        if alberi_reali is not None and len(alberi_reali) > 0:
-            try:
-                # Sostituzione integrale dello stato: si azzera e si riscrive come
-                # parte 0. Percorso oggi mai esercitato — BaseOrchestrator chiama
-                # _save_checkpoint senza 'alberi_reali' — ma va tenuto coerente
-                # col formato a parti, altrimenti reintrodurrebbe un monolitico.
-                self._purge_trees_checkpoint(job_id)
-                self._persist_trees_delta(job_id, alberi_reali, 0, 0)
-                checkpoint_trees_path = self._resolve_trees_checkpoint_path(job_id)
-                print(f"[{self.orchestrator_name}] Checkpoint alberi salvato in {checkpoint_trees_path}.")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [ERRORE CHECKPOINT] Impossibile salvare checkpoint alberi: {e}")
 
     def _clean_checkpoint(self, job_id: str):
         super()._clean_checkpoint(job_id)

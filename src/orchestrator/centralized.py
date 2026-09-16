@@ -1399,23 +1399,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
             "prediction_sample": prediction_sample,
         }
 
-    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int, alberi_reali: list = None):
+    def _save_checkpoint(self, job_id: str, current_alberi: int, retries: int, base_random_state: int):
         """
-        Estende il checkpoint della classe base aggiungendo il salvataggio FISICO
-        degli alberi (specifico del calcolo centralizzato).
-        """
-        # 1. Chiamiamo la classe base per aggiornare DynamoDB 
-        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
-        
-        # 2. Se ci sono alberi fisici da blindare su disco/S3, lo facciamo qui
-        if alberi_reali is not None and len(alberi_reali) > 0:
-            try:
+        Estende il checkpoint della classe base (metadati logici su DynamoDB).
 
-                self._purge_trees_checkpoint(job_id)
-                self._persist_trees_delta(job_id, alberi_reali, 0, 0)
-                print(f"[{self.orchestrator_name}] [CENTRALIZED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi salvati in storage.")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [ERRORE STORAGE] Fallito salvataggio fisico degli alberi: {e}")
+        FIX (punto 2): rimosso il parametro 'alberi_reali' e il ramo che lo
+        gestiva -- era codice morto (BaseOrchestrator._save_checkpoint non
+        accetta 'alberi_reali' e nessun chiamante lo passava mai; il
+        salvataggio fisico degli alberi passa SEMPRE da _persist_trees_delta
+        nel dispatch incrementale, vedi _execute_training_step). Tenerlo in
+        vita rischiava di essere riattivato per errore: farlo era già stata
+        la causa di un OOM osservato in produzione quando lo stesso pattern
+        era stato usato lato federato (tripla serializzazione dell'intera
+        foresta), poi rimosso da lì per lo stesso motivo (vedi federated.py).
+        """
+        super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
 
     def _clean_checkpoint(self, job_id: str):
 
