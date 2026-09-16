@@ -116,11 +116,7 @@ class FaultToleranceScenario(BaseTestScenario):
         # Segnala al thread killer che il job sotto test è già concluso: senza
         # questo, un guasto programmato DOPO la fine del job (kill_delay più
         # lungo del tempo reale di training) scatterebbe comunque, ma
-        # colpendo un job/scenario SUCCESSIVO — esattamente il bug osservato
-        # eseguendo 'all' (il kill dello scenario 4 è comparso durante lo
-        # scenario 6). Il thread lo controlla PRIMA di procedere al kill vero
-        # e proprio, e se il job è già finito annulla il guasto invece di
-        # spararlo a vuoto/tardi.
+        # colpendo un job/scenario SUCCESSIVO 
         job_done_event = threading.Event()
         fault_triggered = {"value": False}
 
@@ -227,7 +223,7 @@ class FaultToleranceScenario(BaseTestScenario):
         # concluda (annullandosi o sparando) PRIMA di ritornare: altrimenti,
         # se il job finisce prima del kill_delay, il thread resterebbe vivo
         # (daemon=True, mai altrimenti atteso/cancellato) e potrebbe sparare
-        # il kill nel bel mezzo dello scenario successivo — il bug osservato.
+        # il kill nel bel mezzo dello scenario successivo
         job_done_event.set()
         kill_delay = ft_cfg.get("kill_worker_after_seconds") or 0
         kill_thread.join(timeout=max(kill_delay, 5) + 5)

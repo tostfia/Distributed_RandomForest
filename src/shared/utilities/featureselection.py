@@ -90,7 +90,6 @@ class CICIDSFeatureSelector:
         # optuna_oob_hyperparameter_search in run_baseline.py): con lo
         # stesso path fisso in entrambe le chiamate, la seconda
         # sovrascriverebbe silenziosamente il dendrogramma della prima,
-        # bug reale osservato prima di questa correzione.
         self.reduce_multicollinearity_flag = reduce_multicollinearity
         self.multicollinearity_distance_threshold = multicollinearity_distance_threshold
         self.dendrogram_plot_path = dendrogram_plot_path
@@ -104,11 +103,6 @@ class CICIDSFeatureSelector:
             cpu_count = os.cpu_count() or 2
             n_jobs = max(1, cpu_count - 1)
         self.n_jobs = n_jobs
-
-        # None finché fit() non è stato eseguito (a differenza di una lista
-        # vuota di default, che renderebbe il controllo "is None" in
-        # transform() sempre falso, anche a fit() non ancora chiamato --
-        # bug corretto).
         self.columns_to_drop_: Optional[List[str]] = None
         self.feature_summary_: Dict[str, List[str]] = {}
         # Series (indice = nome feature) con l'aumento percentuale medio OOB

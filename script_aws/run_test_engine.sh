@@ -192,8 +192,7 @@ VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" \
   --query "Vpcs[0].VpcId" --output text --region "$REGION")
 # Filtro esplicito sulle AZ compatibili con r5.large (vedi SUPPORTED_AZS
 # sopra): senza questo, 'Subnets[0]' può capitare in us-east-1e, dove
-# r5.large non è disponibile (bug reale già incontrato una volta con
-# questo stesso script, e risolto in Terraform con lo stesso filtro).
+# r5.large non è disponibile 
 SUBNET_ID=$(aws ec2 describe-subnets \
   --filters "Name=vpc-id,Values=$VPC_ID" "Name=map-public-ip-on-launch,Values=true" \
     "Name=availability-zone,Values=${SUPPORTED_AZS}" \

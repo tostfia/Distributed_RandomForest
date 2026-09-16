@@ -39,7 +39,7 @@ variable "worker_desired_count" {
 }
 
 variable "dataset_type" {
-  description = "Tipo di dataset: 'synthetic' o 'real'. BUGFIX (11/9/2026): iniettato nel container worker come DATASET_TYPE (vedi ecs_task_definitions.tf) - senza questa variabile, FederatedWorker.__init__ (federatedWorker.py:253) leggeva sempre il default 'real' e tentava di scaricare shard da S3 mai provisionati per il sintetico, crashando con 404 su TUTTI i worker al boot. Deve combaciare con dataset_type in test_config.json e DATASET_TYPE nel .env locale del test-engine, altrimenti worker e test-engine assumono tipi di dataset diversi."
+  description = "Tipo di dataset: 'synthetic' o 'real'. 
   type        = string
   default     = "synthetic"
   validation {
@@ -49,7 +49,7 @@ variable "dataset_type" {
 }
 
 variable "centralized_dataset_mode" {
-  description = "Modalita' di distribuzione del dataset in centralized.py: 'shared' (default, comportamento di sempre - ogni worker scarica l'intero dataset) o 'sharded' (12/9/2026 - ogni worker scarica solo una fetta, num_shard=num_worker rilevati al momento, shuffle stratificato per il classificatore/reale, puro per il regressore/sintetico). Letta a runtime da centralized.py via os.environ - irrilevante per federated.py (mai letta li'), quindi iniettata solo nella task definition worker_centralized, non in worker_federated."
+  description = "Modalita' di distribuzione del dataset in centralized.py: 'shared' (default, comportamento di sempre - ogni worker scarica l'intero dataset) o 'sharded' (ogni worker scarica solo una fetta, num_shard=num_worker rilevati al momento, shuffle stratificato per il classificatore/reale, puro per il regressore/sintetico). Letta a runtime da centralized.py via os.environ - irrilevante per federated.py (mai letta li'), quindi iniettata solo nella task definition worker_centralized, non in worker_federated."
   type        = string
   default     = "shared"
   validation {
@@ -59,7 +59,7 @@ variable "centralized_dataset_mode" {
 }
 
 variable "worker_batch_multiplier" {
-  description = "Passato ai worker come WORKER_BATCH_MULTIPLIER (vedi BaseWorker.py): moltiplica pool_size (~3 con 4 vCPU) per determinare quanti alberi vengono accumulati prima di ogni checkpoint su storage condiviso. MISURATO EMPIRICAMENTE l'11/9/2026: col default di codice (1, mai impostato esplicitamente prima d'ora), ogni worker fa un round-trip S3 ogni ~3 alberi - con carichi piccoli per worker (es. 40 alberi a 10 worker/100 totali) questo costo fisso di rete per checkpoint pesa proporzionalmente sempre di più salendo di worker, in parte compensando il guadagno di parallelismo. Un valore di 3 porta il batch a ~9 alberi (pool_size*3), riducendo il numero di round-trip di un fattore ~3x. ATTENZIONE al trade-off opposto (documentato nel codice stesso): alzarlo troppo aumenta gli alberi 'pesanti' tenuti in RAM insieme tra un checkpoint e l'altro (max_depth=None su dataset da 1M righe = alberi da centinaia di MB), rischio OOM già osservato in passato con NUM_WORKERS alto. Non alzare oltre 3-5 senza testare esplicitamente la RAM residua a runtime."
+  description = "Passato ai worker come WORKER_BATCH_MULTIPLIER (vedi BaseWorker.py): moltiplica pool_size (~3 con 4 vCPU) per determinare quanti alberi vengono accumulati prima di ogni checkpoint su storage condiviso. MISURATO EMPIRICAMENTE: col default di codice (1, mai impostato esplicitamente prima d'ora), ogni worker fa un round-trip S3 ogni ~3 alberi - con carichi piccoli per worker (es. 40 alberi a 10 worker/100 totali) questo costo fisso di rete per checkpoint pesa proporzionalmente sempre di più salendo di worker, in parte compensando il guadagno di parallelismo. Un valore di 3 porta il batch a ~9 alberi (pool_size*3), riducendo il numero di round-trip di un fattore ~3x. ATTENZIONE al trade-off opposto (documentato nel codice stesso): alzarlo troppo aumenta gli alberi 'pesanti' tenuti in RAM insieme tra un checkpoint e l'altro (max_depth=None su dataset da 1M righe = alberi da centinaia di MB), rischio OOM già osservato in passato con NUM_WORKERS alto. Non alzare oltre 3-5 senza testare esplicitamente la RAM residua a runtime."
   type        = number
   default     = 3
 }
