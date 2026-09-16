@@ -378,6 +378,38 @@ def plot_confusion_matrix_real(cm, output_path, labels=("Benign", "Attacco"), so
     plt.close(fig)
     print(f"[OK] Grafico matrice di confusione salvato in: '{output_path}'")
 
+def plot_regression_scatter_baseline(y_true, y_pred, r2, output_path):
+    """Predetto vs Reale sul test set — baseline locale (regressore), via hexbin.
+
+    Hexbin invece di uno scatter puro perché il dataset di test può essere
+    grande: stessa scelta fatta da PlotGenerator.plot_regression_scatter()
+    lato cluster, per restare visivamente confrontabili.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(6.4, 6.0))
+    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+
+    hb = ax.hexbin(y_true, y_pred, gridsize=60, cmap="Blues", mincnt=1)
+    ax.plot(lims, lims, color="#C0504D", linewidth=1.4, linestyle="--",
+            label="Predizione perfetta (y = x)")
+
+    fig.colorbar(hb, ax=ax, label="Numero di campioni")
+    ax.set_xlim(lims); ax.set_ylim(lims)
+    ax.set_xlabel("Valore reale"); ax.set_ylabel("Valore predetto")
+    ax.set_aspect("equal", adjustable="box")
+    ax.legend(loc="upper left")
+
+    titolo = "Predetto vs Reale — Baseline Locale (Regressione)"
+    if r2 is not None:
+        titolo += f"\n(R² = {r2:.4f})"
+    ax.set_title(titolo)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"[OK] Grafico scatter predetto/reale salvato in: '{output_path}'")
 
 def plot_feature_importance_multicollinearity(feature_importance_scores, dizionario_feature,
                                                 importance_threshold, multicollinearity_distance_threshold,
@@ -1191,14 +1223,24 @@ def run_baseline():
 
     if user_tree_type == "classifier":
         rf_kwargs["class_weight"] = hp.get("class_weight")
-        tree_clf = RandomForestClassifier(**rf_kwargs)
-    else:
-        tree_clf = RandomForestRegressor(**rf_kwargs)
-    
-    start_train_finale = time.perf_counter()
-    tree_clf.fit(X_train, y_train)
-    t_seq = time.perf_counter() - start_train_finale
-    print(f"[OK] Fitting completato. T_seq ottenuto: {t_seq:.4f} secondi.")
+
+    # --- DISATTIVATO TEMPORANEAMENTE: addestramento MONOCORE (T_seq) ---
+    # Commentato perché in questa run serve solo la baseline multicore
+    # (FASE 4b). Per riattivarlo: decommentare il blocco qui sotto, rimuovere
+    # 't_seq = float("nan")' e l'alias 'tree_clf = tree_clf_par' in FASE 4b.
+    #
+    # if user_tree_type == "classifier":
+    #     tree_clf = RandomForestClassifier(**rf_kwargs)
+    # else:
+    #     tree_clf = RandomForestRegressor(**rf_kwargs)
+    #
+    # start_train_finale = time.perf_counter()
+    # tree_clf.fit(X_train, y_train)
+    # t_seq = time.perf_counter() - start_train_finale
+    # print(f"[OK] Fitting completato. T_seq ottenuto: {t_seq:.4f} secondi.")
+    t_seq = float("nan")
+    print("[SKIP] FASE 4 (addestramento monocore, T_seq) disattivata: "
+          "in questa run si misura solo la baseline multicore.")
 
     # ---------------------------------------------------------
     # SECONDA BASELINE: stessa macchina, TUTTI i core (n_jobs=-1)
@@ -1227,12 +1269,15 @@ def run_baseline():
     start_train_par = time.perf_counter()
     tree_clf_par.fit(X_train, y_train)
     t_1node_parallel = time.perf_counter() - start_train_par
-    speedup_multicore = (t_seq / t_1node_parallel) if t_1node_parallel > 0 else 1.0
+    speedup_multicore = (t_seq / t_1node_parallel) if t_1node_parallel > 0 else float("nan")
     print(f"[OK] Fitting multicore completato: {t_1node_parallel:.4f} s "
-          f"(speedup del solo multicore locale: {speedup_multicore:.2f}x)")
-    # Il modello usato per le metriche resta quello sequenziale: n_jobs cambia
-    # solo COME viene calcolato il fit, non il risultato (stesso random_state),
-    # quindi tree_clf_par serve unicamente da riferimento temporale.
+          f"(speedup del solo multicore locale: non calcolabile, T_seq disattivato)")
+
+    # Con il fit monocore disattivato, il modello di riferimento per TUTTO il
+    # resto della pipeline (predizioni, soglia, metriche, .pkl) diventa quello
+    # multicore. E' equivalente: n_jobs cambia solo COME viene calcolato il
+    # fit, non il risultato (stesso random_state e stessi iperparametri).
+    tree_clf = tree_clf_par
 
     # ---------------------------------------------------------
     # Salvataggio dei tempi di riferimento su JSON dedicato, un file per
@@ -1249,9 +1294,12 @@ def run_baseline():
         with open(baseline_tempi_path, "w") as f:
             json.dump({
                 "n_estimators": n_alberi_baseline,
-                "t_seq": t_seq,
+                # None invece di NaN: T_seq non misurato in questa run
+                # (fit monocore disattivato) e NaN non è JSON valido in senso
+                # stretto -- il plotter deve poter distinguere "non misurato".
+                "t_seq": None,
                 "t_1node_parallel": t_1node_parallel,
-                "speedup_multicore": speedup_multicore,
+                "speedup_multicore": None,
                 "cpu_disponibili": cpu_disponibili,
                 "tree_type": user_tree_type,
             }, f, indent=2)
@@ -1455,6 +1503,15 @@ def run_baseline():
         test_rmse = float(np.sqrt(test_mse))
         test_mae = mean_absolute_error(y_test, local_preds)
         test_r2 = r2_score(y_test, local_preds)
+        try:
+            plot_regression_scatter_baseline(
+                y_test, local_preds, test_r2,
+                output_path=os.path.join(PLOTS_DIR, "scatter_predetto_reale_baseline.png"),
+            )
+        except Exception as e:
+            import traceback
+            print(f"[ATTENZIONE] Grafico scatter predetto/reale NON generato per un errore: {e}")
+            traceback.print_exc()
 
         metriche_test = {
             "mse": test_mse,
@@ -1482,9 +1539,9 @@ def run_baseline():
             "tempo_medio_fit_tuning": tempo_medio_fit_tuning,
             "io_time": io_time,
             "etl_time": etl_time,
-            "t_seq": t_seq,
+            "t_seq": None,  # fit monocore disattivato in questa run
             "t_1node_parallel": t_1node_parallel,
-            "speedup_multicore_locale": speedup_multicore,
+            "speedup_multicore_locale": None,
             "cpu_count": cpu_disponibili,
             "tempo_inferenza_totale": tempo_inferenza_totale
         },
@@ -1667,9 +1724,9 @@ def run_baseline():
     print(f"  • Tempo Medio per Singolo Fit (tuning) : {tempo_medio_fit_tuning:8.4f} s")
     print(f"  • Tempo di Caricamento Dati (I/O)      : {io_time:8.4f} s")
     print(f"  • Tempo di Trasformazione (Process)    : {etl_time:8.4f} s")
-    print(f"  • T_seq  - Addestramento MONOCORE (n_jobs=1)   : {t_seq:8.4f} s")
+    print(f"  • T_seq  - Addestramento MONOCORE (n_jobs=1)   :   NON MISURATO (disattivato)")
     print(f"  • T_1node - Addestramento MULTICORE (n_jobs=-1): {t_1node_parallel:8.4f} s  "
-          f"[{cpu_disponibili} core, speedup locale {speedup_multicore:.2f}x]")
+          f"[{cpu_disponibili} core]")
     print(f"  • Tempo Totale di Inferenza (Testing Set) : {tempo_inferenza_totale:8.4f} s")
     print(f"  • Volume dati: train={X_train.shape}  test={X_test.shape}"
           + (f"  validation={X_val.shape}" if X_val is not None else ""))
