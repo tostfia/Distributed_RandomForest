@@ -79,6 +79,9 @@ def handle_submit(event: dict, path_params: dict) -> dict:
                 'last_orchestrator': None,
                 'alberi_addestrati': 0,
                 'base_random_state': body.get('seed', 123),
+                'hyperparameters': body.get('hyperparameters', {}),
+                'mode': mode,
+                'dataset_type': body.get('dataset_type'),
             }
         )
 
