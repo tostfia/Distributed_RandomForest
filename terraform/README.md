@@ -1,10 +1,11 @@
 # Infrastruttura AWS via Terraform — Distributed_RandomForest
 
 Questo modulo Terraform crea **da zero** tutta l'infrastruttura AWS necessaria
-al sistema (ECR, S3, DynamoDB, SQS, ECS Fargate + Service orchestrator/worker),
-buildando e pushando anche l'immagine Docker dell'applicazione. Pensato per
-essere eseguito con un **singolo `terraform apply`** in un account
-**AWS Academy Learner Lab**.
+al sistema (ECR, S3, DynamoDB, SQS, ECS Fargate + Service worker, EC2 + Auto
+Scaling Group per l'orchestrator, EFS come cache di lettura condivisa del
+dataset), buildando e pushando anche l'immagine Docker dell'applicazione.
+Pensato per essere eseguito con un **singolo `terraform apply`** in un
+account **AWS Academy Learner Lab**.
 
 > Un Learner Lab impone alcune restrizioni particolari (SCP) che richiedono
 > pochi passaggi manuali una tantum prima del primo deploy. Sono descritti
@@ -76,7 +77,7 @@ nella Console, o con `aws sts get-caller-identity --query Account --output text`
 Il nome deve corrispondere **esattamente** a quello atteso da Terraform:
 `rf-distributed-datasets-<ACCOUNT_ID>-us-east-1`.
 
-> ⚠️ Questo bucket è creato **fuori** da Terraform: se l'account Lab viene
+> Questo bucket è creato **fuori** da Terraform: se l'account Lab viene
 > resettato o ricreato (Start/End Lab, non un semplice refresh delle
 > credenziali), il bucket sparisce insieme a tutto il resto e va ricreato da
 > capo con lo stesso comando prima del prossimo `apply` — `terraform plan`
@@ -92,16 +93,20 @@ CloudWatch tramite `awslogs`, ma **non impostano `awslogs-create-group`**
 Vanno quindi creati a mano, una sola volta per account:
 
 ```bash
-# Worker (ECS Fargate) e log storico dell'orchestrator quando era su ECS
-aws logs create-log-group --log-group-name "/ecs/lab-orchestrator" --region us-east-1
+# Worker (ECS Fargate)
 aws logs create-log-group --log-group-name "/ecs/lab-worker" --region us-east-1
 
-# Orchestrator EC2 (vedi orchestrator_ec2.tf) e test-engine EC2 on-demand
-# (vedi run_test_engine.sh) - entrambi mancanti in una versione precedente
-# di questa sezione, scoperti solo al primo setup su un account nuovo.
+# Orchestrator (istanze EC2, vedi orchestrator_ec2.tf) e test-engine EC2
+# on-demand (vedi script_aws/run_test_engine.sh)
 aws logs create-log-group --log-group-name "/ec2/lab-orchestrator" --region us-east-1
 aws logs create-log-group --log-group-name "/ec2/rf-test-engine" --region us-east-1
 ```
+
+> Il gruppo `/ecs/lab-orchestrator`, usato quando l'orchestrator girava
+> ancora come task ECS (versione precedente dell'infrastruttura), non serve
+> più: l'orchestrator gira ora su EC2 e scrive su `/ec2/lab-orchestrator`
+> (vedi sezione [Note di design](#note-di-design)). Crealo solo se ti serve
+> per compatibilità con log storici.
 
 Se il gruppo esiste già, il comando restituisce un errore innocuo
 (`ResourceAlreadyExistsException`) che puoi ignorare.
@@ -110,15 +115,22 @@ Se il gruppo esiste già, il comando restituisce un errore innocuo
 
 La SCP nega `ecs:RegisterTaskDefinition` per qualunque task con
 **`memory` superiore a 8192 MiB**, indipendentemente da `cpu`, tag o altri
-parametri (verificato empiricamente per bisezione). Le variabili
-`worker_memory` / `orchestrator_memory` in `variables.tf` sono già impostate
-di default a `8192` per questo motivo — **non alzarle** oltre questo valore,
-o il deploy fallirà con `AccessDeniedException`.
+parametri (verificato empiricamente per bisezione, sia su launch type
+FARGATE sia EC2-backed). La variabile `worker_memory` in `variables.tf` è
+già impostata di default a `8192` per questo motivo — **non alzarla** oltre
+questo valore, o il deploy fallirà con `AccessDeniedException`.
 
-> Se il tuo pool di processi paralleli lato applicativo (dimensionato
-> storicamente per 16 GB) risente della RAM ridotta, valuta di abbassare il
-> numero di processi concorrenti nel codice worker invece di alzare la
-> memory della task.
+> Questo limite riguarda **solo i worker**, che restano su ECS Fargate.
+> L'orchestrator non è più soggetto a questo vincolo: gira su istanze EC2
+> dedicate (vedi `orchestrator_ec2.tf`), proprio perché gli scenari di
+> scalabilità più pesanti possono richiedergli più memoria di quanta la SCP
+> permetterebbe a una task ECS (vedi sezione [Note di design](#note-di-design)).
+> Non esistono variabili `orchestrator_cpu`/`orchestrator_memory`: sono state
+> rimosse insieme alla vecchia task definition dell'orchestrator.
+>
+> Se il pool di processi paralleli lato applicativo del worker risente della
+> RAM ridotta a 8 GiB, valuta di abbassare il numero di processi concorrenti
+> nel codice worker invece di alzare la memory della task.
 
 ### 3.4 Tag obbligatorio sulle risorse ECS
 
@@ -165,16 +177,21 @@ Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 # aggiorna il tuo .env con i valori mostrati in output (bucket S3, regione,
 # e soprattutto API_GATEWAY_URL — vedi avviso sopra)
 ./run_aws.sh                          # avvia il client contro l'infrastruttura
-./script_aws/run_test_engine_ecs.sh   # oppure: sessione di test interattiva
+./script_aws/run_test_engine.sh       # oppure: sessione di test interattiva (scenari 1-10)
 ```
 
 ## 6. Avviare e fermare l'esecuzione senza distruggere l'infrastruttura
 
 Dalla versione corrente, **un `apply` pulito crea tutte le risorse ma le
 lascia ferme**: sia `orchestrator_desired_count` sia `worker_desired_count`
-hanno default `0` in `variables.tf`. Nessun task Fargate né istanza EC2
-dell'orchestrator parte da sola subito dopo l'apply — un passo esplicito è
-sempre richiesto, in entrambe le modalità.
+sono impostati a `0` in `terraform.tfvars.example` (il default dichiarato
+direttamente in `variables.tf` per `orchestrator_desired_count` è `2` — cioè
+il valore "operativo" con Leader+Standby; è `terraform.tfvars.example` a
+sovrascriverlo esplicitamente con `0`, così un `apply` pulito parte fermo. Se
+ometti quella riga dal tuo `terraform.tfvars`, l'orchestrator partirebbe
+invece con 2 istanze). Nessun task Fargate né istanza EC2 dell'orchestrator
+parte da sola subito dopo l'apply — un passo esplicito è sempre richiesto,
+in entrambe le modalità.
 
 > Se vieni da una versione precedente del progetto: `num_workers` ora
 > controlla **solo** quante risorse esistono (task definition/service, per
@@ -184,7 +201,9 @@ sempre richiesto, in entrambe le modalità.
 
 ### 6.1 Avviare
 
-**Orchestrator** (2 istanze EC2, sempre uguale in entrambe le modalità):
+**Orchestrator** (istanze EC2 gestite dall'Auto Scaling Group
+`orchestrator-asg`, sempre uguale in entrambe le modalità — consigliato
+`>=2` per poter testare la leader election/failover):
 ```bash
 aws autoscaling update-auto-scaling-group --auto-scaling-group-name orchestrator-asg \
   --min-size 2 --max-size 2 --desired-capacity 2 --region us-east-1
@@ -205,9 +224,13 @@ for i in $(seq 1 10); do
 done
 ```
 
-Aspetta qualche minuto dopo l'avvio prima di lanciare un test (boot EC2,
-pull immagine, avvio container) — vedi le verifiche già usate altrove in
-questo progetto (`storedBytes` su CloudWatch Logs, `docker ps` via SSM).
+Aspetta qualche minuto dopo l'avvio prima di lanciare un test: per i worker
+Fargate, boot rapido + pull immagine + avvio container; per le istanze EC2
+dell'orchestrator, boot della macchina + installazione Docker + pull
+immagine + avvio container — più lento del boot di un task Fargate, prevedi
+qualche minuto in più. Verifica con `aws ecs list-tasks` /
+`aws autoscaling describe-auto-scaling-groups` (vedi sezione 6.2) o
+controllando i log su CloudWatch.
 
 ### 6.2 Fermare
 
@@ -236,7 +259,10 @@ orchestrator_desired_count = 0
 worker_desired_count       = 0   # NON num_workers: quello controlla solo
                                   # quante risorse esistono, non quante girano
 ```
-(sono già i default se non li specifichi affatto in `terraform.tfvars`.)
+(sono già i default se usi `terraform.tfvars.example` come punto di
+partenza; il default "grezzo" di `orchestrator_desired_count` dichiarato in
+`variables.tf`, se omesso del tutto, è invece `2` — vedi la nota a inizio
+sezione 6.)
 
 ## 7. Distruggere tutto
 
@@ -245,18 +271,20 @@ cd terraform
 terraform destroy
 ```
 
-Distrugge le risorse gestite da Terraform (ECS, ECR con l'immagine,
-DynamoDB, SQS, Security Group). Da lanciare a fine sessione di valutazione
-per non lasciare nulla attivo nel Learner Lab.
+Distrugge le risorse gestite da Terraform (ECS, ECR con l'immagine, le
+istanze EC2/l'Auto Scaling Group dell'orchestrator, EFS, DynamoDB, SQS,
+Security Group). Da lanciare a fine sessione di valutazione per non
+lasciare nulla attivo nel Learner Lab.
 
-> ⚠️ Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
+> Il **bucket S3** creato manualmente al punto 3.1 (e i **log group**
 > CloudWatch del punto 3.2) sono referenziati da Terraform come risorse
 > esistenti, non creati da esso — `terraform destroy` **non li elimina**.
 > Se vuoi ripulirli del tutto:
 > ```bash
 > aws s3 rb s3://rf-distributed-datasets-<ACCOUNT_ID>-us-east-1 --force
-> aws logs delete-log-group --log-group-name "/ecs/lab-orchestrator" --region us-east-1
 > aws logs delete-log-group --log-group-name "/ecs/lab-worker" --region us-east-1
+> aws logs delete-log-group --log-group-name "/ec2/lab-orchestrator" --region us-east-1
+> aws logs delete-log-group --log-group-name "/ec2/rf-test-engine" --region us-east-1
 > ```
 
 ## 8. Passare tra `centralized` e `federated`
@@ -272,15 +300,17 @@ vero e proprio, non solo una modifica al `.env` locale.
 training_mode = "federated"   # o "centralized"
 ```
 
-> ⚠️ **Modificare `TRAINING_MODE` nel `.env` locale da solo NON è
+> **Modificare `TRAINING_MODE` nel `.env` locale da solo NON è
 > sufficiente.** Il `.env` controlla solo il client e il test-engine (le
 > istanze EC2 usa-e-getta, che leggono la variabile a ogni lancio) — ma i
 > worker ECS già deployati hanno `TRAINING_MODE` **cablato staticamente**
 > nella loro `container_definitions` (vedi `ecs_task_definitions.tf`,
 > `local.common_env`), fissato al valore di `var.training_mode` al momento
-> dell'ultimo `apply`. Senza rifare l'`apply`, il test-engine proverebbe a
-> orchestrare l'altra modalità parlando con worker che si aspettano ancora
-> quella vecchia — protocollo/logica di partizionamento incompatibili.
+> dell'ultimo `apply`. Lo stesso vale per l'orchestrator (vedi
+> `orchestrator_ec2.tf`, user-data dell'istanza EC2). Senza rifare l'`apply`,
+> il test-engine proverebbe a orchestrare l'altra modalità parlando con
+> worker/orchestrator che si aspettano ancora quella vecchia — protocollo/
+> logica di partizionamento incompatibili.
 
 Dopo aver cambiato `training_mode`:
 
@@ -299,6 +329,7 @@ terraform apply "tfplan"
 | Task definition worker | 1 (`lab-worker-task`) | N, una per indice (`lab-worker-task-1` … `lab-worker-task-N`) |
 | Service ECS worker | 1 solo (`worker-service`), `desired_count = worker_desired_count` | N service separati (`worker-service-1` … `worker-service-N`), ciascuno `desired_count = worker_desired_count > 0 ? 1 : 0` (avvio tutto-o-niente, non parziale per indice) |
 | Ruolo dei worker | anonimi, intercambiabili | indice fisso 1..N, legato al proprio shard (`WORKER_INDEX` iniettato staticamente da Terraform) |
+| Orchestrator | Auto Scaling Group `orchestrator-asg` (EC2), invariato in entrambe le modalità — legge `TRAINING_MODE` dal proprio user-data | idem |
 | `num_workers` significa | quante risorse esistono (non più quante sono avviate — vedi sezione 6) | quanti indici/shard fissi creare |
 
 Per avviare/fermare i worker in entrambe le modalità, vedi la sezione
@@ -321,7 +352,7 @@ Solo per `dataset_type=real` (partizionamento `by_day` su CICIDS), esegui
 **prima** di sottomettere un job:
 
 ```bash
-python -m scripts.provision_federated_shards --num-workers N
+python -m script_aws.provision_federated_shards --num-workers N
 ```
 
 con lo stesso `N` di `num_workers` in `terraform.tfvars` — un disallineamento
@@ -337,6 +368,29 @@ tra i due lascerebbe worker senza shard assegnato (vedi il fallback a
   con un `aws_iam_role` equivalente.
 - **VPC**: viene riusata quella di default dell'account/regione (sempre
   presente), non ne viene creata una nuova.
+- **Orchestrator su EC2, non su ECS**: a differenza dei worker (che restano
+  su ECS Fargate), l'orchestrator gira su istanze EC2 dedicate (tipo
+  `r5.large`, 16 GiB) gestite da un Auto Scaling Group (`orchestrator-asg`,
+  vedi `orchestrator_ec2.tf`). Il motivo è la stessa SCP del punto 3.3: nega
+  `ecs:RegisterTaskDefinition` per qualunque memoria > 8192 MiB, sia su
+  launch type FARGATE sia EC2-backed — un tetto insufficiente per gli
+  scenari di scalabilità più pesanti (fino a ~7 GiB di alberi in RAM con 10
+  worker). `ec2:RunInstances` su un tipo whitelisted non è invece soggetto a
+  questa restrizione, quindi l'orchestrator è stato spostato lì. L'Auto
+  Scaling Group ha `min=max=desired` fissi (nessuna scalabilità automatica
+  in base al carico: serve solo a mantenere sempre presente il numero di
+  istanze desiderato, sostituendo quelle terminate) — è ciò che lo scenario
+  di test 10 ("Sostituzione ASG dell'Orchestratore") verifica.
+- **Cache EFS del dataset**: `efs.tf` crea un filesystem EFS condiviso,
+  montato in lettura/scrittura dall'orchestrator EC2 e in sola lettura dai
+  worker della modalità `centralized` (vedi `ecs_task_definitions.tf`,
+  volume `dataset-cache`). Serve a evitare che ogni worker riscarichi da S3
+  l'intero dataset condiviso ad ogni round: se la cache EFS è disponibile,
+  l'orchestrator vi scrive il dataset preparato e i worker lo leggono da lì
+  invece che da S3, altrimenti il codice ricade automaticamente su S3 senza
+  errori (vedi `dataset_dao.py`). Non utilizzata in modalità `federated`
+  (ogni worker legge il proprio shard, nessun dataset condiviso da mettere
+  in cache).
 - **Modalità `federated`**: il provisioning degli shard
   (`provision_federated_shards.py`) serve **solo** per `dataset_type=real`
   (partizionamento `by_day` su S3, letto da ogni worker al boot). Per
