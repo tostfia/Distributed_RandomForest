@@ -166,16 +166,9 @@ class AwsS3DAO(DatasetDAO):
         return bucket, key
 
     def load_dataset(self, path: str, sample_fraction: float = None, dataset_seed: int = None) -> pd.DataFrame:
-        # CACHE EFS (11/9/2026): controllo PRIMA di toccare S3. Solo per il
-        # ramo senza campionamento (sample_fraction=None) - lo stesso che
-        # abbiamo strumentato/ottimizzato con pyarrow, e l'unico per cui
-        # l'orchestrator scrive effettivamente una copia su EFS (vedi
-        # centralized.py, dopo il salvataggio S3 di train_df). Se
-        # EFS_MOUNT_PATH non e' impostata (worker senza EFS montato, o
-        # training_mode=federated dove questa cache non si usa), o il file
-        # non c'e' ancora, o la lettura fallisce per qualunque motivo:
-        # fallback silenzioso sul normale download S3 sotto - MAI un punto
-        # di fallimento singolo, solo un'ottimizzazione opportunistica.
+        # Se disponibile, la cache EFS viene controllata prima di accedere a S3
+        # per i caricamenti senza campionamento. Se il mount, il file o la lettura
+        # non sono disponibili, il caricamento prosegue normalmente da S3.
         efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
         if efs_mount_path and sample_fraction is None:
             efs_cache_path = os.path.join(efs_mount_path, "dataset_cache", os.path.basename(path))
@@ -213,13 +206,6 @@ class AwsS3DAO(DatasetDAO):
         if sample_fraction is not None and 0.0 < sample_fraction < 1.0:
             print(f"[DAO-AWS] Campionamento in streaming (frac={sample_fraction}) durante la lettura, "
                   f"evito di caricare l'intero file in RAM...")
-            # NOTA (11/9/2026): qui rete e parsing sono intrecciati - pandas
-            # consuma lo StreamingBody a chunk, quindi il trasferimento di
-            # rete avviene DENTRO il ciclo di parsing, non prima. Separarli
-            # richiederebbe di avvolgere lo StreamingBody per contare i byte
-            # letti nel tempo, non fatto qui: questo ramo non è comunque
-            # quello esercitato da CentralizedWorker (che non passa mai
-            # sample_fraction) nei test di scalabilità di oggi.
             chunks = []
             # response['Body'] è uno StreamingBody: pandas lo consuma progressivamente,
             # senza mai materializzare l'intero oggetto S3 in memoria.
@@ -231,29 +217,12 @@ class AwsS3DAO(DatasetDAO):
             print(f"[DAO-AWS] [OK] Campionamento streaming completato: {df.shape[0]} righe mantenute.")
             return df
 
-        # STRUMENTAZIONE (11/9/2026): rete e parsing separati esplicitamente,
-        # invece della singola riga 'pd.read_csv(io.BytesIO(response[...].read()))'
-        # di prima - quella riga sommava i due costi in un tempo solo,
-        # impossibile da distinguere dall'esterno (vedi discussione su EFS
-        # vs Parquet: i due fix risolvono costi diversi, serve sapere quale
-        # dei due domina prima di scegliere).
         network_start = time.perf_counter()
         raw_bytes = response['Body'].read()
         network_seconds = time.perf_counter() - network_start
 
         parsing_start = time.perf_counter()
-        # engine="pyarrow": motore di parsing C++ invece del motore C
-        # default di pandas - MISURATO EMPIRICAMENTE su dataset sintetico
-        # (100 colonne float omogenee): 15.65-16.10s -> 3.27-3.34s, ~4.8x
-        # piu' veloce (11/9/2026). NON ancora verificato sul dataset REALE
-        # (CICIDS, colonne miste/tipi eterogenei prima della feature
-        # selection) - il motore pyarrow di pandas ha differenze note dal
-        # motore C su inferenza tipi/valori mancanti con colonne non
-        # omogenee. Fallback esplicito al motore C se pyarrow solleva
-        # QUALUNQUE eccezione, invece di propagarla: preferiamo un parsing
-        # piu' lento ma sicuro a un fallimento totale del caricamento dati,
-        # specialmente per un percorso (dataset reale) mai esercitato con
-        # questo motore.
+
         try:
             df = pd.read_csv(io.BytesIO(raw_bytes), engine="pyarrow")
             engine_used = "pyarrow"
