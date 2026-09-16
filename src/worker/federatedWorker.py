@@ -34,7 +34,7 @@ RPC_SYNC_TIMEOUT_SECONDS = int(os.environ.get("RPC_SYNC_TIMEOUT_SECONDS", 1800))
 # sbilanciata originale (o a quella prodotta dalla strategia di
 # partizionamento, es. molto più sbilanciata di quella globale con
 # partition_strategy='by_day'), mentre la baseline addestra sempre su un
-# train bilanciato 1:1 -- due modelli non confrontabili sulle metriche.
+# train bilanciato 1:1, due modelli non confrontabili sulle metriche.
 # Stesso valore di run_baseline.py: vedi centralized.py per la motivazione
 # completa (allineamento di VOLUME del train prima dell'undersampling, non
 # ancora usato per calibrare una soglia in questo percorso).
@@ -180,7 +180,7 @@ class FederatedWorker(BaseWorker):
     disponibile: li scarica una volta sola nel proprio __init__, da un bucket
     S3 seminato in precedenza da uno script di provisioning standalone
     (scripts/provision_federated_shards.py). Nessun download o generazione di
-    dati avviene più reattivamente durante un job — questo simula un vero
+    dati avviene più reattivamente durante un job, questo simula un vero
     scenario federato, dove il nodo nasce già con il proprio dataset locale.
 
     In ambiente locale (single machine) resta invece il comportamento
@@ -437,13 +437,7 @@ class FederatedWorker(BaseWorker):
             worker_tasks.append((seed, max_depth, max_samples, self.bootstrap, tree_class, class_weight, max_features,
                                 min_samples_split, criterion))
 
-        # PERSISTENZA INCREMENTALE PER BATCH (stessa modifica applicata a
-        # BaseWorker.exposed_train_subset_forest): ogni batch di alberi viene
-        # serializzato e scritto sullo storage condiviso APPENA PRONTO, invece
-        # di restare accumulato in 'local_trees' fino alla fine dell'intero
-        # task. Il picco di RAM scende da "n_estimators_local alberi" a
-        # "~pool_size*4 alberi" (dimensione di un batch), indipendentemente
-        # da quanto è grande la quota assegnata a questo worker federato.
+
         synthetic_source_info = f"shared_train_{job_id}.csv"
         parts_num_trees = []
 
@@ -498,22 +492,6 @@ class FederatedWorker(BaseWorker):
                           f"({len(batch_trees)} alberi). Salvataggio incrementale su storage condiviso...")
                     _persist_fed_batch(batch_trees, part_idx)
                     del batch_trees
-                    # BUG SOSPETTATO E CORRETTO (7/9/2026): 'del' rimuove solo il
-                    # riferimento -- non garantisce che il garbage collector
-                    # ciclico di Python liberi SUBITO la memoria sottostante
-                    # (gli alberi scikit-learn, con le loro strutture interne,
-                    # possono creare riferimenti ciclici che il refcounting da
-                    # solo non risolve, rimandando la liberazione reale al
-                    # prossimo giro schedulato del GC). Osservato empiricamente:
-                    # un primo round di training completava correttamente su
-                    # worker vicini al proprio tetto di memoria, ma un secondo
-                    # round identico, subito dopo, faceva sforare 3 worker su 3
-                    # simultaneamente -- compatibile con memoria del batch
-                    # precedente non ancora riclamata quando il secondo round
-                    # iniziava. Forziamo qui una collezione esplicita e
-                    # immediata, stesso principio già applicato al percorso
-                    # centralizzato (vedi CentralizedOrchestrator, salvataggio
-                    # manifesto leggero).
                     gc.collect()
 
         # Manifest scritto per ultimo, dopo tutte le parti: stesso principio
@@ -659,8 +637,7 @@ class FederatedWorker(BaseWorker):
                 # shard che arriva all'undersampling a quello che la baseline
                 # userebbe (vedi VALIDATION_SIZE_FOR_THRESHOLD).
                 #
-                # AGGIORNAMENTO (9/9/2026): il fold NON viene più scartato --
-                # prima finiva in '_' e si perdeva. Viene tenuto in df_val e,
+                # Il fold viene tenuto in df_val e,
                 # più sotto, proiettato sullo stesso spazio di feature di
                 # train/test per popolare self._cached_X_val/_y_val: è il
                 # validation set che l'Orchestratore userà per calibrare
@@ -747,16 +724,9 @@ class FederatedWorker(BaseWorker):
         (worker_seed = seed_base + worker_index), così ogni worker genera un
         dataset sintetico con la STESSA struttura statistica (stessa
         funzione, stessi n_samples/n_features/noise) ma dati EFFETTIVAMENTE
-        diversi -- analogo allo sharding IID del dataset reale, dove ogni
+        diversi, analogo allo sharding IID del dataset reale, dove ogni
         worker vede una porzione diversa dello stesso spazio campionario.
 
-        PRIMA: ogni worker usava lo stesso identico seed_base letto da
-        hyperparameters (condiviso via broadcast RPC a tutti i worker),
-        quindi generava esattamente lo STESSO dataset di tutti gli altri --
-        nessun partizionamento reale dei dati, solo calcolo distribuito su
-        dati duplicati. worker_index=None (fallback, es. se il chiamante non
-        lo passa) preserva quel comportamento precedente, con un avviso
-        esplicito invece di un cambiamento silenzioso.
         """
         hyperparameters = obtain(hyperparameters)
         seed_base = hyperparameters.get("dataset_random_state", hyperparameters.get("random_state", 123))
@@ -976,7 +946,7 @@ class FederatedWorker(BaseWorker):
         FederatedOrchestrator._calibrate_federated_threshold per calibrare
         decision_threshold specificamente sul modello federato, invece di
         riusare quella calibrata sulla baseline centralizzata (che può non
-        essere valida qui: il partizionamento non-IID -- es. 'by_day' --
+        essere valida qui: il partizionamento non-IID (es. 'by_day')
         e il voto pesato per foglia cambiano la distribuzione delle
         probabilità restituite rispetto al modello centralizzato).
 
@@ -1030,55 +1000,19 @@ class FederatedWorker(BaseWorker):
 
     def exposed_get_local_shard_size(self, job_id: str = None) -> int:
         """
-        Stima della dimensione UTILE dello shard di training locale, usata
-        dall'Orchestratore PRIMA di avviare un round di training per allocare
-        il budget di alberi in proporzione alla quantità di dati posseduti da
-        ciascun worker invece che in parti uguali — indispensabile con
-        partizionamento non-IID (dirichlet/by_day), dove gli shard possono
-        avere dimensioni molto diverse tra loro; con partizionamento IID il
-        risultato è comunque praticamente identico alla vecchia ripartizione
-        equa.
+        Restituisce la dimensione effettiva dello shard di training locale, usata
+        dall'orchestratore per distribuire gli alberi in proporzione ai dati
+        disponibili su ciascun worker.
 
-        Due percorsi, in ordine di preferenza:
+        Se lo shard è già stato preprocessato per il job corrente, utilizza il
+        conteggio memorizzato in local_sample_count. In caso contrario, stima la
+        dimensione leggendo la colonna target e applicando la stessa riduzione
+        prevista per il validation set e l'undersampling, senza eseguire l'intera
+        pipeline di preprocessing.
 
-        1. CACHE (round >= 2 dello stesso job): se lo shard è già stato
-           preprocessato per QUESTO job_id (binarizzazione, pulizia,
-           split di validation, undersampling -- vedi
-           _load_and_preprocess_real_shard), self.local_sample_count
-           contiene già il conteggio REALE del train set che verrà usato
-           per il fit, a costo zero (nessuna nuova lettura da disco).
-
-        2. STIMA ECONOMICA (round 1, nessuna cache ancora): PRIMA qui si
-           leggeva solo il conteggio grezzo di righe del CSV (via/prima della
-           pulizia NaN/Inf) -- un'approssimazione che con partizionamento
-           IID non fa differenza, ma con by_day/dirichlet può divergere
-           parecchio dalla dimensione REALE del train set dopo il taglio di
-           validation e l'undersampling: uno shard con molte righe ma quasi
-           tutte Benign riceverebbe comunque una quota alberi alta,
-           sproporzionata al poco segnale utile che contiene. Qui si legge
-           SOLO la colonna target (non l'intero file), si toglie la stessa
-           quota di validation set (VALIDATION_SIZE_FOR_THRESHOLD) che
-           _load_and_preprocess_real_shard toglie PRIMA dell'undersampling,
-           e si applica la stessa formula di undersample_majority_class
-           (ratio=UNDERSAMPLING_RATIO) -- senza fare il preprocessing
-           completo (metadata drop, feature engineering, multicollinearità)
-           né lo split di validation vero e proprio, quello avviene comunque,
-           una volta sola, al primo training vero.
-
-           Se la classe minoritaria (Attacco) è del tutto assente in questo
-           shard, ritorna
-           ESPLICITAMENTE 0: la quota alberi risultante per questo worker
-           sarà 0, l'Orchestratore lo salta per questo round -- evitando
-           così il crash che si avrebbe più avanti in
-           undersample_majority_class / nello split di validation su uno
-           shard senza classe minoritaria, invece di scoprirlo a metà
-           training.
-
-        Per dataset_type='synthetic' il file non esiste ancora a questo
-        punto (i dati sintetici vengono generati pigramente al primo
-        training, non al boot): ritorna 0, e l'Orchestratore ricade sulla
-        ripartizione equa storica quando NESSUN worker restituisce una
-        dimensione nota.
+        Restituisce 0 se lo shard non contiene la classe minoritaria. Per i dataset
+        sintetici, generati al primo training, restituisce 0 finché i dati non sono
+        disponibili; l'orchestratore può quindi ricorrere alla ripartizione uniforme.
         """
         if job_id is not None and job_id == self._cached_job_id and self.local_sample_count > 0:
             return self.local_sample_count
