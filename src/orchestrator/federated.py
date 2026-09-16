@@ -63,19 +63,19 @@ class FederatedOrchestrator(BaseOrchestrator):
         # reload reale da S3 (vero FAILOVER-RESUME), garantendo il failover.
         self._trees_cache = {}
 
-        # Strumentazione dei tempi (letta da performance.py/scalability.py via
-        # getattr): prima assente su FederatedOrchestrator, che ha la propria
-        # implementazione di _execute_training_step separata da quella
-        # centralizzata dove questi attributi erano già impostati. Inizializzati
-        # qui (non solo assegnati a runtime) così un getattr(...) prima del
-        # primo job trova comunque 0.0 invece di ricadere sul default silenzioso
-        # del chiamante, che mascherava l'assenza di dato reale.
+       # Strumentazione telemetrica dei tempi di esecuzione.
+        # L'inizializzazione esplicita a 0.0 nel costruttore garantisce 
+        # che i moduli di reporting (es. performance.py/scalability.py) 
+        # intercettino valori neutri sicuri prima della conclusione del primo job,
+        # prevenendo la regressione silenziosa su fallback predefiniti.
+        # Nota: La stima Out-Of-Bag (OOB) non è calcolata nel partizionamento 
+        # federato, pertanto last_oob_seconds manterrà rigorosamente valore 0.0.
         self.last_etl_seconds = 0.0
         self.last_dispatch_seconds = 0.0
         self.last_aggregation_seconds = 0.0
         # Il federato non esegue stima OOB (scelta di design: l'OOB richiede il
         # training set completo in un unico posto, qui ogni worker vede solo il
-        # proprio shard) — resta sempre 0.0, non "non misurato".
+        # proprio shard), resta sempre 0.0, non "non misurato".
         self.last_oob_seconds = 0.0
 
     def _ensure_local_bootstrap(self, payload: dict):
@@ -84,7 +84,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         filesystem locale per l'ambiente 'local'. La generazione/sharding NON
         avviene più qui: è responsabilità di uno script di provisioning standalone
         (script_local/provision_local_shards.py), eseguito UNA VOLTA, PRIMA di
-        avviare master e worker — coerente con quanto già fa _ensure_aws_bootstrap
+        avviare master e worker, coerente con quanto già fa _ensure_aws_bootstrap
         per l'ambiente AWS, e con l'idea che in uno scenario federato i dati
         risiedano già sui nodi quando il sistema parte, invece di essere
         generati/distribuiti reattivamente durante un job.
@@ -193,12 +193,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         BaseOrchestrator.read_decision_threshold_from_config, qui riusato per
         lo stesso scopo: allineare il federato allo stesso "spazio
         campionario" del centralizzato, invece di un fallback fisso
-        indipendente dal numero di worker (vedi _load_synthetic_data in
-        federatedWorker.py, che genera 166666 campioni per worker a
-        prescindere da quanti worker sono attivi -- coincidenza numerica con
-        1.000.000/6, non un calcolo dinamico: con un numero di worker diverso
-        da 6 il dataset "federato" smetteva di corrispondere, come TOTALE
-        aggregato, a quello centralizzato).
+        indipendente dal numero di worker.
 
         Ritorna None (mai un'eccezione) se il file non esiste, non contiene
         'n_samples', o è malformato: in quel caso il chiamante deve ricadere
@@ -267,7 +262,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         job_id: inoltrato a exposed_get_local_shard_size così un worker che ha
         già preprocessato lo shard per QUESTO job (round >= 2 dello stesso
         job) può riportare il conteggio reale post-undersampling invece
-        della sola stima sul CSV grezzo — vedi quel metodo per i dettagli.
+        della sola stima sul CSV grezzo, vedi quel metodo per i dettagli.
         """
         sizes = {}
         lock = threading.Lock()
@@ -347,7 +342,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
             # non assegna alcuna riga di quella classe a quel worker). Solo il
             # primo caso va coperto con una stima di fallback; il secondo va
-            # rispettato così com'è — un worker con shard vuoto deve ricevere
+            # rispettato così com'è, un worker con shard vuoto deve ricevere
             # quota 0, non una quota "media" che lo manderebbe in errore al primo
             # bootstrap su un array senza campioni.
             missing = [w for w in worker_names if w not in sizes]
@@ -469,40 +464,8 @@ class FederatedOrchestrator(BaseOrchestrator):
 
             hp = payload.get("hyperparameters", {})
             tree_type = hp.get("tree_type", "classifier")
-            # FIX: 'class_weight' era già supportato lato worker
-            # (exposed_train_local_federated_forest / build_single_tree in
-            # federatedWorker.py: se presente negli hyperparameters, viene
-            # passato al DecisionTreeClassifier), ma non veniva MAI impostato
-            # qui -- restava sempre None, cioè nessun bilanciamento per
-            # nessun albero. Rilevante soprattutto con partition_strategy
-            # non-IID come 'by_day', dove il rapporto Benign/Attacco di un
-            # singolo shard può essere molto diverso da quello globale (es.
-            # worker con 13 o 7 soli campioni della classe minoritaria):
-            # 'balanced' pesa ogni classe in proporzione inversa alla sua
-            # frequenza LOCALE, così anche gli alberi di un worker con shard
-            # fortemente sbilanciato non collassano semplicemente sulla
-            # classe locale maggioritaria. Rispetta comunque un valore
-            # esplicito nel manifesto (hp), se presente; il default
-            # 'balanced' si applica solo ai classificatori, mai alla
-            # regressione (class_weight non ha senso lì).
-            class_weight = hp.get("class_weight", "balanced" if tree_type == "classifier" else None)
 
-            # FIX: con dataset_type='synthetic', ogni worker generava un
-            # numero FISSO di campioni (166666, il fallback hardcoded in
-            # _load_synthetic_data quando 'n_samples' non è tra gli
-            # hyperparameters ricevuti) indipendentemente da quanti worker
-            # sono effettivamente attivi -- coincidenza numerica con
-            # 1.000.000/6, non un calcolo dinamico: con un numero di worker
-            # diverso da 6, la somma dei dati "visti" dal federato smetteva
-            # di corrispondere al totale usato dal centralizzato, rendendo i
-            # due esperimenti non più confrontabili sullo stesso volume dati.
-            # Qui leggiamo il totale da config_synthetic.json (stesso valore
-            # che il centralizzato usa per intero) e lo ripartiamo in quote
-            # il più possibile uguali tra i worker REALMENTE attivi in questo
-            # round: la somma torna sempre 'total_n_samples' esatto,
-            # qualunque sia NUM_WORKERS. None (nessuna riga 'n_samples' nel
-            # config, o config assente) -> nessun override esplicito, ogni
-            # worker ricade sul proprio fallback fisso come accadeva prima.
+            class_weight = hp.get("class_weight", "balanced" if tree_type == "classifier" else None)
             synthetic_n_samples_by_worker = {}
             if self._resolve_dataset_type(payload) == "synthetic":
                 total_synthetic_n_samples = self._read_synthetic_total_n_samples()
@@ -567,20 +530,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                 task_id_counter += 1
                 sub_start = sub_end
 
-            # select_from_config ora passa per checkpoint_dao (locale o S3):
-            # stesso comportamento in ogni ambiente, niente più guard su 'aws'.
+            # select_from_config passa per checkpoint_dao (locale o S3):
             feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
             results_lock = threading.Lock()
             checkpoint_time_accum = [0.0]
 
-            # Lock DEDICATO alla persistenza del checkpoint, separato da
-            # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
-            # cioe' dentro la stessa sezione critica che serve ad accodare gli
-            # alberi ricevuti: ogni worker che finiva restava fermo ad aspettare
-            # la fine dell'upload di un altro, non per calcolare ma solo per
-            # poter registrare il proprio risultato. Era un punto di
-            # serializzazione che cresceva col numero di worker, e falsava
-            # proprio la misura di strong scaling.
+            # Lock DEDICATO alla persistenza del checkpoint, separato da results_lock.
             checkpoint_lock = threading.Lock()
             # Contatore monotono dell'ultimo snapshot effettivamente persistito:
             #  1) impedisce che uno snapshot piu' VECCHIO sovrascriva uno piu'
@@ -665,15 +620,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             },
                         )
 
-                        # Il worker NON restituisce più gli alberi per intero via
-                        # RPC: li ha già persistiti nello storage condiviso prima
-                        # di rispondere (vedi federatedWorker.py,
-                        # exposed_train_local_federated_forest), e qui ci
-                        # limitiamo a un piccolo ack + rilettura diretta dallo
-                        # storage. Stesso fix già applicato al path centralizzato
-                        # per evitare l'hang osservato quando RPyC deve
-                        # trasportare un payload sincrono molto grande come
-                        # valore di ritorno (Scenario 2 - Scalabilità).
+
                         ack = obtain(ack_raw)
                         if not isinstance(ack, dict) or not ack.get("ack"):
                             raise RuntimeError(
@@ -687,17 +634,12 @@ class FederatedOrchestrator(BaseOrchestrator):
                         # per derivare la medesima chiave di storage.
                         #
                         # 'load_task_trees_from_shared_storage' ritorna gli alberi
-                        # già deserializzati, evitando il giro superfluo
-                        # oggetti->bytes->oggetti che load_task_from_shared_storage
-                        # avrebbe richiesto qui (stesso fix applicato al path
-                        # centralizzato dopo l'OOM osservato sull'Orchestratore).
+                        # già deserializzati, 
                         #
                         # 'tree_reconstruction_lock' (definito in BaseOrchestrator,
                         # condiviso con il path centralizzato) serializza QUESTA fase
                         # tra i thread worker, per evitare che più task vengano
-                        # ricomposti in RAM nello stesso istante -- stesso fix
-                        # applicato a centralized.py dopo l'OOM osservato anche con
-                        # 16GB di memoria sull'Orchestratore.
+                        # ricomposti in RAM nello stesso istante 
                         synthetic_source_info = f"shared_train_{self.current_job_id}.csv"
                         with self.tree_reconstruction_lock:
                             result_trees = load_task_trees_from_shared_storage(
@@ -826,30 +768,9 @@ class FederatedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}] [WARN] Calibrazione soglia federata fallita "
                           f"(non bloccante, l'inferenza ricadrà sulla soglia della baseline): {e_thr}")
 
-            # FIX MEMORIA: NON passare più 'alberi_reali=collected_trees' qui.
-            # Il commento originale in _save_checkpoint diceva esplicitamente che
-            # quel ramo era pensato per non essere MAI esercitato in condizioni
-            # normali ("BaseOrchestrator chiama _save_checkpoint senza
-            # 'alberi_reali'") -- ma passandolo qui veniva invece eseguito ad
-            # OGNI round completato con successo, ri-serializzando l'INTERA
-            # foresta un'altra volta (dopo che era già stata scritta un albero
-            # alla volta in model_dir da _reconstruct_and_save_global_model, e
-            # dopo che era già stata salvata incrementalmente durante il round
-            # da _persist_trees_delta ad ogni task completato). Tre copie
-            # ridondanti dello stesso lavoro, proprio nel momento in cui
-            # 'collected_trees' occupa già il picco di RAM del round: è una
-            # delle cause dell'OOM osservato sull'orchestratore. Il checkpoint
-            # leggero (stato/contatori, senza gli alberi) resta comunque
-            # salvato da super()._save_checkpoint(...) dentro _save_checkpoint.
-            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
 
-            # Libera subito la cache in-memoria di questo job: serviva solo per
-            # evitare un reload da storage se lo STESSO processo gestisce il
-            # round successivo (vedi 'STATE-SYNC' più sopra), ma il round è
-            # appena terminato con successo e il modello è già durevolmente su
-            # model_dir -- non c'è motivo di tenere ~100 alberi vivi in RAM
-            # per il resto della vita del processo (es. mentre parte
-            # l'inferenza subito dopo, come nei test).
+            
+            self._save_checkpoint(self.current_job_id, final_count, payload.get("retries", 0), seed)
             self._trees_cache.pop(self.current_job_id, None)
 
             return final_count
@@ -874,23 +795,13 @@ class FederatedOrchestrator(BaseOrchestrator):
         # Marcatore di "inferenza avviata": l'inferenza federata calcola tutto in
         # RAM e via RPC, senza salvare il checkpoint chunk-per-chunk che invece
         # produce quella centralizzata. Non lascerebbe quindi alcun segnale
-        # osservabile dall'esterno mentre è in corso — il che rende impossibile,
+        # osservabile dall'esterno mentre è in corso, il che rende impossibile,
         # per un monitor esterno (o per il test di failover), sapere che l'inferenza
         # è davvero partita. Scriviamo un flag leggero su disco per colmare questo
         # divario: viene creato appena l'inferenza inizia e rimosso quando termina.
         self._mark_inference_started(job_id)
 
         inference_start_time = time.perf_counter()
-
-        # FIX allineamento path: qui si ricostruiva il path a mano con
-        # os.path.join(self.models_dir, ...), un attributo non impostato da
-        # questa classe (probabile residuo di un'implementazione precedente)
-        # e comunque con una convenzione di naming diversa da quella usata in
-        # fase di training (manca il prefisso 'model_' e, su AWS, il
-        # sottopercorso 'saved_models/federated/'). Il training salva sempre
-        # tramite _resolve_model_dir/_resolve_model_path (vedi più sotto in
-        # questo file), quindi l'inferenza deve leggere dagli stessi identici
-        # resolver, non da un path costruito in modo indipendente.
         trees_dir = self._resolve_model_dir(job_id)
         model_pkl = self._resolve_model_path(job_id)
         meta_path = self._resolve_model_meta_path(job_id)
@@ -961,7 +872,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         feature_selezionate = self.select_from_config(self._resolve_dataset_type(payload))
         # Soglia di decisione: proviamo PRIMA quella calibrata specificamente sul
         # modello federato (vedi _calibrate_federated_threshold, eseguita a fine
-        # training se tree_type='classifier') -- calcolata sul validation set
+        # training se tree_type='classifier'), calcolata sul validation set
         # federato con la STESSA funzione di scoring (voto pesato per foglia)
         # usata qui in inferenza, quindi più rappresentativa di quella della
         # baseline centralizzata. Se assente (calibrazione fallita, job
@@ -1091,10 +1002,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                     if tree_type == "classifier" and global_classes is not None:
                         worker_hyperparameters["global_classes"] = global_classes
                     # ----------------------------------------------------------------------------
-                    #print(f"[{self.orchestrator_name}-InfThread] Invio riferimento al modello globale "
-                          #f"({total_trees} alberi, {model_path}) a {w_name}...")
                     raw_response = conn.root.exposed_predict_subset_forest(payload=pickle.dumps({
-                        #"model_path": model_path,
                         "model_dir"  : trees_dir,
                         "job_id": job_id,
                         "worker_index": idx,
@@ -1308,7 +1216,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
         NB: per liberare RAM il prima possibile, questa funzione SVUOTA
         (imposta a None) gli elementi di 'all_trained_trees' non appena li ha
-        persistiti su disco -- vedi commento più sotto. Il chiamante NON deve
+        persistiti su disco (vedi commento più sotto). Il chiamante NON deve
         quindi rileggere gli alberi da questa stessa lista dopo la chiamata
         (es. per le classi del classificatore): per questo la funzione
         restituisce già 'detected_classes', calcolate PRIMA dello svuotamento.
@@ -1329,18 +1237,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             # materializzare tutti i 100 alberi insieme in RAM.
             model_dir = self._resolve_model_dir(self.current_job_id)
             total_trees = len(all_trained_trees)
-            # FIX MEMORIA: prima questo ciclo scriveva ogni albero su disco ma
-            # lasciava TUTTI i riferimenti vivi nella lista 'all_trained_trees'
-            # fino alla fine -- quindi per tutta la durata del ciclo la RAM
-            # doveva comunque contenere l'intera foresta (100 alberi in
-            # questo test), proprio nel momento di picco. Sostituendo ogni
-            # elemento con None non appena è stato persistito, il refcount
-            # dell'albero scende a zero e il garbage collector di CPython può
-            # liberarlo subito, invece che solo all'uscita dalla funzione.
-            # gc.collect() periodico (ogni 10 alberi, stesso batch_size usato
-            # per lo streaming in inferenza in federatedWorker.py) forza il
-            # rilascio effettivo della memoria invece di aspettare che il GC
-            # generazionale ci arrivi da solo.
+
             for i in range(total_trees):
                 tree = all_trained_trees[i]
                 tree_path = os.path.join(model_dir, f"tree_{i:04d}.pkl")
@@ -1396,7 +1293,7 @@ class FederatedOrchestrator(BaseOrchestrator):
     def _calibrate_federated_threshold(self, job_id: str, global_classes, available_workers: dict, num_trees: int = None) -> float:
         """
         Calibra la soglia di decisione sul validation set FEDERATO (pool dei
-        fold locali di ciascun worker -- self._cached_X_val/_y_val lato
+        fold locali di ciascun worker, self._cached_X_val/_y_val lato
         worker, mai visti in training né nel test finale), invece di riusare
         la soglia calibrata sul modello baseline centralizzato: non è detto
         sia più valida qui, specie dopo aver introdotto il voto pesato per
@@ -1417,12 +1314,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                   f"Nessuna soglia federata calcolata.")
             return None
 
-        # FIX: prima si passava 'model_path' (il vecchio blob monolitico),
-        # ma da quando il training salva un file per albero in 'model_dir'
-        # (vedi _reconstruct_and_save_global_model), 'model_path' non viene
-        # più scritto su disco -- il worker lo avrebbe cercato invano. Il
-        # caricamento va fatto in streaming da model_dir/num_trees, come già
-        # avviene per l'inferenza vera e propria (exposed_predict_subset_forest).
+
         model_dir = self._resolve_model_dir(job_id)
         if num_trees is None:
             # Fallback: se il chiamante non lo passa esplicitamente (es. in
@@ -1525,7 +1417,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         # propria: in inferenza ricadrà sulla soglia globale per quel worker
         # (vedi uso di questo dizionario in _execute_inference_step).
         #
-        # GUARDIA AUC (aggiunta dopo il caso worker 5/10): un modello globale
+        # GUARDIA AUC: un modello globale
         # può semplicemente non avere segnale discriminante sui dati locali
         # di un worker (giorno con pattern di traffico/attacco strutturalmente
         # diverso da quelli su cui il resto dell'ensemble è stato allenato --
