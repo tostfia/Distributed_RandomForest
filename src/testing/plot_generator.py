@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from matplotlib.patches import Patch
+from matplotlib.ticker import NullFormatter, ScalarFormatter
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +672,31 @@ class PlotGenerator:
         fig.text(0.01, y, text, ha="left", va="top", fontsize=8.5,
                  color="#595959", style="italic", wrap=True)
 
+    def _title_with_variant(self, base_title: str, run) -> str:
+        """
+        Titolo principale con la variante (es. 'shared'/'sharded' per il
+        centralizzato) in evidenza, invece di lasciarla nel sottotitolo dove
+        passa facilmente inosservata: la modalita' di sharding cambia il
+        significato del confronto e va vista a colpo d'occhio.
+        """
+        variant = self._variant_label(run)
+        return f"{base_title} — {variant.capitalize()}" if variant else base_title
+
+    @staticmethod
+    def _log_axis(ax, axis: str, ticks=None):
+        """
+        Configura un asse in scala log-log in stile 'paper HPC': i tick
+        minori restano nascosti (altrimenti log di matplotlib li affolla con
+        potenze di 10 che qui non sono informative) e i valori sono mostrati
+        in notazione normale (non scientifica) anche in scala log.
+        """
+        axis_obj = ax.xaxis if axis == "x" else ax.yaxis
+        (ax.set_xscale if axis == "x" else ax.set_yscale)("log")
+        axis_obj.set_minor_formatter(NullFormatter())
+        if ticks is not None:
+            (ax.set_xticks if axis == "x" else ax.set_yticks)(ticks)
+        axis_obj.set_major_formatter(ScalarFormatter())
+
     def _env_subtitle(self, run=None) -> str:
         """Ambiente (e modalita', se nota) della run mostrata nella figura."""
         env = (run or {}).get("env", self.primary_env)
@@ -713,7 +739,6 @@ class PlotGenerator:
             ("Matrice di confusione",             self.plot_confusion_matrix),
             ("Confronto metriche ML",             self.plot_ml_metrics_comparison),
             ("Predetto vs Reale (regressione)",   self.plot_regression_scatter),  
-            ("Residui (regressione)",             self.plot_regression_residuals), 
             ("Curva di strong scaling",           self.plot_strong_scaling),
             ("Speedup ed efficienza",             self.plot_speedup_and_efficiency),
             ("Throughput",                        self.plot_throughput),
@@ -1133,71 +1158,71 @@ class PlotGenerator:
         # al totale (vedi ScalabilityScenario) e disegnarlo sarebbe fuorviante.
         only = [p["train_only"] for p in series]
         instrumented = all(p["instrumented"] for p in series)
-        if instrumented and all(v is not None for v in only):
-            ax.plot(workers, np.array(only, dtype=float), marker="s", markersize=7,
+        only_drawn = instrumented and all(v is not None for v in only)
+        plotted_values = []
+        if only_drawn:
+            only_arr = np.array(only, dtype=float)
+            ax.plot(workers, only_arr, marker="s", markersize=7,
                     linewidth=2.4, color=PALETTE["secondary"],
-                    label="Costruzione degli alberi ", zorder=4)
+                    label="Costruzione degli alberi (misurata)", zorder=4)
+
+            # Retta ideale in stile HPC: scaling lineare a partire dal primo
+            # punto misurato (T proporzionale a 1/N). In scala log-log e' una
+            # retta, cosi' lo scostamento dall'ideale si legge come distanza
+            # verticale costante, non come curva che si appiattisce.
+            ideal = only_arr[0] * (workers[0] / workers)
+            ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
+                    color=PALETTE["neutral"], label="Scaling ideale (lineare)", zorder=2)
+            plotted_values.extend(only_arr.tolist())
+            plotted_values.extend(ideal.tolist())
         else:
             print("[WARN] 'training_only_seconds' non strumentato (o assente) per almeno una "
                   "configurazione: ometto la curva della sola costruzione degli alberi.")
 
-        # Riferimenti della baseline locale: T_seq (monocore) e T_1node (multicore).
-        # Presi dal JSON 'baseline_tempi_locali_<N>_alberi.json' che corrisponde
-        # al carico di QUESTA run (stesso N di alberi): tempi misurati con un
+        # Riferimento della baseline locale multicore (T_1node). Preso dal
+        # JSON 'baseline_tempi_locali_<N>_alberi.json' che corrisponde al
+        # carico di QUESTA run (stesso N di alberi): tempi misurati con un
         # numero di alberi diverso non sono un riferimento valido.
         trees = self._trees_per_scale(run)
         tempi = self.baseline_tempi_locali.get(trees) if trees else None
         if trees and tempi is None:
             print(f"[WARN] Nessun 'baseline_tempi_locali_{trees}_alberi.json' trovato: "
-                  f"il grafico di strong scaling non avra' i riferimenti T_seq/T_1node "
+                  f"il grafico di strong scaling non avra' il riferimento T_1node "
                   f"per {trees} alberi.")
         tempi = tempi or {}
-        reference_values = []
-        for key, label, color in (
-            ("t_seq", "Baseline monocore (T_seq)", PALETTE["accent"]),
-            ("t_1node_parallel", "Baseline multicore singolo nodo (T_1node)", PALETTE["success"]),
-        ):
-            value = self._get_float(tempi, key)
-            if value is not None and value > 0:
-                reference_values.append(value)
-                ax.axhline(value, linestyle=":", linewidth=1.7, color=color, zorder=1)
-                # Etichetta ancorata a sinistra: a destra finirebbe sotto la legenda.
-                ax.annotate(f"{label}: {value:.1f} s",
-                            xy=(workers[0], value), xytext=(4, -5),
-                            textcoords="offset points", ha="left", va="top",
-                            fontsize=9, color=color, fontweight="bold")
+        value = self._get_float(tempi, "t_1node_parallel")
+        if value is not None and value > 0:
+            ax.axhline(value, linestyle=":", linewidth=1.7, color=PALETTE["success"], zorder=1)
+            # Etichetta ancorata a sinistra: a destra finirebbe sotto la legenda.
+            ax.annotate(f"Baseline multicore singolo nodo (T_1node): {value:.1f} s",
+                        xy=(workers[0], value), xytext=(4, -5),
+                        textcoords="offset points", ha="left", va="top",
+                        fontsize=9, color=PALETTE["success"], fontweight="bold")
+            plotted_values.append(value)
 
-        ax.set_xlabel("Numero di worker")
-        ax.set_ylabel("Tempo di addestramento (secondi)")
-        # set_xticks DOPO aver disegnato, e senza locator automatico: le
-        # configurazioni testate sono 1,3,5,7 e non vanno interpolate con 2,4,6.
         ax.set_xticks(workers)
         ax.set_xticklabels([str(int(w)) for w in workers])
-        # L'asse Y si dimensiona solo su cio' che e' EFFETTIVAMENTE disegnato
-        # (curva "soli alberi" + riferimenti baseline): 'totals' (tempo
-        # totale) non e' piu' plottato, quindi non deve piu' influenzare la
-        # scala, o il grafico si allarga per fare spazio a una curva invisibile.
-        only_drawn = instrumented and all(v is not None for v in only)
-        ceiling_values = list(reference_values)
-        if only_drawn:
-            ceiling_values.append(float(np.array(only, dtype=float).max()))
-        else:
-            # Nessuna curva disegnata a parte i riferimenti: usiamo 'totals'
-            # solo come ripiego per non lasciare l'asse vuoto.
-            ceiling_values.append(float(totals.max()))
-        ceiling = max(ceiling_values) if ceiling_values else 1.0
-        ax.set_ylim(0, ceiling * 1.22)
+        ax.set_xlabel("Numero di worker")
+        ax.set_ylabel("Tempo di addestramento (secondi)")
+        # Limiti per scala lineare (con opportuno margine sui bordi)
+        x_margin = (workers.max() - workers.min()) * 0.08 if len(workers) > 1 else 0.5
+        ax.set_xlim(max(0, workers.min() - x_margin), workers.max() + x_margin)
+
+        max_val = max(plotted_values) if plotted_values else totals.max()
+        ax.set_ylim(bottom=0, top=max_val * 1.10)
+
         ax.legend(loc="upper right")
         ax.set_axisbelow(True)
+        ax.grid(True, linewidth=0.6, alpha=0.8)
 
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
-        variant = self._variant_label(run)
-        if variant:
-            subtitle += f" ({variant})"
-        self._titles(fig, ax, "Strong scaling: tempo di addestramento a carico costante", subtitle)
-        self._footnote(fig, "Il divario fra curva misurata e curva ideale e' l'overhead "
+        title = self._title_with_variant("Strong scaling: tempo di addestramento a carico costante", run)
+        self._titles(fig, ax, title, subtitle)
+        self._footnote(fig, "Assi log-log: la retta ideale rappresenta uno scaling lineare "
+                            "perfetto a partire dalla configurazione piu' piccola misurata. "
+                            "Il divario verticale dalla curva misurata e' l'overhead "
                             "distribuito: parte seriale (ETL, aggregazione, OOB) piu' costo "
                             "di comunicazione RPC. " + self._provenance(run))
         self._save(fig, f"sdcc_01_strong_scaling_{suffix}.png")
@@ -1443,6 +1468,7 @@ class PlotGenerator:
         workers = np.array([p["workers"] for p in series], dtype=float)
         train = [p["throughput"] for p in series]
         infer = [p["infer_throughput"] for p in series]
+        
 
         has_train = any(v is not None and v > 0 for v in train)
         has_infer = any(v is not None and v > 0 for v in infer)
@@ -1457,52 +1483,87 @@ class PlotGenerator:
         if has_train:
             ax = axes.pop(0)
             values = np.array([v if v is not None else 0.0 for v in train], dtype=float)
-            bars = ax.bar(workers, values, width=0.55 if len(workers) > 2 else 0.35,
-                          color=PALETTE["primary"], edgecolor="white", linewidth=1.1, zorder=3)
+            ax.plot(workers, values, marker="o", markersize=8, linewidth=2.4,
+                    color=PALETTE["primary"], label="Throughput misurato", zorder=4)
+
+            # Retta ideale in stile HPC: crescita lineare a partire dal primo
+            # punto misurato. In log-log resta una retta (stessa pendenza
+            # della curva "scaling ideale" dello strong scaling).
+            base_val = float(values[0]) if values[0] > 0 else None
+            ideal = None
+            plotted_values = list(values)
+            if base_val:
+                ideal = base_val * (workers / workers[0])
+                ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
+                        color=PALETTE["neutral"], label="Throughput ideale (lineare)", zorder=2)
+                plotted_values.extend(ideal.tolist())
+
             only = [p["throughput_train_only"] for p in series]
             if all(p["instrumented"] for p in series) and any(v for v in only if v):
-                ax.plot(workers, [v or 0.0 for v in only], marker="D", markersize=7,
+                only_vals = [v or 0.0 for v in only]
+                ax.plot(workers, only_vals, marker="D", markersize=7,
                         linewidth=2.2, color=PALETTE["secondary"], zorder=4,
                         label="Soli alberi (al netto dell'overhead)")
-                ax.legend(loc="upper left")
-            for bar, v in zip(bars, values):
-                ax.annotate(f"{v:.2f}", xy=(bar.get_x() + bar.get_width() / 2, v),
-                            xytext=(0, 4), textcoords="offset points", ha="center",
+                plotted_values.extend([v for v in only_vals if v])
+            for xi, v in zip(workers, values):
+                ax.annotate(f"{v:.2f}", xy=(xi, v), xytext=(0, 9),
+                            textcoords="offset points", ha="center",
                             fontsize=10, color="#404040")
             ax.set_title("Addestramento", fontsize=13)
             ax.set_xlabel("Numero di worker")
             ax.set_ylabel("Throughput (alberi / secondo)")
-            ax.set_xticks(workers)
+            self._log_axis(ax, "x", ticks=workers)
+            ax.set_xticklabels([str(int(w)) for w in workers])
+            self._log_axis(ax, "y")
+            ax.set_xlim(workers.min() * 0.85, workers.max() * 1.15)
+            positive = [v for v in plotted_values if v > 0]
+            if positive:
+                ax.set_ylim(min(positive) * 0.7, max(positive) * 1.35)
+            ax.legend(loc="upper left")
             ax.set_axisbelow(True)
-            ceiling = max([float(values.max())] + [v for v in only if v])
-            ax.set_ylim(0, ceiling * 1.28)   # spazio per legenda ed etichette
+            ax.grid(True, which="major", linewidth=0.6, alpha=0.8)
+            ax.grid(True, which="minor", linewidth=0.3, alpha=0.35)
 
         if has_infer:
             ax = axes.pop(0)
             values = np.array([v if v is not None else 0.0 for v in infer], dtype=float)
-            bars = ax.bar(workers, values, width=0.55 if len(workers) > 2 else 0.35,
-                          color=PALETTE["success"], edgecolor="white", linewidth=1.1, zorder=3)
-            for bar, v in zip(bars, values):
-                ax.annotate(f"{v:,.0f}".replace(",", "."),
-                            xy=(bar.get_x() + bar.get_width() / 2, v),
-                            xytext=(0, 4), textcoords="offset points", ha="center",
+            ax.plot(workers, values, marker="o", markersize=8, linewidth=2.4,
+                    color=PALETTE["success"], label="Throughput misurato", zorder=4)
+
+            base_val = float(values[0]) if values[0] > 0 else None
+            ideal = None
+            plotted_values = list(values)
+            if base_val:
+                ideal = base_val * (workers / workers[0])
+                ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
+                        color=PALETTE["neutral"], label="Throughput ideale (lineare)", zorder=2)
+                plotted_values.extend(ideal.tolist())
+
+            for xi, v in zip(workers, values):
+                ax.annotate(f"{v:,.0f}".replace(",", "."), xy=(xi, v), xytext=(0, 9),
+                            textcoords="offset points", ha="center",
                             fontsize=10, color="#404040")
             ax.set_title("Inferenza", fontsize=13)
             ax.set_xlabel("Numero di worker")
             ax.set_ylabel("Throughput (campioni / secondo)")
-            ax.set_xticks(workers)
+            self._log_axis(ax, "x", ticks=workers)
+            ax.set_xticklabels([str(int(w)) for w in workers])
+            self._log_axis(ax, "y")
+            ax.set_xlim(workers.min() * 0.85, workers.max() * 1.15)
+            positive = [v for v in plotted_values if v > 0]
+            if positive:
+                ax.set_ylim(min(positive) * 0.7, max(positive) * 1.25)
+            ax.legend(loc="upper left")
             ax.set_axisbelow(True)
-            ax.set_ylim(0, float(values.max()) * 1.15)
+            ax.grid(True, which="major", linewidth=0.6, alpha=0.8)
+            ax.grid(True, which="minor", linewidth=0.3, alpha=0.35)
 
         trees = self._trees_per_scale(run)
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
-        variant = self._variant_label(run)
-        if variant:
-            subtitle += f" ({variant})"
-        fig.suptitle(f"Throughput del sistema distribuito - {subtitle}",
-                     fontsize=14, fontweight="bold", y=1.0)
+        title = self._title_with_variant("Throughput del sistema distribuito", run)
+        fig.suptitle(f"{title} - {subtitle}", fontsize=14, fontweight="bold", y=1.0)
 
         # Il caveat sul federato e' scritto dallo scenario stesso: se c'e', va
         # riportato, perche' cambia il modo in cui il grafico va letto.
@@ -1852,49 +1913,8 @@ class PlotGenerator:
                             f"{self._provenance(run)}")
         self._save(fig, "ml_05_scatter_predetto_reale.png")
 
-    def plot_regression_residuals(self):
-        """Residui (predetto - reale) vs valore reale, via hexbin."""
-        name = "Residui (regressione)"
+    
 
-        run = self._pick_run(("performance_and_metrics",), task="regressione")
-        if run is None:
-            self._skip(name, "scenario 'performance_and_metrics' non disponibile per un task di regressione")
-            return
-
-        perf = self._scenario("performance_and_metrics", run)
-        sample = perf.get("prediction_sample") if isinstance(perf, dict) else None
-        if not isinstance(sample, dict) or not sample.get("y_true") or not sample.get("y_pred"):
-            self._skip(name, "campione di predizioni assente nel report")
-            return
-
-        y_true = np.array(sample["y_true"], dtype=np.float64)
-        y_pred = np.array(sample["y_pred"], dtype=np.float64)
-        if y_true.size == 0 or y_true.shape != y_pred.shape:
-            self._skip(name, "campione di predizioni malformato (shape y_true/y_pred incoerenti)")
-            return
-
-        residuals = y_pred - y_true
-
-        fig, ax = plt.subplots(figsize=(7.2, 5.2))
-        hb = ax.hexbin(y_true, residuals, gridsize=60, cmap="Blues", mincnt=1)
-        ax.axhline(0.0, color=PALETTE["secondary"], linewidth=1.4, linestyle="--",
-                label="Residuo nullo (predizione perfetta)")
-
-        fig.colorbar(hb, ax=ax, label="Numero di campioni")
-        ax.set_xlabel("Valore reale")
-        ax.set_ylabel("Residuo (predetto − reale)")
-        ax.legend(loc="upper right")
-
-        mean_res = float(residuals.mean())
-        std_res = float(residuals.std())
-        self._titles(fig, ax, "Residui del modello - Regressione", self._env_subtitle(run))
-
-        population = sample.get("population_size")
-        pop_note = f" (popolazione test: {population:,})" if population else ""
-        self._footnote(fig, f"Campione di {len(y_true):,} predizioni{pop_note}. "
-                            f"Media residui: {mean_res:+.3f}, deviazione standard: {std_res:.3f}. "
-                            f"{self._provenance(run)}")
-        self._save(fig, "ml_06_residui_regressione.png")
 
 
 if __name__ == "__main__":

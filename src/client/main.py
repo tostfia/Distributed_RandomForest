@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import sys
 import time
 import boto3
@@ -11,6 +12,12 @@ from src.shared.factory import get_aws_services
 from src.shared.sharedmodels.models import Hyperparameters, InferenceRequest, TrainingRequest
 from src.baseline.run_baseline import run_baseline
 from src.dataset.metrics_dao import MetricsDAOFactory
+from src.dataset.checkpoint_dao import CheckpointDAOFactory
+from src.shared.utilities.model_assembly import (
+    assemble_centralized_forest,
+    assemble_federated_forest,
+    model_artifact_exists,
+)
 import shutil
 
 cfg = SystemConfig()
@@ -364,14 +371,10 @@ def handle_inference():
     return
 
 
-def download_model(job_id: str) -> None:
-    """
-    Esporta localmente il modello addestrato associato al Job ID.
-    In ambiente locale copia il modello dalla cartella saved_models.
-    In ambiente AWS scarica il modello dal bucket S3 configurato.
-    """
-    model_filename = f"model_{job_id}.pkl"
-
+def _resolve_training_mode(job_id: str) -> str:
+    """Stessa logica finora duplicata solo dentro download_model(): preferisce
+    la modalità registrata nella history locale per QUESTO job_id, altrimenti
+    ricade sulla modalità di sistema corrente (cfg.mode)."""
     training_entry = next(
         (
             entry
@@ -381,12 +384,35 @@ def download_model(job_id: str) -> None:
         ),
         None,
     )
-
-    training_mode = (
+    return (
         training_entry.get("mode")
         if training_entry and training_entry.get("mode")
         else cfg.mode
     )
+
+
+def download_model(job_id: str) -> None:
+    """
+    Assembla (lazy, solo qui, su richiesta) ed esporta localmente un vero
+    modello scikit-learn per il Job ID indicato.
+
+    NOTA (fix requisito opzionale di download, traccia progetto): ciò che il
+    training salva su storage NON è un modello scikit-learn autosufficiente:
+    - in modalità centralized è solo un MANIFESTO leggero (metadati, non
+      alberi -- vedi _execute_training_step in centralized.py);
+    - in modalità federated sono ALBERI SEPARATI, un file per albero (vedi
+      _reconstruct_and_save_global_model in federated.py), a un path diverso
+      da quello che veniva scaricato prima di questo fix.
+    Questa funzione ricompone gli alberi (via src.shared.utilities.
+    model_assembly, che legge dallo stesso storage - locale o S3 - usato dal
+    training) in un vero RandomForestClassifier/Regressor, utilizzabile con
+    model.predict(X) in un ambiente locale con scikit-learn installato, come
+    richiesto dalla traccia. L'assemblaggio avviene solo al momento del
+    download, non ad ogni round di training, per non reintrodurre i problemi
+    di memoria che il manifesto leggero era stato introdotto per risolvere.
+    """
+    model_filename = f"model_{job_id}.pkl"
+    training_mode = _resolve_training_mode(job_id)
 
     print(f"[INFO] Modalità del modello utilizzata per il download: {training_mode.upper()}")
 
@@ -401,64 +427,34 @@ def download_model(job_id: str) -> None:
     destination_directory = os.path.dirname(destination_path) or "."
     os.makedirs(destination_directory, exist_ok=True)
 
-    if cfg.env == "local":
-        saved_models_path = os.path.join("./saved_models", model_filename)
-        root_path = os.path.join(".", model_filename)
-
-        if os.path.exists(saved_models_path):
-            source_path = saved_models_path
-        elif os.path.exists(root_path):
-            source_path = root_path
-        else:
-            raise FileNotFoundError(
-                f"Il modello locale non è stato trovato né in '{saved_models_path}' né in '{root_path}'."
-            )
-
-        if os.path.abspath(source_path) == os.path.abspath(destination_path):
-            print(f"\n[INFO] Il modello si trova già nel percorso richiesto: '{destination_path}'")
-            return
-
-        shutil.copy2(source_path, destination_path)
-
-    elif cfg.env == "aws":
-        bucket_name = cfg.s3_bucket_name
-        if not bucket_name:
-            raise ValueError("DATASETS_BUCKET_NAME non è configurato per l'ambiente AWS.")
-
-        model_key = f"saved_models/{training_mode}/{model_filename}"
-
-        s3_client = boto3.client("s3", region_name=cfg.aws_region)
-
-        try:
-            presigned_url = s3_client.generate_presigned_url(
-                ClientMethod='get_object',
-                Params={'Bucket': bucket_name, 'Key': model_key},
-                ExpiresIn=3600
-            )
-            print(f"\n[OK] LINK S3 PER DOWNLOAD DIRETTO VIA BROWSER (valido 1 ora):\n{presigned_url}\n")
-        except ClientError as e:
-            print(f"[ATTENZIONE] Impossibile generare il Presigned URL: {e}")
-
-        print(f"[INFO] Download da s3://{bucket_name}/{model_key}")
-
-        try:
-            s3_client.download_file(bucket_name, model_key, destination_path)
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code in ("404", "NoSuchKey", "NotFound"):
-                raise FileNotFoundError(f"Il modello non è presente in s3://{bucket_name}/{model_key}") from exc
-            raise
-
-    else:
+    if cfg.env not in ("local", "aws"):
         raise ValueError(f"Ambiente '{cfg.env}' non supportato.")
+
+    # CheckpointDAOFactory astrae già locale/S3 (stesso DAO usato dagli
+    # orchestratori): non serve più distinguere i due rami a mano qui.
+    checkpoint_dao = CheckpointDAOFactory.get_dao(cfg.env)
+
+    print(f"[INFO] Assemblaggio del modello (job '{job_id}', modalità '{training_mode}')...")
+    try:
+        if training_mode == "federated":
+            forest = assemble_federated_forest(job_id, checkpoint_dao, cfg.env)
+        else:
+            forest = assemble_centralized_forest(job_id, checkpoint_dao, cfg.env)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Impossibile assemblare il modello per il job '{job_id}': {exc}"
+        ) from exc
+
+    with open(destination_path, "wb") as f:
+        pickle.dump(forest, f)
 
     if os.path.exists(destination_path):
         file_size = os.path.getsize(destination_path)
-        print(f"\n[OK] Modello scaricato correttamente in: '{destination_path}'")
-        print(f"[INFO] Dimensione del file: {file_size} byte")
+        print(f"\n[OK] Modello assemblato e scaricato correttamente in: '{destination_path}'")
+        print(f"[INFO] Dimensione del file: {file_size} byte ({forest.n_estimators} alberi)")
         print("[ATTENZIONE] I file Pickle devono essere caricati esclusivamente se provengono da fonti attendibili.")
     else:
-        print(f"\n[ATTENZIONE] Download terminato ma il file non è stato trovato in '{destination_path}'.")
+        print(f"\n[ATTENZIONE] Assemblaggio completato ma il file non è stato trovato in '{destination_path}'.")
 
 
 def handle_model_request():
@@ -500,21 +496,25 @@ def handle_model_request():
         elif job_status.upper() == "COMPLETED":
             print(f"\n[COMPLETATO] L'addestramento per il Job {job_id} è terminato con successo!")
 
-            model_filename = f"model_{job_id}.pkl"
-            model_path = os.path.join("./saved_models", model_filename)
-            
-            if cfg.env == "local":
-                if os.path.exists(model_path):
-                    print(f"[OK] File binario del modello rilevato in: '{model_path}'")
-                    print("[INFO] Il modello è pronto per ricevere richieste di inferenza.")
-                elif os.path.exists(model_filename):
-                    print(f"[OK] File binario del modello rilevato nella root: '{model_filename}'")
-                else:
-                    print(f"\n[ATTENZIONE] Il DB dichiara 'COMPLETED', ma il file binario '{model_filename}' non è stato trovato in '{model_path}'.")
-                    return
+            training_mode = _resolve_training_mode(job_id)
+            checkpoint_dao = CheckpointDAOFactory.get_dao(cfg.env)
 
-            elif cfg.env == "aws":
-                print("[INFO] Il modello risulta completato. La presenza su S3 sarà verificata durante il download.")
+            # NOTA (fix): prima si controllava os.path.exists('./saved_models/
+            # model_{job_id}.pkl') -- un path che il training in modalità
+            # federated non scrive mai (vedi model_assembly.py), quindi questo
+            # check falliva SEMPRE per i job federated e la funzione usciva
+            # prima di offrire il download, anche quando il modello era
+            # perfettamente assemblabile dai suoi artefatti reali (meta +
+            # alberi separati). Ora si usa la stessa nozione di "esiste" che
+            # userebbe l'assemblaggio vero e proprio, per entrambe le
+            # modalità e in entrambi gli ambienti (locale/S3).
+            if model_artifact_exists(job_id, checkpoint_dao, cfg.env, training_mode):
+                print(f"[OK] Artefatti del modello ({training_mode}) rilevati su storage.")
+                print("[INFO] Il modello è pronto per ricevere richieste di inferenza.")
+            else:
+                print(f"\n[ATTENZIONE] Il DB dichiara 'COMPLETED', ma non è stato trovato alcun "
+                      f"artefatto del modello ({training_mode}) su storage per questo Job ID.")
+                return
 
             download_choice = get_input("\nVuoi scaricare/esportare il modello? (S/N) [Default: N]: ", "N").strip()
 
