@@ -1,19 +1,10 @@
 # =============================================================================
-# ORCHESTRATOR su istanze EC2 (invece di ECS Fargate).
+# ORCHESTRATOR su istanze EC2.
 #
-# PERCHÉ: la SCP del Learner Lab nega 'ecs:RegisterTaskDefinition' per
-# qualunque memoria > 8192 MiB, sia su launch type FARGATE sia EC2-backed
-# (verificato empiricamente, entrambi respinti con lo stesso explicit deny).
-# 'ec2:RunInstances' su un tipo whitelisted (r5.large, 16 GiB) NON è
-# soggetto a questa restrizione (verificato con --dry-run). L'orchestratore
-# è l'unico componente che soffre il limite di memoria (i worker restano
+# L'orchestratore è l'unico componente che soffre il limite di memoria (i worker restano
 # invariati su Fargate, 2 GiB ciascuno, mai sotto stress); qui gli diamo
 # 16 GiB invece di 8, per un margine reale (~9 GiB liberi con ~7 GiB di
 # alberi in RAM in scenari di scalabilità pesanti).
-#
-# Sostituisce aws_ecs_service.orchestrator / aws_ecs_task_definition.orchestrator
-# in ecs_services.tf / ecs_task_definitions.tf, che vanno rimossi o lasciati
-# a desired_count=0 per non consumare risorse duplicate.
 # =============================================================================
 
 variable "orchestrator_ec2_ami" {

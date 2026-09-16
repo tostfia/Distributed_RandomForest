@@ -15,8 +15,8 @@ data "aws_region" "current" {}
 # S3, DynamoDB, SQS, ECR, CloudWatch Logs): lo referenziamo soltanto,
 # esattamente come fa deploy.sh con LABROLE_ARN.
 #
-# Se lanci questo modulo FUORI da un Learner Lab (account AWS normale),
-# LabRole non esiste: dovrai creare un ruolo equivalente a mano e
+# Se si lancia questo modulo FUORI da un Learner Lab (account AWS normale),
+# LabRole non esiste: si dovrà creare un ruolo equivalente a mano e
 # sostituire questo data source con una risorsa aws_iam_role.
 # ---------------------------------------------------------------------
 data "aws_iam_role" "lab_role" {

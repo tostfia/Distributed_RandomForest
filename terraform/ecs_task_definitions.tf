@@ -24,14 +24,6 @@ locals {
   ]
 }
 
-# ---------------------------------------------------------------------
-# ORCHESTRATOR: rimosso da qui. Non gira più come task ECS Fargate — la
-# SCP del Learner Lab nega 'ecs:RegisterTaskDefinition' con memoria > 8192
-# MiB (sia FARGATE che EC2-backed), un tetto troppo stretto per gli
-# scenari di scalabilità pesanti (~7 GiB di alberi in RAM con 10 worker).
-# Ora gira su istanze EC2 dedicate (r5.large, 16 GiB), fuori da ECS ma
-# nella stessa VPC/Security Group — vedi orchestrator_ec2.tf.
-# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 # WORKER - modalità CENTRALIZED
@@ -102,7 +94,7 @@ resource "aws_ecs_task_definition" "worker_centralized" {
   ])
 
   # ESPLICITO, non solo default_tags del provider: verificato empiricamente
-  # (10/9/2026) che un tag presente SOLO in default_tags non soddisfa la
+  # che un tag presente SOLO in default_tags non soddisfa la
   # condizione SCP su ecs:RegisterTaskDefinition - la SCP valuta il tag
   # nella chiamata stessa, e Terraform non garantisce che default_tags
   # venga incluso in quella specifica API call per questo tipo di risorsa.
@@ -119,14 +111,7 @@ resource "aws_ecs_task_definition" "worker_centralized" {
 resource "aws_ecs_task_definition" "worker_federated" {
   count = var.training_mode == "federated" ? var.num_workers : 0
 
-  # BUGFIX (11/9/2026): family UNICA per indice, non condivisa. Con
-  # num_workers > 1 Terraform crea N istanze di questa risorsa IN PARALLELO
-  # (nessun depends_on tra loro): se condividessero la stessa family,
-  # tenterebbero N 'register-task-definition' concorrenti sulla stessa
-  # family - esattamente l'errore "Too many concurrent attempts to create
-  # a new revision of the specified family" che il commento su
-  # worker_centralized descrive per il caso orchestrator/worker (due
-  # risorse, non N in parallelo come qui). Una family per indice elimina
+  #Una family per indice elimina
   # la contesa alla radice, invece di doverla gestire con un depends_on
   # sequenziale artificiale tra i worker.
   family                   = "lab-worker-task-${count.index + 1}"
@@ -162,9 +147,7 @@ resource "aws_ecs_task_definition" "worker_federated" {
     }
   ])
 
-  # Vedi la nota gemella su worker_centralized: tag esplicito richiesto
-  # nella chiamata stessa, default_tags da solo non basta per questa
-  # risorsa (verificato empiricamente il 10/9/2026).
+
   tags = { Project = var.project_name }
 
   depends_on = [null_resource.docker_build_push]

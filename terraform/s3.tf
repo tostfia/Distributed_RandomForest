@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------
 # Configurazione S3 - Ottimizzata per limiti AWS Academy / Vocareum
 #
-# NOTA PER LA VALUTAZIONE: Il provider AWS di Terraform tenta implicitamente
+# NOTA: Il provider AWS di Terraform tenta implicitamente
 # di leggere la configurazione di Object Lock (GetBucketObjectLockConfiguration) 
 # sia sulle risorse che sui Data Source di S3. Nelle sandbox AWS Academy questa API 
 # è bloccata da una Service Control Policy (SCP) centralizzata. 

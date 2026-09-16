@@ -86,9 +86,7 @@ resource "aws_dynamodb_table" "job_meta_data" {
 # WorkerTasks: unica tabella con due Global Secondary Index, confermati
 # via describe-table (worker_name-index, job_id-index). La projection
 # ALL è confermata per worker_name-index; per job_id-index è ASSUNTA
-# identica (non verificata esplicitamente) — se il codice fa query su
-# job_id-index leggendo solo attributi proiettati parzialmente, verifica
-# questo punto prima della consegna.
+# identica (non verificata esplicitamente).
 # ---------------------------------------------------------------------
 resource "aws_dynamodb_table" "worker_tasks" {
   name         = "WorkerTasks"

@@ -2,12 +2,6 @@ locals {
   network_config_subnets = data.aws_subnets.public.ids
 }
 
-# ---------------------------------------------------------------------
-# ORCHESTRATOR: rimosso da qui, non gira più come Service ECS Fargate.
-# Ora gira su istanze EC2 dedicate (aws_instance.orchestrator) — vedi
-# orchestrator_ec2.tf per il dettaglio e la motivazione (tetto di memoria
-# SCP del Learner Lab).
-# ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
 # WORKER SERVICE - modalità CENTRALIZED: un unico Service, desired_count

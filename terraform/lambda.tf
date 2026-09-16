@@ -4,8 +4,8 @@
 # Codice copiato 1:1 dall'account Learner Lab funzionante
 # (terraform/lambda/lambda_function.py) — nessuna modifica alla logica.
 #
-# NOTA comportamento esistente (non un bug da questa consegna): sia
-# /status che /details invocano handle_status() e restituiscono la
+# NOTA comportamento esistente:
+# sia /status che /details invocano handle_status() e restituiscono la
 # stessa risposta, perché lambda_handler smista solo su GET vs POST,
 # non sul path esatto.
 # ---------------------------------------------------------------------
