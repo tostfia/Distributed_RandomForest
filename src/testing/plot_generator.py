@@ -1467,114 +1467,93 @@ class PlotGenerator:
 
         workers = np.array([p["workers"] for p in series], dtype=float)
         train = [p["throughput"] for p in series]
-        infer = [p["infer_throughput"] for p in series]
-        
 
         has_train = any(v is not None and v > 0 for v in train)
-        has_infer = any(v is not None and v > 0 for v in infer)
-        if not has_train and not has_infer:
-            self._skip(f"{name} ({suffix})", "nessun valore di throughput valido nei report")
+        if not has_train:
+            self._skip(f"{name} ({suffix})", "nessun valore di throughput di addestramento valido nei report")
             return
 
-        n_panels = int(has_train) + int(has_infer)
-        fig, axes = plt.subplots(1, n_panels, figsize=(7.0 * n_panels, 5.4), squeeze=False)
-        axes = list(axes[0])
+        fig, ax = plt.subplots(figsize=(7.0, 5.4))
 
-        if has_train:
-            ax = axes.pop(0)
-            values = np.array([v if v is not None else 0.0 for v in train], dtype=float)
-            ax.plot(workers, values, marker="o", markersize=8, linewidth=2.4,
-                    color=PALETTE["primary"], label="Throughput misurato", zorder=4)
+        values = np.array([v if v is not None else 0.0 for v in train], dtype=float)
+        ax.plot(
+            workers,
+            values,
+            marker="o",
+            markersize=8,
+            linewidth=2.4,
+            color=PALETTE["primary"],
+            label="Throughput misurato",
+            zorder=4,
+        )
 
-            # Retta ideale in stile HPC: crescita lineare a partire dal primo
-            # punto misurato. In log-log resta una retta (stessa pendenza
-            # della curva "scaling ideale" dello strong scaling).
-            base_val = float(values[0]) if values[0] > 0 else None
-            ideal = None
-            plotted_values = list(values)
-            if base_val:
-                ideal = base_val * (workers / workers[0])
-                ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
-                        color=PALETTE["neutral"], label="Throughput ideale (lineare)", zorder=2)
-                plotted_values.extend(ideal.tolist())
+        # Retta ideale in stile HPC: crescita lineare a partire dal primo punto misurato
+        base_val = float(values[0]) if values[0] > 0 else None
+        plotted_values = list(values)
+        if base_val:
+            ideal = base_val * (workers / workers[0])
+            ax.plot(
+                workers,
+                ideal,
+                linestyle="--",
+                linewidth=1.7,
+                color=PALETTE["neutral"],
+                label="Throughput ideale (lineare)",
+                zorder=2,
+            )
+            plotted_values.extend(ideal.tolist())
 
-            only = [p["throughput_train_only"] for p in series]
-            if all(p["instrumented"] for p in series) and any(v for v in only if v):
-                only_vals = [v or 0.0 for v in only]
-                ax.plot(workers, only_vals, marker="D", markersize=7,
-                        linewidth=2.2, color=PALETTE["secondary"], zorder=4,
-                        label="Soli alberi (al netto dell'overhead)")
-                plotted_values.extend([v for v in only_vals if v])
-            for xi, v in zip(workers, values):
-                ax.annotate(f"{v:.2f}", xy=(xi, v), xytext=(0, 9),
-                            textcoords="offset points", ha="center",
-                            fontsize=10, color="#404040")
-            ax.set_title("Addestramento", fontsize=13)
-            ax.set_xlabel("Numero di worker")
-            ax.set_ylabel("Throughput (alberi / secondo)")
-            self._log_axis(ax, "x", ticks=workers)
-            ax.set_xticklabels([str(int(w)) for w in workers])
-            self._log_axis(ax, "y")
-            ax.set_xlim(workers.min() * 0.85, workers.max() * 1.15)
-            positive = [v for v in plotted_values if v > 0]
-            if positive:
-                ax.set_ylim(min(positive) * 0.7, max(positive) * 1.35)
-            ax.legend(loc="upper left")
-            ax.set_axisbelow(True)
-            ax.grid(True, which="major", linewidth=0.6, alpha=0.8)
-            ax.grid(True, which="minor", linewidth=0.3, alpha=0.35)
+        only = [p.get("throughput_train_only") for p in series]
+        if all(p.get("instrumented", False) for p in series) and any(v for v in only if v):
+            only_vals = [v or 0.0 for v in only]
+            ax.plot(
+                workers,
+                only_vals,
+                marker="D",
+                markersize=7,
+                linewidth=2.2,
+                color=PALETTE["secondary"],
+                zorder=4,
+                label="Soli alberi (al netto dell'overhead)",
+            )
+            plotted_values.extend([v for v in only_vals if v])
 
-        if has_infer:
-            ax = axes.pop(0)
-            values = np.array([v if v is not None else 0.0 for v in infer], dtype=float)
-            ax.plot(workers, values, marker="o", markersize=8, linewidth=2.4,
-                    color=PALETTE["success"], label="Throughput misurato", zorder=4)
+        for xi, v in zip(workers, values):
+            ax.annotate(
+                f"{v:.2f}",
+                xy=(xi, v),
+                xytext=(0, 9),
+                textcoords="offset points",
+                ha="center",
+                fontsize=10,
+                color="#404040",
+            )
 
-            base_val = float(values[0]) if values[0] > 0 else None
-            ideal = None
-            plotted_values = list(values)
-            if base_val:
-                ideal = base_val * (workers / workers[0])
-                ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
-                        color=PALETTE["neutral"], label="Throughput ideale (lineare)", zorder=2)
-                plotted_values.extend(ideal.tolist())
+        ax.set_title("Addestramento", fontsize=13)
+        ax.set_xlabel("Numero di worker")
+        ax.set_ylabel("Throughput (alberi / secondo)")
+        self._log_axis(ax, "x", ticks=workers)
+        ax.set_xticklabels([str(int(w)) for w in workers])
+        self._log_axis(ax, "y")
+        ax.set_xlim(workers.min() * 0.85, workers.max() * 1.15)
 
-            for xi, v in zip(workers, values):
-                ax.annotate(f"{v:,.0f}".replace(",", "."), xy=(xi, v), xytext=(0, 9),
-                            textcoords="offset points", ha="center",
-                            fontsize=10, color="#404040")
-            ax.set_title("Inferenza", fontsize=13)
-            ax.set_xlabel("Numero di worker")
-            ax.set_ylabel("Throughput (campioni / secondo)")
-            self._log_axis(ax, "x", ticks=workers)
-            ax.set_xticklabels([str(int(w)) for w in workers])
-            self._log_axis(ax, "y")
-            ax.set_xlim(workers.min() * 0.85, workers.max() * 1.15)
-            positive = [v for v in plotted_values if v > 0]
-            if positive:
-                ax.set_ylim(min(positive) * 0.7, max(positive) * 1.25)
-            ax.legend(loc="upper left")
-            ax.set_axisbelow(True)
-            ax.grid(True, which="major", linewidth=0.6, alpha=0.8)
-            ax.grid(True, which="minor", linewidth=0.3, alpha=0.35)
+        positive = [v for v in plotted_values if v > 0]
+        if positive:
+            ax.set_ylim(min(positive) * 0.7, max(positive) * 1.35)
+
+        ax.legend(loc="upper left")
+        ax.set_axisbelow(True)
+        ax.grid(True, which="major", linewidth=0.6, alpha=0.8)
+        ax.grid(True, which="minor", linewidth=0.3, alpha=0.35)
 
         trees = self._trees_per_scale(run)
         subtitle = self._env_subtitle(run)
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
-        title = self._title_with_variant("Throughput del sistema distribuito", run)
+        title = self._title_with_variant("Throughput addestramento del sistema distribuito", run)
         fig.suptitle(f"{title} - {subtitle}", fontsize=14, fontweight="bold", y=1.0)
 
-        # Il caveat sul federato e' scritto dallo scenario stesso: se c'e', va
-        # riportato, perche' cambia il modo in cui il grafico va letto.
-        scal = self._scenario("scalability", run) or {}
-        caveat = scal.get("inference_speedup_caveat")
-        note = ("Il throughput e' la misura corretta anche in modalita' federata, dove il "
-                "test set totale cresce con il numero di worker e lo speedup dell'inferenza "
-                "non sarebbe confrontabile."
-                if caveat else
-                "Throughput misurato a carico fisso: cresce con i worker fintanto che la "
-                "parte parallela domina il tempo totale.")
+        note = "Throughput misurato a carico fisso: cresce con i worker fintanto che la parte parallela domina il tempo totale."
         self._footnote(fig, note + " " + self._provenance(run))
         self._save(fig, f"sdcc_04_throughput_{suffix}.png")
 
