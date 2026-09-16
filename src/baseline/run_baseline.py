@@ -1072,15 +1072,6 @@ def run_baseline():
             "max_samples": float(best_hp_reale.get("max_samples", 1.0)) if best_bootstrap else 1.0,
         }
 
-        # BUG corretto: questo ramo calcolava hp_sintetici ma non costruiva
-        # mai config_data né scriveva alcun manifesto -- a differenza sia del
-        # ramo 'real' sia di quello sintetico-regressore (poco più sotto),
-        # che invece lo fanno entrambi. La FASE 4 subito dopo (comune a tutti
-        # e tre i rami) legge SEMPRE `config_data["hyperparameters"]`: senza
-        # questo blocco, qualunque run 'sintetico + classificatore' falliva
-        # con UnboundLocalError not appena arrivato lì. Struttura identica
-        # (stessi campi/nomi di chiave) al blocco del regressore sotto, per
-        # coerenza tra i due manifesti.
         config_data = {
             "mode": "distributed",
             "dataset_type": "synthetic",

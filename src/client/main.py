@@ -76,7 +76,7 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
         # dalla baseline (es. SYNTHETIC_N_SAMPLES nel .env). Ogni worker
         # federato genera però il proprio dataset sintetico in autonomia
         # (vedi FederatedWorker._load_synthetic_data, con seed diverso per
-        # worker) -- se ricevesse lo stesso 'n_samples' TOTALE, il volume
+        # worker), se ricevesse lo stesso 'n_samples' TOTALE, il volume
         # complessivo nel cluster sarebbe 'n_samples' × NUM_WORKERS, non
         # 'n_samples' come nella baseline. Diviso qui per NUM_WORKERS (letto
         # dallo stesso .env, mai ridichiarato) così il totale federato resta
@@ -251,12 +251,6 @@ def handle_inference():
         print("[ERRORE] Il Job ID è obbligatorio.")
         return
 
-    # BUG RIMOSSO (6/9/2026): questo prompt chiedeva un path/URL dei dati per
-    # l'inferenza, ma _execute_inference_step (sia centralized.py sia
-    # federated.py) risolve SEMPRE il test set da 'job_id' — mai da questo
-    # campo, che veniva raccolto e mai realmente consumato lato server.
-    # Manteniamo un valore placeholder solo per compatibilità con lo schema
-    # InferenceRequest, mai mostrato/chiesto all'utente.
     if cfg.env == "aws":
         bucket_name = cfg.s3_bucket_name
         data_url = f"s3://{bucket_name}/real/"
@@ -392,25 +386,7 @@ def _resolve_training_mode(job_id: str) -> str:
 
 
 def download_model(job_id: str) -> None:
-    """
-    Assembla (lazy, solo qui, su richiesta) ed esporta localmente un vero
-    modello scikit-learn per il Job ID indicato.
 
-    NOTA (fix requisito opzionale di download, traccia progetto): ciò che il
-    training salva su storage NON è un modello scikit-learn autosufficiente:
-    - in modalità centralized è solo un MANIFESTO leggero (metadati, non
-      alberi -- vedi _execute_training_step in centralized.py);
-    - in modalità federated sono ALBERI SEPARATI, un file per albero (vedi
-      _reconstruct_and_save_global_model in federated.py), a un path diverso
-      da quello che veniva scaricato prima di questo fix.
-    Questa funzione ricompone gli alberi (via src.shared.utilities.
-    model_assembly, che legge dallo stesso storage - locale o S3 - usato dal
-    training) in un vero RandomForestClassifier/Regressor, utilizzabile con
-    model.predict(X) in un ambiente locale con scikit-learn installato, come
-    richiesto dalla traccia. L'assemblaggio avviene solo al momento del
-    download, non ad ogni round di training, per non reintrodurre i problemi
-    di memoria che il manifesto leggero era stato introdotto per risolvere.
-    """
     model_filename = f"model_{job_id}.pkl"
     training_mode = _resolve_training_mode(job_id)
 
@@ -499,15 +475,7 @@ def handle_model_request():
             training_mode = _resolve_training_mode(job_id)
             checkpoint_dao = CheckpointDAOFactory.get_dao(cfg.env)
 
-            # NOTA (fix): prima si controllava os.path.exists('./saved_models/
-            # model_{job_id}.pkl') -- un path che il training in modalità
-            # federated non scrive mai (vedi model_assembly.py), quindi questo
-            # check falliva SEMPRE per i job federated e la funzione usciva
-            # prima di offrire il download, anche quando il modello era
-            # perfettamente assemblabile dai suoi artefatti reali (meta +
-            # alberi separati). Ora si usa la stessa nozione di "esiste" che
-            # userebbe l'assemblaggio vero e proprio, per entrambe le
-            # modalità e in entrambi gli ambienti (locale/S3).
+
             if model_artifact_exists(job_id, checkpoint_dao, cfg.env, training_mode):
                 print(f"[OK] Artefatti del modello ({training_mode}) rilevati su storage.")
                 print("[INFO] Il modello è pronto per ricevere richieste di inferenza.")
@@ -595,14 +563,7 @@ def handle_training():
         dataset_type = "real"
         bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
 
-        # BUG RIMOSSO (6/9/2026): questo prompt chiedeva un path/URL, ma per il
-        # dataset reale viene sempre usato il default (confermato dall'utente) —
-        # e per il modo FEDERATED il valore non ha comunque alcun effetto: i
-        # worker leggono i propri shard già pre-provisionati (vedi
-        # provision_local_shards.py/provision_federated_shards.py), mai questo
-        # path. Per CENTRALIZED sì che conta (letto da _prepare_data), ma
-        # essendo sempre il default resta comunque silenzioso qui — usa
-        # DATASET_LOCAL_PATH nel .env se serve davvero cambiarlo.
+
         if environment.lower() == "aws":
             dataset_path = f"s3://{bucket_name}/real/"
         else:

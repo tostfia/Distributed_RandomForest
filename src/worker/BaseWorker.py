@@ -34,12 +34,11 @@ _child_y = None
 def _release_memory_to_os():
     """gc.collect() da solo libera gli oggetti Python non più referenziati,
     ma CPython/glibc spesso NON restituisce quella memoria al sistema
-    operativo -- la tiene in riserva per riusarla internamente. L'RSS visto
+    operativo, la tiene in riserva per riusarla internamente. L'RSS visto
     da 'docker stats'/cgroup può quindi restare alto anche quando dentro il
     processo non è rimasto nulla di vivo. 'malloc_trim(0)' (glibc, Linux)
     chiede esplicitamente all'allocatore di restituire i blocchi liberi
-    all'OS: è quello che chiude il cerchio tra "l'ho liberato in Python" e
-    "il container vede meno RAM usata". No-op innocuo se non c'è nulla da
+    all'OS. No-op innocuo se non c'è nulla da
     restituire, e silenziosamente ignorato su piattaforme non-glibc (es.
     macOS in sviluppo locale) tramite l'except sotto.
     """
@@ -271,24 +270,10 @@ class BaseWorker(Service, ABC):
         print("\n=============================================================")
         print(f" [WORKER RPC] Richiesta elaborazione foresta parziale | Alberi: {num_trees}")
         print("=============================================================\n")
-        # SHARDING FISSO REALE (13/9/2026): source_info può ora essere una
-        # LISTA di path (più shard uniti, vedi CentralizedWorker._load_data)
-        # invece di una singola stringa. Le funzioni di task_storage.py
-        # (save_task_part_to_shared_storage, save_task_manifest) derivano
-        # però il prefisso di storage dei PEZZI DI ALBERO dal NOME DEL FILE
-        # dataset (_derive_job_id, che fa os.path.basename(source_info) -
-        # crasherebbe su una lista, stesso bug della riga 824/'source_info
-        # None' del 12/9/2026). Disaccoppiato qui: 'job_id' è passato ora
-        # ESPLICITAMENTE dall'Orchestratore (self.current_job_id, stabile
-        # per l'intero job, sopravvive identico a qualunque riassegnazione
-        # di task dopo un guasto - stessa garanzia già verificata per
-        # task_id) invece di essere indovinato dal nome del file dataset.
-        # 'storage_key_source' sintetizza una stringa nel formato che
-        # _derive_job_id si aspetta, così le tre funzioni di task_storage.py
-        # restano INVARIATE (nessuna modifica a quel file). Fallback su
-        # source_info se job_id non viene passato (retro-compatibilità con
-        # eventuali altri chiamanti che non lo forniscono - solo se
-        # source_info è comunque una stringa, non una lista, in quel caso).
+        # source_info può contenere uno o più percorsi degli shard. La chiave di
+        # storage viene quindi derivata dal job_id, che rimane stabile per tutti
+        # i task e le eventuali riassegnazioni. Se job_id non è disponibile,
+        # viene utilizzato source_info, purché sia una stringa.
         storage_key_source = f"shared_train_{job_id}.csv" if job_id else source_info
         if tree_type is not None:
             self.tree_type = tree_type
@@ -298,14 +283,7 @@ class BaseWorker(Service, ABC):
         if max_features is None:
             max_features = "sqrt" if not self.is_regression() else (1 / 3)
 
-        # bootstrap/max_samples: fino ad ora venivano presi ESCLUSIVAMENTE dai
-        # valori di boot del worker (self.bootstrap / self.max_samples), quindi
-        # qualunque cosa dichiarasse il manifesto o la TrainingRequest veniva
-        # ignorata — inclusa la forzatura bootstrap=False della modalità
-        # federata, che di fatto non aveva alcun effetto sugli alberi.
-        # Ora sono parametri OPZIONALI: None = "non specificato dal chiamante",
-        # e in quel caso si mantengono i valori di boot, quindi il
-        # comportamento di qualunque chiamante esistente resta identico a prima.
+       
         effective_bootstrap = self.bootstrap if bootstrap is None else bootstrap
         effective_max_samples = self.max_samples if max_samples is None else max_samples
         print(f"[{self.worker_name}] Campionamento: bootstrap={effective_bootstrap}, "
@@ -435,10 +413,7 @@ class BaseWorker(Service, ABC):
             print(f"[WORKER] Istanziazione ThreadPool locale con {pool_size} thread "
                   f"(memoria condivisa nativa, nessuna copia/serializzazione tra thread)...")
 
-            # FIX MEMORIA: il moltiplicatore 'x4' teneva in RAM, tra un
-            # salvataggio incrementale e l'altro, fino a 4 alberi per ogni
-            # thread del pool contemporaneamente. Con max_depth=None su
-            # dataset grandi (es. 1M righe) un singolo albero non potato può
+            #Con max_depth=None su dataset grandi (es. 1M righe) un singolo albero non potato può
             # pesare centinaia di MB: con pool_size=1 (comune quando molti
             # worker girano sulla stessa macchina e si dividono pochi core,
             # vedi 'allocated_cores' sopra) questo significava comunque 4
@@ -453,7 +428,7 @@ class BaseWorker(Service, ABC):
             # reale, non un multiplo arbitrario di esso): a parità di
             # 'pool_size' il picco di alberi-in-RAM-insieme scende fino a 4x,
             # al costo di scritture su storage condiviso più frequenti (più
-            # batch, ciascuno più piccolo) -- overhead trascurabile per I/O
+            # batch, ciascuno più piccolo) overhead trascurabile per I/O
             # locale/S3 rispetto al rischio di OOM. Alzabile con
             # WORKER_BATCH_MULTIPLIER se la macchina ha RAM abbondante e si
             # preferisce l'I/O più raro.
@@ -480,14 +455,7 @@ class BaseWorker(Service, ABC):
                     # iterazione: gli alberi già scritti su storage non restano
                     # più referenziati da nessuna struttura dati del worker.
                     del batch_trees
-                    # BUG SOSPETTATO E CORRETTO (7/9/2026): 'del' rimuove solo il
-                    # riferimento, non garantisce la liberazione immediata da
-                    # parte del garbage collector ciclico (gli alberi
-                    # scikit-learn possono avere riferimenti ciclici interni).
-                    # Stesso fix applicato al percorso federato (vedi
-                    # FederatedWorker.exposed_train_local_federated_forest per
-                    # il pattern di crash osservato empiricamente che ha
-                    # motivato questa correzione).
+ 
                     _release_memory_to_os()
 
         # Il manifest viene scritto per ULTIMO, dopo che TUTTE le parti sono
@@ -509,8 +477,8 @@ class BaseWorker(Service, ABC):
               f"sullo storage condiviso. Invio ack (niente più blob via RPC).")
 
         _release_memory_to_os()
-        # Non restituiamo più 'serialized_task' per intero via RPyC (fino a 1+ GB
-        # su scenari di scalabilità): l'Orchestratore lo rilegge direttamente dallo
+
+        # L'Orchestratore rilegge serialized_task direttamente dallo
         # storage condiviso (S3/locale) con load_task_from_shared_storage, molto
         # più veloce e affidabile di un ritorno RPC su un payload di queste
         # dimensioni — vedi hang osservato in Scenario 2 (Scalabilità).

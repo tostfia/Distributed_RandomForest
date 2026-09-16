@@ -189,15 +189,7 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
     print(f"\n[PROVISIONING OK] Shard reali distribuiti nelle cartelle locali dei worker "
           f"sotto '{BASE_CACHE_DIR}'. Il cluster locale è pronto per l'avvio.")
 
-    # Manifesto della strategia REALMENTE usata per generare questi shard —
-    # unica fonte di verità, letta dal client (main.py) invece di far
-    # dichiarare a mano la stessa informazione all'utente (che può
-    # disallinearsi dal provisioning reale senza alcun avviso, esattamente
-    # il bug osservato il 6/9/2026 con by_day). Scritto SOLO qui, nel ramo
-    # che genera davvero gli shard — mai nel ramo "già presenti, salto": se
-    # il provisioning viene saltato, il manifesto esistente descrive ancora
-    # correttamente cosa c'è realmente su disco, riscriverlo lì sarebbe
-    # un'assunzione non verificata.
+
     manifest = {
         "partition_strategy": partition_strategy,
         "day_column": resolved_day_column if partition_strategy == "by_day" else None,

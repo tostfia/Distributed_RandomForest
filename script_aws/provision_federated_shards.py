@@ -20,8 +20,7 @@ di registrarsi come disponibile nel ServiceRegistry.
 Uso tipico:
     python -m script_aws.provision_federated_shards --num-workers 3 --data-folder ./dataset_cache
     
-NOTA: questo script assume che tu abbia già eseguito (se ti interessa quel
-dataset_type) src/baseline/run_baseline.py in locale, così che
+NOTA: questo script assume che tu abbia già eseguito  src/baseline/run_baseline.py in locale, così che
 outputs_baseline/config_real.json e/o config_synthetic.json esistano già sul
 tuo filesystem prima del provisioning. Non rilancia la baseline da solo.
 """
@@ -111,14 +110,7 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
             dataset_seed=123,
             target_rows_per_day=TARGET_ROWS_PER_DAY,
             tag_source_day=needs_day_tagging,
-            # NOTA (13/9/2026): s3_anon rimosso, stesso motivo di
-            # centralized.py (vedi commit gemello) - il dataset reale va
-            # letto dal NOSTRO bucket privato (popolato una tantum con
-            # upload_dataset.sh sotto real/), non piu' dal bucket pubblico
-            # CICIDS2018 direttamente. s3_anon=True forzerebbe accesso
-            # anonimo anche contro il bucket privato, che lo nega
-            # (AccessDenied) - assicurati che --data-folder punti a
-            # 's3://<bucket-nostro>/real/', mai al bucket pubblico.
+
         )
         splitter = FederatedDataSplitter(target_column="Label", test_size=0.20, random_state=123)
         splitter.split_and_shard(
@@ -127,14 +119,7 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
         )
         print("[PROVISIONING] Shard caricati su S3 con successo.")
 
-        # Manifesto della strategia REALMENTE usata per generare questi shard —
-        # unica fonte di verità, letta dal client (main.py) invece di far
-        # dichiarare a mano la stessa informazione all'utente. Vedi la nota
-        # gemella in provision_local_shards.py per il motivo (bug osservato
-        # il 6/9/2026 con by_day, disallineamento silenzioso). Scritto SOLO
-        # in questo ramo (generazione reale), mai in quello "già presenti,
-        # salto": lì il manifesto esistente descrive ancora correttamente
-        # cosa c'è realmente su S3.
+
         manifest = {
             "partition_strategy": partition_strategy,
             "day_column": resolved_day_column if partition_strategy == "by_day" else None,
