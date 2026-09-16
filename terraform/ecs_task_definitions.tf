@@ -15,10 +15,6 @@ locals {
     { name = "AWS_DEFAULT_REGION", value = var.aws_region },
     # Riferimento alla variabile locale definita in s3.tf
     { name = "DATASETS_BUCKET_NAME", value = local.datasets_bucket_name },
-    # BUGFIX (11/9/2026): senza questa, FederatedWorker.__init__ leggeva
-    # sempre il default 'real' (federatedWorker.py:253) e tentava di
-    # scaricare shard mai provisionati per il sintetico - crash 404 su S3
-    # per TUTTI i worker al boot, in crash-loop continuo.
     { name = "DATASET_TYPE", value = var.dataset_type },
     { name = "WORKER_BATCH_MULTIPLIER", value = tostring(var.worker_batch_multiplier) },
   ]
@@ -34,10 +30,7 @@ resource "aws_ecs_task_definition" "worker_centralized" {
   # Family distinta da quella dell'orchestrator: evita la race condition
   # "Too many concurrent attempts to create a new revision of the specified
   # family" quando Terraform registra entrambe le task definition in
-  # parallelo (nessuna dipendenza tra le due risorse). Verificato che la
-  # SCP del Learner Lab NON restringe la family a un valore fisso (test
-  # empirico del 5/9/2026: registrazione di una family arbitraria riuscita
-  # con 'aws ecs register-task-definition --family lab-worker-task-test').
+  # parallelo (nessuna dipendenza tra le due risorse).
   family                   = "lab-worker-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"

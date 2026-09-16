@@ -90,17 +90,9 @@ def _wait_for_job_completed(state_manager, job_id, timeout=400, interval=0.5) ->
     """
     Attende (con timeout) che il job risulti COMPLETED sullo stato condiviso.
 
-    Introdotta per il fix del 7/9/2026 (vedi run()): la preparazione del
-    modello prima dell'inferenza deve ora passare dalla coda reale, gestita
-    dai container Docker/ECS effettivi, invece di una chiamata diretta e
-    sincrona a _execute_training_step() sull'istanza interna del test-engine
-    -- quella scorciatoia scriveva un 'orchestrator_id' mai realmente in
-    competizione per il lock di leadership, impedendo ai container reali di
-    reclamare pulitamente il successivo job di inferenza per lo stesso
-    job_id (il test falliva sempre, indipendentemente dal meccanismo di
-    failover). Simmetrica a _wait_for_inference_in_progress qui sotto, ma
-    per lo stato terminale del training invece che per il progresso
-    intermedio dell'inferenza.
+    La preparazione del modello prima dell'inferenza deve passare dalla coda reale, gestita
+    dai container Docker/ECS effettivi. Simmetrica a _wait_for_inference_in_progress qui sotto, ma
+    per lo stato terminale del training invece che per il progresso intermedio dell'inferenza.
     """
     waited = 0.0
     while waited < timeout:
@@ -353,15 +345,7 @@ def _kill_orchestrator_container_via_ssm(ssm_client, instance_id, hard_kill=True
     non testabile su Fargate ma raggiungibile qui perché l'host è una vera
     istanza EC2, non un container ECS.
 
-    BUGFIX (propagato da orchestrator_fault.py, 7/9/2026): il container
-    orchestrator è lanciato con '--restart unless-stopped' (vedi
-    orchestrator_ec2.tf). Senza disattivare prima la restart policy, un
-    'docker kill' risorgerebbe da solo sulla STESSA istanza in pochi secondi,
-    prima che il vero subentro cross-istanza (standby o rimpiazzo dell'ASG)
-    possa avvenire — mascherando un recovery locale come se fosse il
-    failover che questo scenario vuole verificare. Disattivazione e kill in
-    un solo comando SSM composito, per evitare una finestra in cui il
-    container potrebbe risorgere prima della disattivazione.
+
     """
     kill_cmd = "docker kill orchestrator" if hard_kill else "docker stop orchestrator"
     command = f"docker update --restart=no orchestrator && {kill_cmd}"
@@ -505,26 +489,9 @@ class InferenceOrchestratorFaultScenario(BaseTestScenario):
                 print(f"[TEST ERRORE] Preparazione del dataset fallita: {e}")
                 return {"status": "FAILED", "duration_seconds": 0}
 
-            # BUG CORRETTO (7/9/2026): la preparazione del modello avveniva con
-            # una chiamata diretta e sincrona a orch_leader._execute_training_step(),
-            # sull'istanza interna del test-engine (self.orchestrator) --
-            # bypassando completamente la coda e i container reali. A differenza
-            # dello scenario di failover in training (orchestrator_fault.py, che
-            # invia SEMPRE tutto sulla coda e lascia l'intero ciclo di vita del
-            # job ai container Docker/ECS reali), questa scorciatoia scriveva nel
-            # record di stato del job un 'orchestrator_id' appartenente a
-            # un'istanza mai realmente avviata (.start()) né in competizione per
-            # il lock di leadership in modalità Docker. I container reali non
-            # riuscivano quindi a reclamare in modo pulito il job di inferenza
-            # successivo per lo STESSO job_id: il test falliva sempre
-            # ("job non arrivato a COMPLETED entro il timeout"), indipendentemente
-            # dal meccanismo di failover in sé -- osservato empiricamente il
-            # 7/9/2026, con 'Gestore Attuale' mai aggiornato dal valore lasciato
-            # da questa chiamata diretta.
-            #
-            # Fix: anche la preparazione del modello passa ora dalla coda reale,
+         
+            # La preparazione del modello passa ora dalla coda reale,
             # gestita dagli stessi container che gestiranno poi l'inferenza --
-            # stesso principio già corretto di orchestrator_fault.py.
             print(f"[TEST] Invio del Job di TRAINING {job_id[:8]} alla coda '{orch_leader.queue_name}' "
                   f"(preparazione del modello, gestita dai container reali)...")
             try:

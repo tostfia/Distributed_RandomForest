@@ -300,19 +300,11 @@ done
 #
 # Prefissi PULITI ad ogni teardown (dati temporanei/di run, rigenerabili
 # automaticamente al prossimo test):
-#   - distributed_trains/  (chunk di training caricati per il job, inclusi
-#                            gli shard '_shard_N.csv' dal 12/9/2026: stesso
-#                            prefisso padre, nessuna riga aggiuntiva serviva)
+#   - distributed_trains/  (chunk di training caricati per il job)
 #   - distributed_tests/   (chunk di test caricati per il job)
 #   - tasks/                (stato/metadati dei singoli task RPC)
 #   - checkpoints/          (normalmente auto-pulito a fine job riuscito,
 #                            qui ripuliamo eventuali orfani da job falliti/interrotti)
-#   - oob_contributions/    (12/9/2026: codice morto, la stima OOB
-#                            distribuita e' stata rimossa interamente da
-#                            centralized.py/BaseWorker.py/BaseOrchestrator.py
-#                            - nessun nuovo file verra' mai piu' scritto qui,
-#                            pulito solo per rimuovere eventuali residui di
-#                            test precedenti a quella rimozione)
 #
 # Prefissi SALVAGUARDATI di default (mai toccati da questo script):
 #   - real/                 dataset sorgente

@@ -506,14 +506,9 @@ def handle_model_request():
 def _read_partitioning_manifest(environment: str):
     """
     Legge il manifesto scritto dal provisioning (provision_local_shards.py /
-    provision_federated_shards.py) con la strategia REALMENTE usata per
+    provision_federated_shards.py) con la strategia usata per
     generare gli shard su disco/S3 -- unica fonte di verità, non più
-    dichiarata a mano dall'utente. Prima di questo fix, il client chiedeva
-    interattivamente la strategia di partizionamento, ma quel valore non
-    controllava nulla di reale (lo sharding era già avvenuto offline): era
-    solo un'etichetta che DOVEVA coincidere col provisioning, senza alcuna
-    verifica -- disallineabile in silenzio (bug osservato il 6/9/2026 con
-    by_day: shard IID residui su disco, job etichettato 'by_day' lo stesso).
+    dichiarata a mano dall'utente.
 
     Ritorna un dict con partition_strategy/alpha/day_column/num_workers, o
     None se il manifesto non è ancora stato scritto (provisioning non
@@ -696,12 +691,7 @@ def handle_training():
 def handle_inference_result_request():
     """
     Recupera e mostra le metriche/risultati di un'inferenza già completata.
-
-    Colma una lacuna reale rispetto alla traccia (6/9/2026): handle_inference()
-    invia la richiesta e basta -- fino a questo fix, nessun punto del client
-    permetteva di recuperare i risultati (accuracy/predizioni aggregate) dopo
-    l'invio, nonostante il sistema li calcoli e salvi correttamente
-    (_save_metrics(job_id, "inference", ...) in BaseOrchestrator.py).
+    
     """
     print("\n=== RECUPERO RISULTATO INFERENZA ===")
     job_id = get_input("Inserisci il Job ID del modello usato per l'inferenza: ").strip()

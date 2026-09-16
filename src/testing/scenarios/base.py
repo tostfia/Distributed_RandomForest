@@ -151,24 +151,11 @@ class BaseTestScenario(ABC):
 
     def _resolve_federated_partitioning(self) -> dict:
         """
-        Strategia di partizionamento REALMENTE usata per generare gli shard su
+        Strategia di partizionamento usata per generare gli shard su
         disco/S3, letta dal manifesto scritto dal provisioning
         (provision_local_shards.py / provision_federated_shards.py) — stessa
         fonte e stesso path di main.py._read_partitioning_manifest.
 
-        BUG CORRETTO (14/9/2026): prima leggeva la chiave 'federated_partitioning'
-        da outputs_baseline/config_real.json, manifesto scritto da run_baseline.py
-        che quella chiave non produce MAI: la lettura tornava quindi sempre {},
-        e questo metodo ricadeva SEMPRE sul default ('iid'/'proportional'),
-        indipendentemente da come erano stati davvero generati gli shard
-        (osservato con provisioning 'by_day': lo scenario di performance
-        dichiarava comunque 'iid' nel payload).
-
-        'tree_allocation' non fa parte del manifesto di provisioning (è una
-        scelta a livello di esperimento/training, non di sharding dei dati):
-        resta configurabile via env var TREE_ALLOCATION_STRATEGY (letta da
-        run_test.sh da .env, stesso pattern di PARTITION_STRATEGY), default
-        'proportional' se assente/non valida.
         """
         default = {"strategy": "iid", "tree_allocation": "proportional"}
 

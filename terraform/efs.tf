@@ -1,5 +1,5 @@
 # =============================================================================
-# EFS come cache di lettura condivisa per il dataset di training (11/9/2026)
+# EFS come cache di lettura condivisa per il dataset di training
 # =============================================================================
 # PROBLEMA MISURATO: in modalita' centralized, ogni worker scarica l'INTERO
 # dataset condiviso da S3 (fino a ~1.5 GB), anche quando N worker fanno tutti

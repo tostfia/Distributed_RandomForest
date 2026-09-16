@@ -139,7 +139,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. "
                       f"Procedo comunque a simulare il guasto, MA: questo di norma significa che kill_worker_after_seconds "
                       f"è più basso del tempo reale di dispatch/inferenza per il dataset corrente, non che il worker sia "
-                      f"morto durante lavoro vero — vedi la nota gemella in fault.py (verificato: 10/9/2026, scenario "
+                      f"morto durante lavoro vero — vedi la nota gemella in fault.py, scenario "
                       f"training con ETL da 199s). Se il guasto scatta sempre qui senza chunk, alza "
                       f"kill_worker_after_seconds in test_config.json (blocco 'inference_worker_fault').")
             else:

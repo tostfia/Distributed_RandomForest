@@ -70,7 +70,7 @@ INSTANCE_TYPE="r5.large"
 # messaggio d'errore che elenca esplicitamente le AZ supportate). Stessa
 # lista usata nel filtro Terraform (orchestrator_ec2.tf).
 SUPPORTED_AZS="us-east-1a,us-east-1b,us-east-1c,us-east-1d,us-east-1f"
-# Verificata valida per us-east-1 il 5/9/2026. Le AMI Amazon Linux vengono
+# Le AMI Amazon Linux vengono
 # ruotate periodicamente: se questo ID inizia a dare 'InvalidAMIID.NotFound',
 # rilanciare:
 #   aws ec2 describe-images --owners amazon \

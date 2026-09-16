@@ -10,7 +10,6 @@
 variable "orchestrator_ec2_ami" {
   description = "AMI Amazon Linux 2023 per le istanze EC2 dell'orchestrator. Da verificare/aggiornare per la regione: 'aws ec2 describe-images --owners amazon --filters \"Name=name,Values=al2023-ami-*-x86_64\" \"Name=state,Values=available\" --query \"sort_by(Images,&CreationDate)[-1].ImageId\" --region us-east-1'"
   type        = string
-  # Verificata valida per us-east-1 il 5/9/2026 con il comando sopra.
   # Le AMI Amazon Linux vengono aggiornate periodicamente: rilanciare il
   # comando se questo valore inizia a dare errori 'InvalidAMIID.NotFound'.
   default     = "ami-0ac62d2d72afdce51"

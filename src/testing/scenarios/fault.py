@@ -138,7 +138,7 @@ class FaultToleranceScenario(BaseTestScenario):
                 print(f"[TEST WARN] Timeout di {kill_delay} secondi raggiunto senza che il chunk sia stato inviato. "
                       f"Procedo comunque a simulare il guasto, MA: questo di norma significa che kill_worker_after_seconds "
                       f"è più basso del tempo reale di ETL/distribuzione per il dataset corrente, non che il worker sia "
-                      f"morto durante lavoro vero — il guasto sta colpendo un worker ancora inattivo (verificato: 10/9/2026, "
+                      f"morto durante lavoro vero — il guasto sta colpendo un worker ancora inattivo, "
                       f"ETL da 199s su AWS con kill_worker_after_seconds=45). Se ti serve misurare 'worker morto a metà "
                       f"lavoro', alza kill_worker_after_seconds in test_config.json oltre il tempo reale di ETL osservato "
                       f"nei log ('[DEBUG TIMING] _prepare_data completato in ...s').")

@@ -242,11 +242,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                              num_shards, tree_type: str, target_col: str,
                              prepared_key: tuple, t0: float, from_cache: bool):
         """Salva train_df/test_df (via DAO, con sharding opzionale) e, se
-        questa e' una computazione FRESCA (from_cache=False), aggiorna la
+        questa e' una computazione fresca (from_cache=False), aggiorna la
         cache dell'intermedio per i round successivi con parametri identici.
-        Estratto da _prepare_data (12/9/2026) per essere richiamabile sia
-        dal percorso cache-hit sia da quello di computazione normale, senza
-        duplicare la logica di salvataggio/sharding.
         """
         # --- SALVATAGGIO COORDINATO DAI DAO ---
         if self.environment == "aws":
