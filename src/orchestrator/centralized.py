@@ -703,14 +703,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             # Timeout breve (2 secondi) per controllare periodicamente lo stato e non restare appesi
                             task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=2)
                         except queue.Empty:
-                        # Se la coda è temporaneamente vuota ma il target globale di alberi non è raggiunto, 
-                        # i worker non devono terminare prematuramente (per gestire eventuali crash o task reinseriti). 
-                        # La terminazione è consentita solo a training completato o se si è l'ultimo worker attivo rimasto.
+                        # Se la coda è temporaneamente vuota ma il target globale di alberi non è raggiunto,
+                        # i worker non devono terminare prematuramente (per gestire eventuali crash o task reinseriti).
+                        # FIX (punto 6): la terminazione è consentita SOLO a training completato. Prima si
+                        # usciva anche quando questo era l'ultimo worker attivo rimasto (num_worker_attivi
+                        # <= 1) -- ma se in seguito un suo task fosse stato riaccodato per un fallimento,
+                        # nessun thread sarebbe rimasto a consumarlo: il controllo di sicurezza esistente
+                        # subito dopo (raise RuntimeError) scatta solo con active_worker_names VUOTO, non
+                        # con un solo worker rimasto ma uscito prematuramente dal polling.
                             with results_lock:
                                 total_attuali = len(all_trained_trees)
-                                num_worker_attivi = len(active_worker_names)
-                            
-                            if total_attuali >= target_alberi or num_worker_attivi <= 1:
+
+                            if total_attuali >= target_alberi:
                                 break
                             time.sleep(1)
                             continue
@@ -882,25 +886,36 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                             # i payload degli alberi già persistiti.
                                             self._trees_cache[self.current_job_id] = all_trained_trees
                                             print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Parte di Task {task_id} archiviata. Progressivo in RAM/Storage: {current_total} alberi.")
+
+                                            # FIX (punto 5): l'heartbeat va scritto SOLO se il
+                                            # checkpoint fisico e' andato a buon fine -- spostato
+                                            # DENTRO il try, altrimenti DynamoDB dichiarerebbe
+                                            # alberi_addestrati=current_total anche quando
+                                            # _persist_trees_delta e' appena fallito (vedi except
+                                            # sotto), cioe' piu' alberi di quelli davvero
+                                            # recuperabili dal checkpoint in caso di failover.
+                                            # last_checkpointed["count"] (appena aggiornato sopra)
+                                            # e' la fonte di verita' di quanto e' STATO persistito,
+                                            # non di quanto si STAVA per persistere.
+                                            if hasattr(self, 'state_manager') and self.state_manager:
+                                                try:
+                                                    self.state_manager.update_request_status(
+                                                        job_id=self.current_job_id,
+                                                        status="PROCESSING",
+                                                        orchestrator_id=self.orchestrator_name,
+                                                        retries=payload.get("retries", 0),
+                                                        base_random_state=seed,
+                                                        alberi_addestrati=last_checkpointed["count"]
+                                                    )
+                                                except Exception as e_db:
+                                                    print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                                         except Exception as e_fs:
                                             # last_checkpointed NON avanza: un writer successivo
-                                            # deve poter riprovare a persistere lo stato.
+                                            # deve poter riprovare a persistere lo stato. L'heartbeat
+                                            # DynamoDB viene SALTATO in questo caso (vedi sopra):
+                                            # current_total non e' mai stato davvero persistito su
+                                            # storage, quindi non va dichiarato come tale.
                                             print(f"   [ERRORE FILE SYSTEM] Impossibile scrivere gli alberi parziali su file: {e_fs}")
-
-                                        # Il contatore logico segue lo stesso ordine monotono del
-                                        # checkpoint fisico, così i due non possono divergere.
-                                        if hasattr(self, 'state_manager') and self.state_manager:
-                                            try:
-                                                self.state_manager.update_request_status(
-                                                    job_id=self.current_job_id,
-                                                    status="PROCESSING",
-                                                    orchestrator_id=self.orchestrator_name,
-                                                    retries=payload.get("retries", 0),
-                                                    base_random_state=seed,
-                                                    alberi_addestrati=current_total
-                                                )
-                                            except Exception as e_db:
-                                                print(f"   [ERRORE] Impossibile inviare l'heartbeat di stato a DynamoDB: {e_db}")
                                     else:
                                         # Snapshot superato: sullo storage c'è già uno stato con
                                         # PIÙ alberi, quindi riscriverlo non aggiungerebbe nulla e
