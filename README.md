@@ -54,10 +54,11 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   │   └── utilities/                # loader dataset, splitter, task_storage, ecc.
 │   └── testing/               # test engine di sistema
 │       ├── engine.py                 # entry point, selezione scenario
-│       ├── scenarios/                # implementazione dei singoli scenari (1-9)
+│       ├── scenarios/                # implementazione dei singoli scenari (1-10)
 │       ├── plot_generator.py         # scenario 9, grafici da report salvati
 │       └── test_config.json          # configurazione degli scenari di test
-├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, API Gateway, EFS) — vedi terraform/README.md
+├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, EC2/ASG orchestrator, API Gateway, EFS) — vedi terraform/README.md
+├── lambda_source/           # sorgente della funzione Lambda usata da Terraform per il deploy (copia distinta da terraform/lambda/ e src/shared/mock_aws/lambda/)
 ├── script_local/            # script per l'esecuzione locale
 │   ├── run_local.sh              # avvio bare-metal senza Docker, multi-terminale
 │   ├── run_docker.sh             # avvio Docker Compose RACCOMANDATO: provisioning + rete + limiti CPU/RAM da .env
@@ -69,7 +70,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   ├── run_aws.sh                    # avvio client contro l'infrastruttura AWS
 │   ├── run_test_engine.sh        # test engine su EC2 on demand
 │   ├── provision_federated_shards.py # provisioning offline degli shard federati su S3
-│   ├── teardown.sh                   # scala i Service a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
+│   ├── teardown.sh                   # scala i Service/l'ASG a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
 │   └── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
 ├── outputs_baseline/         # manifesti/modelli prodotti da run_baseline.py: config_real.json, config_synthetic.json
 │                             # (feature selection + iperparametri, fonte di verità condivisa col training distribuito)
@@ -77,7 +78,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 ├── synthetic/                # cache locale del dataset sintetico generato
 ├── saved_models/             # modelli distribuiti salvati (generati a runtime)
 ├── workers_cache/            # cache locale lato worker (generata a runtime)
-├── test_reports/             # report dei test engine (local/ e aws/, generati a runtime)
+├── test_reports/             # report dei test engine (local/, docker/ e aws/, generati a runtime)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -184,7 +185,7 @@ Lo script chiede quanti orchestratori avviare (1 o 2), legge `NUM_WORKERS` dal `
 
 ## Esecuzione su AWS (Terraform)
 
-Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per worker, EC2 per orchestrator, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**. Per i dettagli completi (incluse le restrizioni SCP del Learner Lab e come aggirarle) vedi **[`terraform/README.md`](terraform/README.md)**; qui il riassunto operativo.
+Questo flusso crea da zero l'infrastruttura AWS (ECR, S3, DynamoDB, SQS, ECS Fargate con Service per worker, EC2/Auto Scaling Group per l'orchestrator, API Gateway) con un singolo `terraform apply`, pensato per un account **AWS Academy Learner Lab**. Per i dettagli completi (incluse le restrizioni SCP del Learner Lab e come aggirarle) vedi **[`terraform/README.md`](terraform/README.md)**; qui il riassunto operativo.
 
 ### 1. Credenziali AWS
 
@@ -240,26 +241,28 @@ Lo script attende che i Service ECS (worker + orchestrator) siano stabili prima 
 
 ### 6. Fermare/distruggere
 
-Per scalare a zero senza distruggere l'infrastruttura (utile per pause tra sessioni di test), il modo più completo è `script_aws/teardown.sh` — scala i Service a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
+Per scalare a zero senza distruggere l'infrastruttura (utile per pause tra sessioni di test), il modo più completo è `script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
 
 ```bash
 ./script_aws/teardown.sh
 ```
 
-In alternativa, per fermare solo i Service senza toccare lo stato applicativo:
+In alternativa, per fermare solo l'esecuzione senza toccare lo stato applicativo:
 
 ```bash
-aws ecs update-service --cluster forest-cluster --service orchestrator-service --desired-count 0 --region <REGION>
-# ripeti per ciascun worker-service
+aws autoscaling update-auto-scaling-group --auto-scaling-group-name orchestrator-asg \
+  --min-size 0 --max-size 0 --desired-capacity 0 --region <REGION>
+aws ecs update-service --cluster forest-cluster --service worker-service --desired-count 0 --region <REGION>
+# in modalità federated, ripeti l'ultimo comando per ciascun worker-service-<N>
 ```
 
-Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifica (in sola lettura) che non sia rimasto nulla attivo che continui a fatturare — task Fargate, NAT Gateway, Load Balancer, Elastic IP non associati:
+Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifica (in sola lettura) che non sia rimasto nulla attivo che continui a fatturare — task Fargate, istanze EC2 dell'orchestrator, NAT Gateway, Load Balancer, Elastic IP non associati:
 
 ```bash
 ./script_aws/check_left_over.sh
 ```
 
-Per distruggere tutto (ECS, ECR con l'immagine, DynamoDB, SQS, Security Group) a fine sessione di valutazione:
+Per distruggere tutto (ECS, ECR con l'immagine, EC2/ASG dell'orchestrator, DynamoDB, SQS, Security Group) a fine sessione di valutazione:
 
 ```bash
 cd terraform
@@ -270,11 +273,11 @@ terraform destroy
 
 ### Test engine su AWS (istanza EC2 usa e getta)
 
-Per eseguire uno degli scenari di test (1-9 o `all`) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su Internet:
+Per eseguire uno degli scenari di test (1-10 o `all`) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su Internet:
 
 ```bash
-./run_test_engine.sh <scenario>      # es. ./run_test_engine.sh 2
-./run_test_engine.sh                 # chiede lo scenario a terminale prima di lanciare l'istanza
+./script_aws/run_test_engine.sh <scenario>      # es. ./script_aws/run_test_engine.sh 2
+./script_aws/run_test_engine.sh                 # chiede lo scenario a terminale prima di lanciare l'istanza
 ```
 Lo script avvia un'istanza EC2 usa-e-getta ed esegue il container Docker con lo scenario passato via variabile d'ambiente `SCENARIO`. L'istanza prosegue in background anche se chiudi il terminale e si autodistrugge automaticamente (`shutdown -h now`) al termine del test; i log finiscono su CloudWatch (`/ec2/rf-test-engine`) e il report finale viene caricato su `s3://<bucket>/test_reports/aws/`.
 
@@ -317,7 +320,7 @@ Il comportamento cambia in base all'ambiente:
 
 ## Test di sistema 
 
-La validazione e la verifica dell'architettura distribuita sono affidate ad un **Test Engine** automatizzato (`src/testing/engine.py`). L'engine permette di eseguire una suite completa di scenari sia in **ambiente locale** (tramite gli script dedicati) sia su **AWS** (`./run_test_engine.sh`), raccogliendo metriche e salvando i report finali.
+La validazione e la verifica dell'architettura distribuita sono affidate ad un **Test Engine** automatizzato (`src/testing/engine.py`). L'engine permette di eseguire una suite completa di scenari sia in **ambiente locale** (tramite gli script dedicati) sia su **AWS** (`./script_aws/run_test_engine.sh`), raccogliendo metriche e salvando i report finali.
 
 I test disponibili coprono le seguenti aree operative:
 1. Performance e metriche
@@ -329,6 +332,7 @@ I test disponibili coprono le seguenti aree operative:
 7. Failover dell'orchestratore (durante inferenza)
 8. Elezione del leader sotto concorrenza (safety)
 9. Generazione grafici a partire dai report salvati
+10. Sostituzione ASG dell'Orchestratore (solo AWS)
 
 
 ## Pulizia / teardown
@@ -342,11 +346,11 @@ I test disponibili coprono le seguenti aree operative:
 - **`.local_storage/metrics/`** non viene toccata (esclusa esplicitamente dal `find` che fa la pulizia) — così non perdi lo storico delle metriche tra una sessione di test e l'altra.
 - **La sezione `baseline_boot`** di `.local_storage/config.json` (dataset_type, tree_type) sopravvive al reset tramite `preserve_baseline_boot.py`, che la estrae prima della pulizia e la reintegra subito dopo — tutto il resto del config (in particolare `last_training_request` e lo storico delle richieste) viene invece azzerato come da comportamento previsto.
 
-Se invece ti serve un reset totale, anche di queste due eccezioni, va fatto a mano (es. cancellando direttamente `.local_storage/metrics/` o l'intero `.local_storage/config.json`).
+Se invece serve un reset totale, anche di queste due eccezioni, va fatto a mano (es. cancellando direttamente `.local_storage/metrics/` o l'intero `.local_storage/config.json`).
 
 **AWS** — due livelli, dal meno al più distruttivo:
 
-1. `./script_aws/teardown.sh` — scala i Service a 0 e svuota lo stato applicativo (DynamoDB, SQS, artefatti S3 temporanei), lasciando intatte task definition/cluster/ECR per un riavvio rapido. Supporta `--purge-shards`, `--purge-legacy-mode`, `--purge-models` (vedi commenti in testa allo script).
+1. `./script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 e svuota lo stato applicativo (DynamoDB, SQS, artefatti S3 temporanei), lasciando intatte task definition/cluster/ECR/ASG per un riavvio rapido. Supporta `--purge-shards`, `--purge-legacy-mode`, `--purge-models` (vedi commenti in testa allo script).
 2. `terraform destroy` — rimuove tutta l'infrastruttura (vedi [sezione 6 del flusso AWS](#6-fermaredistruggere)).
 
 In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
