@@ -156,7 +156,7 @@ def main() -> None:
     )
     parser.add_argument("--partition-strategy", type=str,
                         default=os.environ.get("PARTITION_STRATEGY", DEFAULT_PARTITION_STRATEGY),
-                        choices=["iid", "dirichlet", "by_day"],
+                        choices=["iid", "by_day"],
                         help="Strategia di partizionamento tra i worker: 'iid' (default, storica), "
                              "'by_day' (partizionamento naturale per file/giorno di origine).")
 

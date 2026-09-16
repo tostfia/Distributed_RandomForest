@@ -80,7 +80,7 @@ class FederatedOrchestrator(BaseOrchestrator):
 
     def _ensure_local_bootstrap(self, payload: dict):
         """
-        VERIFICA (senza generarli) che gli shard federati siano già presenti sul
+        Verifica (senza generarli) che gli shard federati siano già presenti sul
         filesystem locale per l'ambiente 'local'. La generazione/sharding NON
         avviene più qui: è responsabilità di uno script di provisioning standalone
         (script_local/provision_local_shards.py), eseguito UNA VOLTA, PRIMA di
@@ -133,7 +133,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         Verifica (senza generarli) che gli shard siano già stati provisionati
         su S3 per l'ambiente AWS. La generazione/upload NON avviene più qui:
         è responsabilità di uno script di provisioning standalone
-        (scripts/provision_federated_shards.py), eseguito UNA VOLTA, PRIMA di
+        (script_aws/provision_federated_shards.py), eseguito UNA VOLTA, PRIMA di
         avviare master e worker — coerente con l'idea che, in un vero
         scenario federato, i dati risiedono già sui nodi quando il sistema
         parte, non vengono generati/distribuiti reattivamente durante un job.
@@ -161,7 +161,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             raise RuntimeError(
                 f"[{self.orchestrator_name}] Provisioning AWS incompleto: mancano {len(mancanti)} shard su S3 "
                 f"(bucket '{BUCKET_NAME}'), es. {mancanti[:3]}. Esegui "
-                f"'python -m scripts.provision_federated_shards' prima di avviare il cluster."
+                f"'python -m script_aws.provision_federated_shards' prima di avviare il cluster."
             )
         print(f"[{self.orchestrator_name}] [CHECK AWS OK] Tutti gli shard richiesti sono presenti su S3.")
 
@@ -315,7 +315,7 @@ class FederatedOrchestrator(BaseOrchestrator):
         FedAvg n_k/n applicata al numero di alberi anziché ai pesi del
         modello. Con partizionamento IID gli shard sono quasi uguali per
         costruzione, quindi il risultato è praticamente indistinguibile dalla
-        ripartizione equa. Con partizionamento non-IID (dirichlet/by_day),
+        ripartizione equa. Con partizionamento non-IID (by_day),
         dove le dimensioni possono differire di molto, evita di addestrare
         tanti alberi quanto un worker "ricco di dati" su uno shard minuscolo:
         alberi ad alta varianza che, nel soft voting finale, peserebbero
@@ -344,10 +344,8 @@ class FederatedOrchestrator(BaseOrchestrator):
         else:
             sizes = dict(worker_shard_sizes)
             # IMPORTANTE: "sconosciuto" (RPC fallita) è diverso da "noto e pari a
-            # zero" (shard genuinamente vuoto, es. Dirichlet con alpha estremo che
-            # non assegna alcuna riga di quella classe a quel worker). Solo il
-            # primo caso va coperto con una stima di fallback; il secondo va
-            # rispettato così com'è — un worker con shard vuoto deve ricevere
+            # zero". Solo il primo caso va coperto con una stima di fallback; il secondo va
+            # rispettato così com'è, un worker con shard vuoto deve ricevere
             # quota 0, non una quota "media" che lo manderebbe in errore al primo
             # bootstrap su un array senza campioni.
             missing = [w for w in worker_names if w not in sizes]
@@ -491,24 +489,17 @@ class FederatedOrchestrator(BaseOrchestrator):
                           f"totali ripartiti tra {num_workers} worker attivi "
                           f"(~{total_synthetic_n_samples // num_workers} campioni/worker).")
 
-            # Iperparametro dell'ESPERIMENTO (non del modello): come sono stati
-            # ripartiti i dati tra i worker in fase di provisioning. Letto qui
-            # solo per tracciabilità nei log/nelle metriche — la ripartizione
-            # vera e propria è già avvenuta offline (provision_*_shards.py); qui
-            # ne teniamo semplicemente traccia per poter correlare i risultati
-            # del job con la strategia/alpha usati per generare gli shard.
-            # Campi PIATTI su TrainingRequest (non nidificati sotto
-            # "hyperparameters"), popolati da main.py leggendo il manifesto:
-            # sopravvivono al giro completo client -> SQS -> qui.
+          
+            # 'partition_strategy' è vincolato a {"iid", "by_day"} sia in
+            # TrainingRequest sia in FederatedDataSplitter.VALID_PARTITION_STRATEGIES:
+
             partitioning_info = {
                 "strategy": payload.get("partition_strategy", "iid"),
-                "alpha": payload.get("partition_alpha"),
                 "tree_allocation": payload.get("tree_allocation_strategy", "equal"),
             }
             print(f"[{self.orchestrator_name}] Partizionamento federato dichiarato nel manifesto: "
-                  f"strategy='{partitioning_info.get('strategy', 'iid')}'"
-                  + (f", alpha={partitioning_info.get('alpha')}" if partitioning_info.get("strategy") == "dirichlet" else "")
-                  + f" | tree_allocation='{partitioning_info.get('tree_allocation')}'.")
+                  f"strategy='{partitioning_info.get('strategy', 'iid')}' "
+                  f"| tree_allocation='{partitioning_info.get('tree_allocation')}'.")
 
             # Allocazione del budget di alberi tra i worker, secondo la strategia
             # dichiarata (vedi _fetch_worker_shard_sizes / _allocate_tree_quotas).
@@ -828,7 +819,6 @@ class FederatedOrchestrator(BaseOrchestrator):
         # storico locale del job di training corrispondente.
         partitioning_info = {
             "strategy": payload.get("partition_strategy", "iid"),
-            "alpha": payload.get("partition_alpha"),
             "tree_allocation": payload.get("tree_allocation_strategy", "proportional"),
         }
 
