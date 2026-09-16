@@ -18,13 +18,11 @@ from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
 BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
-# Tabella DynamoDB per il sidecar dei metadati di job (vedi _save_job_meta):
-# equivalente AWS del file JSON usato in locale, necessaria perché
-# _perform_active_recovery possa ricostruire un payload FEDELE all'originale
-# (iperparametri, tipo/percorso dataset, partizionamento federato) dopo un
-# failover dell'orchestratore, invece di ricadere sui default. Va creata a
-# parte (stesso schema chiave delle altre tabelle usate qui, es. WorkerTasks/
-# OrchestratorLocks): non viene provisionata da questo codice.
+# Tabella DynamoDB utilizzata come sidecar per i metadati dei job.
+# Assicura che la procedura di recovery attivo (_perform_active_recovery) 
+# possa ripristinare il payload originale esatto (iperparametri, dataset, 
+# logica di partizionamento federato) a seguito di un failover dell'orchestratore, 
+# evitando il fallback sui valori predefiniti. Questa risorsa richiede provisioning esterno.
 JOB_META_TABLE = "JobMetadata"
 
 # --------------------------------------------------------------------------- #
@@ -120,20 +118,22 @@ def normalize_job_meta_numerics(meta: dict) -> dict:
 def env_timeout_seconds(var_name: str, default: int) -> int:
     """
     Legge un timeout espresso in secondi da variabile d'ambiente, restituendo
-    'default' se la variabile è assente, vuota o non interpretabile.
+    il valore di fallback 'default' se la variabile è assente, vuota o non interpretabile.
 
-    PERCHÉ NON BASTA int(os.environ.get(NOME, default))
-    Terraform (ecs_task_definitions.tf), quando la chiave non è presente nel .env, ripiega su valori
-    scritti CON il suffisso: DETECTED_RPC_SYNC_TIMEOUT="${ENV_RPC_SYNC_TIMEOUT:-1800s}".
-    Quel valore finisce tale e quale nella task definition ECS, e int("1800s")
-    solleva ValueError — a livello di modulo, quindi PRIMA che qualunque
-    try/except applicativo possa intercettarlo: il container morirebbe
-    all'import con uno stack trace incomprensibile, e solo sulle macchine il
-    cui .env non dichiara quella chiave.
-
-    Qui il suffisso 's' viene tollerato, e qualunque altro valore malformato
-    produce un WARN esplicito più il default, invece di un crash. Un timeout
-    sbagliato è un problema; un orchestratore che non parte è peggio.
+    GIUSTIFICAZIONE ARCHITETTURALE:
+    La semplice conversione `int(os.environ.get(...))` non è sicura in contesti
+    gestiti da Terraform (es. ecs_task_definitions.tf). In caso di chiave assente
+    nel file .env, il template applica fallback che includono il suffisso di unità
+    di misura (es. "${ENV_RPC_SYNC_TIMEOUT:-1800s}").
+    
+    Tale stringa ("1800s") viene iniettata direttamente nella task definition ECS,
+    causando un `ValueError` a livello di import del modulo (essendo valutata
+    inizialmente a livello globale) e provocando la terminazione immediata del
+    container prima che eventuali blocchi try/except possano intercettare l'errore.
+    
+    Questa funzione agisce come sanitizzatore: tollera il suffisso 's' e converte 
+    in sicurezza, registrando un avviso e applicando il default per qualsiasi 
+    altro input malformato, prevenendo così crash in fase di avvio.
     """
     raw = os.environ.get(var_name)
     if raw is None:
@@ -179,11 +179,10 @@ class BaseOrchestrator(ABC):
         # oggetti Python in memoria. Senza questo lock, thread diversi
         # possono trovarsi a ricomporre task diversi nello stesso istante,
         # sommando temporaneamente in RAM più chunk di alberi appena
-        # deserializzati oltre alla foresta già accumulata -- causa
+        # deserializzati oltre alla foresta già accumulata, causa
         # dell'OOM osservato sull'Orchestratore anche dopo l'aumento di
         # memoria (vedi worker_thread_consumer in CentralizedOrchestrator/
-        # FederatedOrchestrator). Costo: i download S3 dei task, che prima
-        # giravano in parallelo tra i worker thread, ora sono serializzati
+        # FederatedOrchestrator). Costo: i download S3 dei task sono serializzati
         # -- un trade-off esplicito tempo/memoria, non gratuito.
         self.tree_reconstruction_lock = threading.Lock()
         
@@ -781,12 +780,6 @@ class BaseOrchestrator(ABC):
             "dataset_type": payload.get("dataset_type"),
             "hyperparameters": payload.get("hyperparameters", {}),
             "request_type": payload.get("request_type", "TRAINING"),
-            # Iperparametro dell'ESPERIMENTO federato (non del modello): senza
-            # questi, un job federato ripreso dopo un failover perderebbe la
-            # strategia di partizionamento/allocazione dichiarata nel job
-            # originale, ripiegando sui default "iid"/"proportional" anche se
-            # il job vero era, ad esempio, Dirichlet con allocazione equa —
-            # etichettando le metriche del run recuperato in modo scorretto.
             "partition_strategy": payload.get("partition_strategy", "iid"),
             "tree_allocation_strategy": payload.get("tree_allocation_strategy", "proportional"),
         }
@@ -960,22 +953,21 @@ class BaseOrchestrator(ABC):
                         "tree_allocation_strategy": job_meta.get("tree_allocation_strategy", "proportional"),
                     }
 
-                    # Il leader precedente è "mancato" (crash), ma la sua lease su
-                    # JobLocks resta valida fino alla scadenza naturale del TTL: un
-                    # processo morto non può rilasciarla. Se subentrassimo subito con
-                    # _process_job, il suo try_claim_job fallirebbe ([CLAIM FAILED] /
-                    # [ABORT]) e — chiamato qui con receipt_handle=None — uscirebbe
-                    # senza ritentare, lasciando il job orfano fino al timeout esterno.
+                   # GESTIONE DEL FAILOVER - SCADENZA LEASE (JobLocks):
+                    # In caso di terminazione improvvisa (crash) del leader precedente, 
+                    # il processo terminato non può rilasciare esplicitamente la lease sul job.
+                    # Di conseguenza, la lease rimane attiva fino alla scadenza naturale del suo TTL.
                     #
-                    # Attendiamo quindi attivamente che la lease del vecchio leader
-                    # scada, ritentando il claim con un piccolo backoff. Appena il
-                    # claim riesce, la lease è nostra: _process_job qui sotto rifarà
-                    # try_claim_job, che stavolta la rinnova (refresh_lock) e prosegue
-                    # normalmente col recupero dal checkpoint.
+                    # Un subentro immediato tramite '_process_job(receipt_handle=None)' 
+                    # comporterebbe un fallimento in 'try_claim_job' (Abort), abbandonando il job.
+                    # L'orchestratore in recovery entra quindi in attesa attiva (con backoff), 
+                    # monitorando la scadenza del TTL precedente per reclamare il lock.
+                    # Una volta acquisita la lease, l'invocazione successiva di '_process_job' 
+                    # eseguirà un 'refresh_lock' sicuro e procederà col ripristino dal checkpoint.
                     #
-                    # NB: questo NON altera il percorso a regime (non-failover):
-                    # riguarda solo il ramo di recovery di un job già PROCESSING
-                    # ereditato da un altro orchestrator.
+                    # L'attesa è circoscritta unicamente al ramo di ripristino (active recovery) 
+                    # per i job ereditati in stato 'PROCESSING' e non incide sulle normali 
+                    # tempistiche di esecuzione.
                     lease_wait_timeout = 330   # poco oltre il TTL di 300s della lease su JobLocks
                     lease_poll_interval = 5
                     waited = 0.0
@@ -1001,32 +993,31 @@ class BaseOrchestrator(ABC):
                         print(f"[{self.orchestrator_name}] Errore durante il recupero del Job {job_id[:8]}: {e}")
     
     # ------------------------------------------------------------------ #
-    # Checkpoint INCREMENTALE degli alberi                                #
+    # CHECKPOINT INCREMENTALE DEGLI ALBERI                               #
     # ------------------------------------------------------------------ #
+    # 
+    # ARCHITETTURA DI PERSISTENZA:
+    # Il checkpoint non sovrascrive un singolo file monolitico, poiché ciò
+    # comporterebbe un overhead di rete quadratico (N*(W+1)/2) e limiterebbe
+    # i test di scalabilità. Il salvataggio è incrementale: ogni chunk ricevuto 
+    # dal worker genera una "parte" contenente unicamente gli alberi appena elaborati.
+    # 
+    # GARANZIE DI ORDINAMENTO:
+    # Le parti sono numerate progressivamente in sequenza stretta. L'avanzamento 
+    # dell'indice è protetto da lock e condizionato all'esito positivo del 
+    # salvataggio, prevenendo "buchi" nella numerazione. Questo garantisce che 
+    # il ripristino possa enumerarle in sicurezza sondando sequenzialmente 
+    # con 'exists()' (poiché CheckpointDAO non prevede logiche di listing).
     #
-    # FORMATO PRECEDENTE: un'unica chiave, riscritta per intero a ogni chunk
-    # con tutta la foresta accumulata fino a quel momento. Rileggerla era
-    # banale, ma con W worker le scritture erano W di dimensione crescente
-    # (N/W, 2N/W, ... N), per un traffico totale di N*(W+1)/2 invece di N:
-    # il costo cresceva col numero di nodi proprio mentre si misurava la
-    # scalabilita'.
+    # MIGRAZIONE E RETROCOMPATIBILITÀ:
+    # Il sistema supporta la lettura da vecchi checkpoint monolitici come fallback. 
+    # In tal caso, alla prima scrittura utile, lo stato viene migrato riversando 
+    # l'intero snapshot come 'parte 0' ed eliminando il file monolitico, 
+    # assicurando l'unicità del formato per ciascun job.
     #
-    # FORMATO ATTUALE: una PARTE per scrittura, contenente solo gli alberi
-    # nuovi. Le parti sono numerate in sequenza e non hanno buchi, perche' la
-    # scrittura avviene sotto lock e l'indice avanza solo dopo un salvataggio
-    # riuscito. Il ripristino puo' quindi enumerarle sondando con exists()
-    # finche' non ne trova una mancante: CheckpointDAO espone soltanto
-    # save/load/exists/delete, nessuna operazione di listing.
-    #
-    # RETROCOMPATIBILITA': se non esiste alcuna parte ma esiste il file
-    # monolitico del formato precedente, viene letto quello. Alla prima
-    # scrittura successiva lo stato viene migrato scrivendo l'intero snapshot
-    # come parte 0 e rimuovendo il file monolitico, cosi' i due formati non
-    # convivono mai per lo stesso job.
-    #
-    # Questi metodi usano self.checkpoint_dao e self._resolve_trees_checkpoint_path,
-    # definiti nelle sottoclassi (Centralized/Federated): la base fornisce solo
-    # la logica, che e' identica per entrambe.
+    # I metodi di questa sezione incapsulano unicamente la logica incrementale; 
+    # la risoluzione dei path e l'istanziazione dei DAO sono delegate alle 
+    # sottoclassi implementative (CentralizedOrchestrator/FederatedOrchestrator).
 
     _TREES_CHECKPOINT_PROBE_MARGIN = 3
 
@@ -1221,7 +1212,7 @@ class BaseOrchestrator(ABC):
         importance OOB + riduzione multicollinearità). Condivisa tra
         centralized.py e FederatedOrchestrator.select_from_config: entrambi i
         percorsi distribuiti devono SOLO applicare questa lista (subset di
-        colonne), MAI ricalcolare la feature selection da soli -- rifittare
+        colonne), MAI ricalcolare la feature selection da soli, rifittare
         un CICIDSFeatureSelector sul lato distribuito duplicherebbe lavoro
         già fatto dalla baseline (un fit di RF + permutation importance),
         e in generale rischierebbe di produrre un set di feature diverso da
