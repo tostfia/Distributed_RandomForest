@@ -2,7 +2,7 @@
 set -e
 
 # =====================================================================
-# RUN AWS CLIENT: avvia src.client.main contro l'infrastruttura AWS
+# RUN AWS CLIENT: avviare src.client.main contro l'infrastruttura AWS
 # già deployata con deploy.sh (Fargate + SQS + DynamoDB + S3).
 #
 #

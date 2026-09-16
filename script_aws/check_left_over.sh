@@ -4,7 +4,7 @@
 # che continuano a fatturare anche quando non stai testando attivamente.
 #
 # Pensato per essere lanciato a inizio giornata o dopo ogni sessione di
-# lavoro, per assicurarti che tra un teardown.sh e l'altro non sia
+# lavoro, per assicurarsi che tra un teardown.sh e l'altro non sia
 # rimasto acceso nulla per errore (task interrotti, cluster secondari,
 # NAT Gateway, Load Balancer, VPC Endpoint dimenticati).
 #
@@ -170,8 +170,7 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 5) Istanze EC2 attive (orchestrator ora gira qui, non più su ECS:
-#    NON coperto da nessun controllo sopra, che guarda solo cluster ECS)
+# 5) Istanze EC2 attive (Orchestrator)
 # ---------------------------------------------------------------------
 echo ""
 echo "--- [5/5] Istanze EC2 attive -----------------------------------------"

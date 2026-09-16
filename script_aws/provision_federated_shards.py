@@ -20,9 +20,9 @@ di registrarsi come disponibile nel ServiceRegistry.
 Uso tipico:
     python -m script_aws.provision_federated_shards --num-workers 3 --data-folder ./dataset_cache
     
-NOTA: questo script assume che tu abbia già eseguito  src/baseline/run_baseline.py in locale, così che
+NOTA: questo script assume che si sia già eseguito  src/baseline/run_baseline.py in locale, così che
 outputs_baseline/config_real.json e/o config_synthetic.json esistano già sul
-tuo filesystem prima del provisioning. Non rilancia la baseline da solo.
+filesystem prima del provisioning. Non rilancia la baseline da solo.
 """
 import argparse
 import os
@@ -37,7 +37,7 @@ DEFAULT_BUCKET = os.environ.get("DATASETS_BUCKET_NAME")
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
 TARGET_ROWS_PER_DAY = 200_000
 
-DEFAULT_PARTITION_STRATEGY = "by_day"  # 'iid' (storica) o 'by_day' (naturale, per file/giorno di origine)
+DEFAULT_PARTITION_STRATEGY = "by_day"  # 'by_day' = (naturale, per file/giorno di origine)
 
 
 def _shards_already_present(s3_client, bucket: str, num_workers: int) -> bool:

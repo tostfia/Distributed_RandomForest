@@ -12,15 +12,9 @@ CLUSTER_NAME="forest-cluster"
 # ---------------------------------------------------------------------
 # Rilevamento di TRAINING_MODE e DATASETS_BUCKET_NAME dal .env, con la
 # stessa priorità usata da Terraform (TRAINING_MODE > default "centralized").
-# BUGFIX (12/9/2026): DATASETS_BUCKET_NAME era hardcoded su un account
-# AWS Academy Learner Lab precedente (le sessioni Learner Lab durano
-# ~4h, l'account cambia ad ogni nuovo Lab avviato) - il teardown
-# sembrava riuscire (nessun errore fatale, solo il fallback silenzioso
-# '|| echo' alle righe di pulizia S3 più sotto) ma in realtà non
-# ripuliva MAI il bucket realmente in uso. Ora: letto dal .env se
-# presente (stessa fonte di verità di run_test_engine.sh/deploy.sh),
-# altrimenti derivato dall'account ID corrente via STS - mai più
-# hardcoded.
+# DATASETS_BUCKET_NAME  letto dal .env 
+# se presente (stessa fonte di verità di run_test_engine.sh/deploy.sh),
+# altrimenti derivato dall'account ID corrente via STS 
 # ---------------------------------------------------------------------
 ENV_FILE=".env"
 if [ -f "$ENV_FILE" ]; then
@@ -303,10 +297,6 @@ for q in "${QUEUES[@]}"; do
 done
 
 # ---------------------------------------------------------------------
-# BUG CORRETTO: il vecchio step [5/5] puliva solo "temp/", un prefisso
-# che in realtà non esiste mai nel bucket (verificato dalla console S3):
-# era quindi un no-op silenzioso, e i veri artefatti di test (job con
-# timestamp nel nome, mai sovrascritti) si accumulavano indefinitamente.
 #
 # Prefissi PULITI ad ogni teardown (dati temporanei/di run, rigenerabili
 # automaticamente al prossimo test):
@@ -413,7 +403,7 @@ else
       continue  # eliminato con --purge-legacy-mode: non ha più senso riavviarlo
     fi
     if [ "$svc" == "orchestrator-service" ]; then
-      continue  # non esiste più: orchestrator è su EC2, vedi nota sotto
+      continue  
     elif [ "$svc" == "worker-service" ]; then
       # centralized: unico service, il desired-count va al NUM_WORKERS originale (non 1)
       echo "  aws ecs update-service --cluster $CLUSTER_NAME --service $svc --desired-count \$NUM_WORKERS --region $REGION"

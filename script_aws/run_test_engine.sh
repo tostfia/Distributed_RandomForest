@@ -154,11 +154,7 @@ ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 echo "    OK, credenziali valide."
 
 echo "==> [2/4] Verifica che i worker siano stabili e l'orchestrator (EC2) sia pronto..."
-# BUGFIX (11/9/2026): 'worker-service' esiste SOLO in modalità centralized.
-# In federated esistono N service separati (worker-service-1..N, uno per
-# indice/shard fisso - vedi ecs_services.tf), 'worker-service' non esiste
-# affatto (o e' un residuo INACTIVE di un deploy centralized precedente,
-# che 'aws ecs wait services-stable' non raggiungerebbe mai).
+
 if [ "$TRAINING_MODE" == "federated" ]; then
   WORKER_SERVICES=()
   for ((i=1; i<=NUM_WORKERS; i++)); do
@@ -218,7 +214,7 @@ echo "    VPC: $VPC_ID | Subnet: $SUBNET_ID | SG: $SG_ID"
 # Cache EFS del dataset condiviso (vedi terraform/efs.tf): stesso filesystem
 # montato dall'orchestrator EC2 reale, qui montato anche sul test-engine
 # perche' gli scenari 1-5 fanno girare l'orchestratore IN-PROCESS dentro
-# questa istanza (non passano da SQS verso orchestrator-asg) - senza questo
+# questa istanza (non passano da SQS verso orchestrator-asg). Senza questo
 # mount, EFS_MOUNT_PATH non verrebbe mai impostata qui, e la scrittura della
 # cache in centralized.py verrebbe sempre saltata in sicurezza (nessun
 # errore, ma nessun beneficio). Creation token fisso, deve combaciare con
