@@ -359,5 +359,5 @@ In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_a
 
 ## Autori
 
-Progetto realizzato per i corsi di Machine Learning e Sistemi Distribuiti e Cloud Computing, A.A. 2025/26 — Tor Vergata.
-Docenti: Valeria Cardellini, Gabriele Russo Russo.
+Progetto realizzato per i corsi di Machine Learning e Sistemi Distribuiti e Cloud Computing, A.A. 2025/26 — Università degli studi di Roma "Tor Vergata".
+Docenti: Prof.ssa Valeria Cardellini, Prof. Gabriele Russo Russo.
