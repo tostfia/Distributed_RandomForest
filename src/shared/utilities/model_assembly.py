@@ -2,7 +2,7 @@
 Assemblaggio lazy del modello scikit-learn completo a partire dagli
 artefatti di storage prodotti dal training distribuito.
 
-CONTESTO (vedi diagnosi discussa in chat):
+CONTESTO:
 - In modalità 'centralized' (centralized.py, _execute_training_step), al
   termine del training viene salvato solo un MANIFESTO leggero
   (n_estimators, classes_, ecc.) in saved_models/centralized/model_{job_id}.pkl

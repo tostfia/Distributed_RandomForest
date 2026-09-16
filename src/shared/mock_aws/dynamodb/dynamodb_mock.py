@@ -143,12 +143,7 @@ class MockDynamoDB:
         return result
 
     def scan_table(self, table_name: str) -> dict:
-        # Stesso fix di get_item sopra (vedi _locked_read): senza lock
-        # condiviso, uno scan poteva capitare a metà di una scrittura
-        # concorrente su questo stesso file (es. un altro worker che si
-        # registra) e restituire una tabella momentaneamente vuota/troncata
-        # -- rilevante qui perché get_available_workers si basa proprio su
-        # scan_table per decidere quali worker sono disponibili.
+
         table_data = self._locked_read(table_name)
         pk_name = self._get_primary_key_name(table_name)
         items_list = [
@@ -163,7 +158,6 @@ class MockDynamoDB:
         (index_name viene ignorato nel mock, ma serve per mantenere l'interfaccia 
         identica a quella di AWS).
         """
-        # Stesso fix di get_item/scan_table sopra (vedi _locked_read).
         table_data = self._locked_read(table_name)
         pk_name = self._get_primary_key_name(table_name)
         items_list = []
