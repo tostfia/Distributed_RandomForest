@@ -56,13 +56,6 @@ DATASET_SEED = 123
 TARGET_COLUMN = "Label"
 TEST_SIZE = 0.20
 RANDOM_STATE = 123
-
-# Default storico: partizionamento IID, invariato rispetto a prima. "dirichlet" e
-# "by_day" sono opt-in via CLI/env e servono per simulare eterogeneità non-IID tra
-# i worker (vedi FederatedDataSplitter.split_and_shard). alpha è un iperparametro
-# dell'ESPERIMENTO (non del modello) e va quindi tracciato insieme al resto della
-# configurazione dell'esperimento (es. nel config JSON prodotto da run_baseline.py),
-# non hard-codato qui come gli altri parametri sopra.
 DEFAULT_PARTITION_STRATEGY = "iid"
 
 
@@ -162,7 +155,7 @@ def provision(num_workers: int, data_folder: str, dataset_type: str = "real", fo
     #
     # day_column: se non specificato esplicitamente da CLI/env, ricade sul
     # nome colonna che il loader stesso usa quando tag_source_day=True
-    # (SOURCE_DAY_COLUMN = '_capture_day', vedi raw_csvdataloader.py) — così
+    # (SOURCE_DAY_COLUMN = '_capture_day', vedi raw_csvdataloader.py), così
     # 'by_day' funziona "out of the box" senza dover conoscere quel dettaglio
     # interno del loader per usarlo.
     needs_day_tagging = partition_strategy == "by_day"

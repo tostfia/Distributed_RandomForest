@@ -10,19 +10,10 @@
 # NOTA: il client resta sull'host (non containerizzato, nessun servizio
 # 'client' in docker-compose.yml): comunica con l'orchestratore containerizzato
 # tramite la coda SQS mock su disco (./.local_storage, montata sia sull'host
-# sia nei container), non via RPC diretta -- nessun problema di rete lì.
+# sia nei container), non via RPC diretta, nessun problema di rete lì.
 
 cleanup() {
     echo -e "\n[CLEANUP] Arresto e rimozione dei container ($DC down)..."
-    # BUG CORRETTO (6/9/2026): questa riga chiamava 'docker-compose down'
-    # (comando standalone, con trattino) hardcoded, invece di usare $DC --
-    # la variabile che lo script stesso determina più sotto, preferendo
-    # 'docker compose' (plugin, senza trattino) quando disponibile. Su un
-    # sistema dove SOLO il plugin è installato (come osservato: 'docker-
-    # compose: comando non trovato'), il cleanup falliva silenziosamente --
-    # lo script stampava comunque "[CLEANUP] Fatto." lasciando però tutti
-    # i container ATTIVI (osservato: orchestrator in stato Restarting dopo
-    # un crash, mai fermato dal cleanup fallito).
     $DC down
     echo "[CLEANUP] Fatto."
     exit

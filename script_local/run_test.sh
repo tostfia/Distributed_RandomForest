@@ -16,45 +16,20 @@ TRAINING_MODE="${ENV_TRAINING_MODE:-centralized}"
 echo "[RUN_TEST] Avvio con NUM_WORKERS=$NUM_WORKERS, TRAINING_MODE=$TRAINING_MODE (da .env)..."
 
 # ---------------------------------------------------------------------
-# BUG FIX: docker-compose.yml applica un default di "delay 50ms" su
-# NET_SCENARIO se la variabile non è esportata (vedi comando del servizio
-# 'worker': "tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms}").
-# run_test.sh non la esportava mai, quindi OGNI test lanciato da qui
-# (inclusi performance/scalabilità, non solo lo scenario di rete) partiva
-# con 50ms di latenza artificiale già applicata di default, contaminando
-# le metriche raccolte.
-#
-# run_docker.sh già neutralizza questo default in modalità 'puro' con lo
-# stesso export (vedi lì per la motivazione: "delay 0ms" è un comando tc
-# valido che non introduce alcun ritardo, a differenza di una variabile
-# vuota che farebbe fallire silenziosamente 'tc' con un warning). Qui lo
-# applichiamo sempre: lo scenario 3 (simulazione di rete) del test engine
+# Lo scenario 3 (simulazione di rete) del test engine
 # resta l'unico responsabile di introdurre latenza quando richiesto,
-# gestendola dinamicamente sui container invece che tramite questa
+# gestendola dinamicamente sui container invece che tramite
 # variabile d'ambiente statica.
 # ---------------------------------------------------------------------
 export NET_SCENARIO="delay 0ms"
 
 # ---------------------------------------------------------------------
 if [ "$TRAINING_MODE" = "federated" ]; then
-    # BUG CORRETTO (7/9/2026): stesso pattern già corretto per NUM_WORKERS --
-    # DATASET_TYPE non veniva mai letto da .env né passato esplicitamente a
-    # provision_local_shards.py, che quindi ricadeva sempre sul suo default
-    # hardcoded ("real"): il provisioning reale (fino a ~2 minuti di lettura/
-    # campionamento CSV) partiva SEMPRE, anche con DATASET_TYPE=synthetic in
-    # .env, per uno scenario che non ne aveva alcun bisogno (ogni worker
-    # federato genera i propri dati sintetici in autonomia al boot, senza
-    # alcun provisioning -- vedi provision_local_shards.py, ramo
-    # dataset_type=='synthetic').
+
     RESOLVED_DATASET_TYPE="${ENV_DATASET_TYPE:-real}"
     echo "[PROVISIONING] TRAINING_MODE=federated rilevato: preparo gli shard federati (dataset_type=${RESOLVED_DATASET_TYPE})..."
 
-    # BUG CORRETTO (7/9/2026): stesso bug già corretto in run_docker.sh --
-    # questa chiamata non passava mai la strategia di partizionamento, e
-    # senza --force il controllo di presenza degli shard teneva in silenzio
-    # quelli di una strategia precedente se già presenti su disco. Stesso
-    # fix: --force sempre, strategia esplicita letta da .env, stampata
-    # chiaramente prima di procedere.
+
     RESOLVED_PARTITION_STRATEGY="${ENV_PARTITION_STRATEGY:-iid}"
     echo "[PROVISIONING] Strategia di partizionamento: ${RESOLVED_PARTITION_STRATEGY} (da PARTITION_STRATEGY in .env, default 'iid' se assente)"
 
