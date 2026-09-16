@@ -54,16 +54,6 @@ class CentralizedWorker(BaseWorker):
     def _load_data(self, source_info: str) -> tuple[np.ndarray, np.ndarray]:
         
         """Carica il dataset centralizzato delegando al DAO e lo trasforma in matrici NumPy.
-        Args:
-            source_info (str): URL S3 o path locale. Se contiene '|', è
-            l'unione di PIÙ shard (13/9/2026, sharding fisso per il reale:
-            quando ci sono meno worker attivi degli shard totali, ogni
-            worker riceve più shard assegnati, codificati in un'unica
-            stringa delimitata dall'Orchestratore - MAI una lista Python:
-            RPyC trasmette le liste per riferimento/netref, non per valore,
-            causando EOFError se il worker prova a usarle dopo che la
-            connessione originale si è chiusa. Vedi bugfix in centralized.py,
-            dispatch loop, stesso giorno.
         """
         is_multi = "|" in source_info
         # Decodifica UNA volta qui: entrambi i punti sotto (calcolo cache e
@@ -71,31 +61,14 @@ class CentralizedWorker(BaseWorker):
         # sulla stringa 'source_info' carattere per carattere.
         shard_list = source_info.split("|") if is_multi else None
 
-        # CACHE SU CONTENUTO invece che su URL esatto (11/9/2026): la cache
-        # precedente confrontava 'source_info' (l'URL S3 completo) - ma ogni
-        # job genera un URL diverso (es. 'shared_train_test_scal_3_....csv'
-        # vs 'shared_train_test_scal_5_....csv'), anche quando il CONTENUTO
-        # è identico (stesso seed/parametri, vedi "[TEST CACHE AWS] Dataset
-        # riusato..." nei log dell'orchestratore). Il confronto sull'URL
-        # falliva quindi sempre tra una configurazione di scaling e l'altra,
-        # forzando un ri-download completo (~66-100MB, 24-35s MISURATI
-        # empiricamente l'11/9/2026) anche quando lo stesso identico
-        # container aveva già quei dati in memoria dal giro precedente.
+        # La cache identifica il dataset tramite la dimensione del contenuto anziché
+        # tramite il percorso, che può cambiare tra job equivalenti. Il controllo
+        # richiede soltanto la lettura dei metadati e permette di evitare il download
+        # quando i dati sono già disponibili in memoria.
         #
-        # get_content_length() costa un head_object (solo metadata, nessun
-        # trasferimento del contenuto) invece di un get_object completo: il
-        # confronto qui sotto costa quindi decine di ms anche in caso di
-        # cache MISS, contro i 24-35s di un download - il costo aggiuntivo
-        # nel caso peggiore (contenuto diverso, serve comunque scaricare) è
-        # trascurabile rispetto al beneficio nel caso migliore (contenuto
-        # identico, download evitato del tutto).
-        #
-        # CASO LISTA (13/9/2026): somma dei content_length di TUTTI gli shard
-        # assegnati - stesso principio (confronto economico, nessun
-        # download per il solo controllo), sommato invece che singolo. Una
-        # collisione tra combinazioni diverse di shard con la STESSA somma
-        # è statisticamente trascurabile per questo uso (cache di velocità,
-        # non di correttezza) e comunque mai osservata empiricamente.
+        # Se source_info contiene più shard, la chiave di confronto corrisponde alla
+        # somma delle loro dimensioni. La cache è utilizzata esclusivamente come
+        # ottimizzazione e non influisce sulla correttezza dell'elaborazione.
         try:
             if is_multi:
                 content_length = sum(self.dao.get_content_length(p) for p in shard_list)
@@ -161,22 +134,12 @@ class CentralizedWorker(BaseWorker):
         y_df = df[actual_target]
         X_df = df[feature_cols]
 
-        # FIX MEMORIA (vedi OOM osservato con 10 worker che caricano
-        # simultaneamente l'intero dataset centralizzato da 1M righe):
-        # 1) float32 invece di float64 per X -- dimezza il picco di RAM
-        #    (1M x 100 x 4 byte invece di 8) SENZA perdita di precisione
-        #    reale: sklearn.tree lavora internamente in float32
-        #    (tree._tree.DTYPE) e a fit-time avrebbe comunque ricopiato/
-        #    convertito X in float32, tenendo per un istante ENTRAMBE le
-        #    copie in RAM. Costruirlo già in float32 elimina questa
-        #    doppia copia invece di limitarsi ad approssimare i dati.
-        # 2) 'del df' subito dopo aver estratto X/y: 'df' e le sue view
-        #    (X_df/y_df) restano altrimenti vive fino al return della
-        #    funzione, quindi per tutta la costruzione di X/y convivono in
-        #    RAM sia il DataFrame originale sia gli array numpy appena
-        #    copiati -- un picco transitorio di 2-3x la dimensione finale
-        #    dei dati, proprio nell'istante più delicato (10 worker che
-        #    lo fanno tutti insieme).
+        # X viene convertito direttamente in float32, il formato utilizzato
+        # internamente dagli alberi di scikit-learn, per ridurre l'occupazione
+        # di memoria ed evitare una copia aggiuntiva durante il fitting.
+        #
+        # Il DataFrame e le relative view vengono rilasciati dopo la creazione
+        # di X e y, limitando il picco di memoria durante il caricamento dei dati.
         X = X_df.to_numpy(dtype=np.float32)
         if y_df.dtype == 'object' or y_df.nunique() > 20:
             y = y_df.to_numpy(dtype=np.float64)
