@@ -39,21 +39,13 @@ BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "rf-distributed-datasets-38
 # target_rows_per_day non è None -- nessuna configurazione aggiuntiva
 # richiesta qui per beneficiarne.
 TARGET_ROWS_PER_DAY = 200_000
-# SHARDING FISSO REALE (13/9/2026): solo per tree_type == "classifier" (il
-# dataset reale, CICIDS). A differenza del sintetico (dove num_shard =
-# num_worker rilevati DINAMICAMENTE, vedi 'early_num_workers' più sotto),
-# qui il numero di shard e' FISSO e indipendente da quanti worker sono
-# attivi in un dato giro - permette di riusare gli STESSI file shard tra
-# configurazioni diverse (es. scenario di scalabilita' 3/5/7/10 worker),
-# invece di rigenerarli ad ogni giro (misurato empiricamente il 12/9/2026:
-# senza shard fissi, l'ETL reale - mai riusabile tra round con num_worker
-# diverso - rende 'sharded' fino a ~17x PIU' LENTO di 'shared' in totale,
-# nonostante training_only_seconds piu' basso). 20 = valore piu' alto in
-# 'scalability_test.worker_counts_to_test' di test_config.json ([3,5,7,10])
-# raddoppiato: garantisce che la configurazione con PIU' worker (10) riceva
-# un numero di shard ESATTAMENTE divisibile (20/10=2, nessuno sbilanciamento),
-# non solo "arrotondato" - il caso che senza shard fissi soffriva di piu' il
-# degrado di qualita' (ogni worker vedeva 1 solo shard su 10, il minimo).
+# SHARDING FISSO REALE: solo per tree_type == "classifier" (dataset reale, CICIDS).
+# A differenza del dataset sintetico, qui il numero di shard è FISSO e indipendente dai 
+# worker attivi. Questo permette di riusare gli stessi file shard tra configurazioni 
+# diverse (es. test di scalabilità con 3/5/7/10 worker), abbattendo i tempi ETL.
+# Il valore 20 è calcolato raddoppiando il numero massimo di worker previsti (10):
+# garantisce che la configurazione più grande riceva un numero di shard perfettamente 
+# divisibile (2 per worker), evitando sbilanciamenti nel dataset.
 REAL_FIXED_SHARDS = 20
 # Stessi valori di run_baseline.py: senza allinearli qui, il train
 # distribuito e quello della baseline locale sarebbero addestrati su
@@ -61,30 +53,13 @@ REAL_FIXED_SHARDS = 20
 # METRICHE (quello sui tempi resterebbe comunque valido, essendo
 # indipendente da questi due parametri).
 UNDERSAMPLING_RATIO = 1.0
-# Stesso valore di run_baseline.py: 15% del train ritagliato PRIMA
-# dell'undersampling. Nella baseline serve a calibrare la soglia di
-# decisione su un validation set con la vera distribuzione sbilanciata; qui
-# NON viene usato per una soglia (il percorso distribuito non fa ancora
-# quella calibrazione, vedi discussione) ma va comunque tolto dal train PER
-# VOLUME: senza questo passo, l'undersampling lavorerebbe su un pool il 15%
-# più grande di quello della baseline, e il train finale non sarebbe più
-# lo stesso set di dati, solo un set con lo stesso RAPPORTO 1:1.
+# Allineato a run_baseline.py: 15% del train ritagliato PRIMA dell'undersampling.
+# Anche se qui non viene usato per calibrare la soglia, va rimosso PER VOLUME: 
+# garantisce che l'undersampling lavori su un pool di partenza identico a 
+# quello della baseline, producendo lo stesso esatto set di dati.
 VALIDATION_SIZE_FOR_THRESHOLD = 0.15
 
-# Timeout (in secondi) delle chiamate RPC sincrone verso i worker.
-#
-# PRIMA: due letterali 600 incastonati nelle chiamate a rpyc.connect (nel thread
-# di dispatch dell'addestramento e in quello dell'inferenza). Terraform (ecs_task_definitions.tf) leggeva
-# RPC_SYNC_TIMEOUT_SECONDS / RPC_INFERENCE_SYNC_TIMEOUT_SECONDS dal .env e le
-# iniettava nella task definition ECS dell'orchestratore, ma il codice
-# centralizzato non le leggeva: la configurazione c'era, era documentata, e non
-# aveva alcun effetto. Solo federated.py le usava davvero.
-#
-# I DEFAULT RESTANO 600/600, non i 1800/900 di federated.py: così, quando le
-# variabili non sono impostate — cioè in locale e in Docker Compose — il
-# comportamento è identico byte per byte a quello precedente. Su AWS, dove
-# Terraform (ecs_task_definitions.tf) le valorizza, il timeout diventa finalmente quello dichiarato nel
-# .env, che è il punto di tutta questa configurazione.
+
 RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 600)
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 600)
 
@@ -96,25 +71,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.current_job_id = None
         self.train_data_path = None
         self.test_data_path = None
-        # SHARDING DINAMICO (12/9/2026): None = modalita' 'shared' (default,
-        # comportamento identico a sempre - ogni worker scarica l'intero
-        # dataset). Se valorizzata (lista di path, uno per shard), la
-        # modalita' 'sharded' e' attiva per il job corrente: ogni worker
-        # scarica SOLO la propria fetta, assegnata dinamicamente per
-        # task_id (vedi _execute_training_step). Toggle via env var
-        # CENTRALIZED_DATASET_MODE ('shared'|'sharded').
+       # SHARDING DINAMICO: 
+        # - None: modalità 'shared' (default, ogni worker scarica l'intero dataset). 
+        # - Lista di path: modalità 'sharded', ogni worker scarica SOLO la propria fetta, 
+        #   assegnata dinamicamente per task_id (vedi _execute_training_step). 
+        # Toggle via variabile d'ambiente CENTRALIZED_DATASET_MODE ('shared'|'sharded').
         self.train_data_shards = None
-        # CACHE DELL'INTERMEDIO (12/9/2026, fix): train_df/test_df dopo
-        # l'intera pipeline pesante (download CSV grezzo, binarizzazione,
-        # split stratificato, preprocessing, undersampling per il reale) ma
-        # PRIMA dello sharding finale. Round successivi con lo STESSO
-        # base_seed/dataset_type/tree_type riusano questi invece di rifare
-        # da zero il lavoro pesante - solo lo shuffle+scrittura finale
-        # (economico) va rifatto per un num_shards diverso. Prima di questo
-        # fix, la modalita' 'sharded' rifaceva l'INTERA pipeline ad ogni
-        # round di scaling, anche quando l'unica cosa a cambiare era il
-        # numero di worker - sprecando il lavoro pesante (~350-415s
-        # misurati sul reale) che non dipende affatto da num_shards.
+        # CACHE DELL'INTERMEDIO: salva train_df/test_df dopo l'ETL pesante (download, 
+        # binarizzazione, split, preprocessing, undersampling) ma PRIMA dello sharding finale.
+        # Round successivi con identici base_seed/dataset_type/tree_type riusano questa cache:
+        # se cambia solo num_shards (es. test di scalabilità), viene rieseguito solo lo 
+        # shuffle e la scrittura finale, abbattendo i tempi.
         self._cached_prepared_key = None
         self._cached_prepared_train_df = None
         self._cached_prepared_test_df = None
@@ -127,34 +94,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
         # AWS per via di S3) penalizzerebbe sistematicamente il cluster.
         # 0.0 quando l'ETL viene saltata grazie allo SHORT-CIRCUIT.
         self.last_etl_seconds = 0.0
-        # Scomposizione del tempo di _execute_training_step, esposta perché il
-        # confronto con la baseline locale sia onesto in entrambe le direzioni.
-        # La baseline misura il solo fit di scikit-learn: sommarci sopra
-        # trasferimenti S3, checkpoint e stima OOB — che la baseline non fa
-        # affatto — penalizzerebbe il cluster per lavoro che non gli è stato
-        # chiesto di confrontare.
+        # Scomposizione del tempo di _execute_training_step per garantire un confronto
+        # equo con la baseline locale (che misura il solo fit di scikit-learn escludendo 
+        # l'overhead di rete e I/O che penalizzerebbe il cluster).
         #
-        #   last_dispatch_seconds     costruzione vera degli alberi: scoperta
-        #                             dei worker, invio dei chunk via RPC e
-        #                             attesa del loro completamento. È IL
-        #                             numero da confrontare con T_seq/T_1node.
-        #   last_aggregation_seconds  ricomposizione della foresta globale e
-        #                             salvataggio del modello sullo storage.
-        #   last_oob_seconds          RIMOSSA (12/9/2026): la stima OOB non
-        #                             viene più calcolata in nessun caso -
-        #                             restava un costo (fino a 150s+ nel
-        #                             metodo sequenziale) per un dato che
-        #                             nessun consumatore del sistema legge
-        #                             mai (le accuracy_metrics finali vengono
-        #                             sempre dall'inferenza reale sul test
-        #                             set). Attributo mantenuto SEMPRE a 0.0
-        #                             solo per compatibilità con lo schema
-        #                             dei report esistenti (scalability.py
-        #                             legge 'oob_estimation_seconds' via
-        #                             getattr con default 0.0).
+        #   last_dispatch_seconds      costruzione vera degli alberi: scoperta worker, 
+        #                              invio chunk via RPC e attesa. È il numero da 
+        #                              confrontare con T_seq/T_1node.
+        #   last_aggregation_seconds   ricomposizione della foresta e salvataggio.
+        #   last_oob_seconds           attributo legacy (stima OOB rimossa), mantenuto 
+        #                              sempre a 0.0 per retrocompatibilità con lo schema 
+        #                              dei report (scalability.py).
         #
-        # Totale di _execute_training_step ~=
-        #   last_etl_seconds + last_dispatch_seconds + last_aggregation_seconds
+        # Totale _execute_training_step ~= last_etl_seconds + last_dispatch_seconds + last_aggregation_seconds
         self.last_dispatch_seconds = 0.0
         self.last_aggregation_seconds = 0.0
         self.last_oob_seconds = 0.0
@@ -179,19 +131,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
         dataset_type = self._resolve_dataset_type(payload)
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
-        # Spostato qui (13/9/2026, bugfix): serve anche nel ramo cache-hit
-        # subito sotto, non solo nel percorso di calcolo fresco piu' avanti -
-        # calcolarlo una sola volta qui evita di doverlo ripetere in entrambi.
         target_col = "Target" if tree_type == "regressor" else "Label"
 
-        # CACHE HIT (12/9/2026, fix): se un round precedente ha gia' prodotto
-        # train_df/test_df con GLI STESSI parametri che determinano il loro
-        # contenuto (dataset_type/tree_type/base_seed/dataset_path - non
-        # num_shards, che riguarda solo il passo finale), riusali invece di
-        # rifare l'intera pipeline pesante (download CSV grezzo,
-        # binarizzazione, split stratificato, preprocessing, undersampling).
-        # Risparmio misurato sul reale: ~350-415s evitati per ogni round di
-        # scaling successivo al primo.
         prepared_key = (dataset_type, tree_type, base_seed, dataset_path)
         if (self._cached_prepared_key == prepared_key
                 and self._cached_prepared_train_df is not None
@@ -201,13 +142,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                   f"train_df/test_df gia' pronti, salto l'intera pipeline ETL pesante.")
             train_df = self._cached_prepared_train_df
             test_df = self._cached_prepared_test_df
-            # BUGFIX (13/9/2026): mancavano tree_type/target_col/prepared_key
-            # rispetto alla vera firma di _save_prepared_data (vedi sotto) -
-            # il valore di t0 scivolava nello slot di tree_type, lasciando
-            # gli ultimi 3 parametri realmente vuoti (TypeError osservato in
-            # produzione: "missing 3 required positional arguments").
-            # Ordine ora IDENTICO alla chiamata gemella del percorso fresco
-            # (fine del metodo).
+      
             self._save_prepared_data(train_df, test_df, job_id, base_seed, num_shards,
                                       tree_type, target_col, prepared_key, t0,
                                       from_cache=True)
@@ -225,49 +160,17 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 train_df, test_df = train_test_split(df_full, test_size=TEST_SIZE, random_state=base_seed)
             else:
                 train_df, test_df = splitter.split(df_full)
-            # Stessa pulizia già applicata al ramo 'real' (vedi 'del df_raw' /
-            # 'del df_binarized' sotto): 'df_full' qui è 1.000.000 x 101 colonne
-            # (~800MB+), e train_test_split/splitter.split restituiscono COPIE
-            # (train_df/test_df), non view -- quindi df_full è ridondante subito
-            # dopo lo split, ma prima di questa modifica restava referenziato
-            # per tutta la durata di _prepare_data (upload S3 incluso, alcuni
-            # minuti). Essendo un DataFrame pandas, può contenere riferimenti
-            # interni ciclici che il reference counting di CPython non libera
-            # immediatamente: 'del' esplicito + gc.collect() forzano il rilascio
-            # prima che il dispatch del training (subito dopo, vedi
-            # _execute_training_step) inizi ad accumulare memoria per gli
-            # alberi -- riduce il fabbisogno di picco sull'Orchestratore.
             del df_full
             gc.collect()
         else:
             if not dataset_path: 
                 raise ValueError("dataset_path mancante.")
             print(f"[DEBUG] dataset_path ricevuto = {repr(dataset_path)}")
-            # sample_fraction=0.05 (uniforme) SOSTITUITO da
-            # target_rows_per_day: stesso principio di run_baseline.py --
-            # senza questo, il campione sarebbe dominato dal giorno di
-            # cattura più grande (quasi metà del dataset da solo), e i due
-            # giorni con l'attacco Infiltration (già raro anche al loro
-            # interno) verrebbero diluiti ulteriormente da un campionamento
-            # cieco al Label PRIMA che qualunque bilanciamento a valle possa
-            # intervenire.
             loader = RawCSVDataLoader(
                 data_url=dataset_path,
                 dataset_seed=base_seed,
                 target_rows_per_day=TARGET_ROWS_PER_DAY,
-                # NOTA (13/9/2026): s3_anon rimosso - era stato aggiunto il
-                # 12/9/2026 per leggere direttamente dal bucket pubblico
-                # CICIDS2018 (cse-cic-ids2018), che richiede accesso
-                # anonimo. Da quando il dataset viene invece caricato una
-                # tantum sul NOSTRO bucket privato (vedi upload_dataset.sh,
-                # test_config.json: dataset_path punta a
-                # s3://<bucket-nostro>/real/), s3_anon=True sarebbe
-                # CONTROPRODUCENTE: forzerebbe accesso anonimo anche contro
-                # il bucket privato, che lo nega (AccessDenied) - esattamente
-                # il bug osservato il 13/9/2026, causato da un residuo del
-                # fix precedente rimasto per errore in una copia di lavoro
-                # non aggiornata. Default s3_anon=False (accesso firmato
-                # normale) è quello corretto qui.
+                
             )
             df_raw = loader.load()
             
@@ -289,14 +192,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
             test_df = preprocessor.process(test_df)
 
             # ─── FASE 4b: SPLIT DEL VALIDATION SET (PRIMA dell'undersampling) ───
-            # Stesso passo di run_baseline.py, stesso identico ordine (dopo
-            # process(), prima di undersample_majority_class): 15% del train
-            # tolto qui, per allineare il VOLUME del train che arriva
-            # all'undersampling a quello della baseline -- vedi
-            # VALIDATION_SIZE_FOR_THRESHOLD. Il validation stesso non è
-            # ancora usato per calibrare una soglia in questo percorso
-            # distribuito (nessuna logica di soglia F1-max/FPR-vincolata
-            # qui), quindi viene scartato subito dopo lo split.
+            # Allineato a run_baseline.py: il 15% del train viene ritagliato e scartato 
+            # per garantire che l'undersampling successivo lavori sullo stesso identico 
+            # volume di dati della baseline. Qui non viene effettuata alcuna calibrazione 
+            # della soglia.
             if tree_type == "classifier":
                 print(f"\n[{self.orchestrator_name}] === SPLIT VALIDATION SET "
                       f"({VALIDATION_SIZE_FOR_THRESHOLD*100:.0f}% del train, per allineamento volume) ===")
@@ -305,14 +204,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 )
                 train_df, _ = validation_splitter.split(train_df)
 
-            # ─── FASE 5: UNDER-SAMPLING DELLA CLASSE MAGGIORITARIA (solo train) ───
-            # Prima assente qui: il train distribuito restava alla distribuzione
-            # naturale, mentre run_baseline.py addestra sempre su un train
-            # bilanciato 1:1 -- due modelli addestrati su dati diversi, non
-            # confrontabili sulle metriche. Il test set resta INTATTO (mai
-            # sotto-campionato), stesso principio della baseline: altrimenti la
-            # valutazione finale non misurerebbe più le prestazioni sulla
-            # distribuzione reale.
+           # ─── FASE 5: UNDER-SAMPLING DELLA CLASSE MAGGIORITARIA (solo train) ───
+            # Bilancia il train set (1:1) per allinearlo a run_baseline.py, garantendo 
+            # la confrontabilità delle metriche. Il test set resta INTATTO (mai 
+            # sotto-campionato) per valutare le prestazioni sulla distribuzione reale.
             if tree_type == "classifier":
                 print(f"\n[{self.orchestrator_name}] === UNDER-SAMPLING CLASSE MAGGIORITARIA (solo train) ===")
                 train_df = undersample_majority_class(
@@ -321,21 +216,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     ratio=UNDERSAMPLING_RATIO, random_state=base_seed,
                 )
 
-        # --- FEATURE SELECTION (Solo Real) ---
+        # --- FEATURE SELECTION (Solo Dataset Reale) ---
         if dataset_type == "real":
-            # PRIMA qui si rifaceva un fit COMPLETO di CICIDSFeatureSelector
-            # (un Random Forest + permutation importance da zero) sul lato
-            # distribuito -- duplicando un lavoro che la baseline ha già
-            # fatto, e per giunta rischiando di produrre un set di feature
-            # DIVERSO da quello della baseline anche a parità di
-            # iperparametri (nessuna garanzia che un fit indipendente
-            # converga esattamente sulle stesse feature). Il tuning e la
-            # feature selection restano ESCLUSIVAMENTE compiti della
-            # baseline (run_baseline.py): il percorso distribuito si limita
-            # a consumarne l'output già calcolato, esattamente come già
-            # fa federatedWorker.py (_resolve_selected_features) -- stesso
-            # meccanismo, stesso file, ora condiviso via
-            # BaseOrchestrator.read_selected_features_from_config.
+        # Il tuning e la feature selection sono compiti esclusivi della baseline 
+        # (run_baseline.py). Il percorso distribuito si limita a consumare l'output 
+        # già calcolato via BaseOrchestrator.read_selected_features_from_config. 
+        # Questo evita lavoro duplicato (permutation importance) e garantisce che 
+        # cluster e baseline poggino sull'identico set di feature.
             feature_selezionate = self.read_selected_features_from_config(dataset_type)
             if feature_selezionate is not None:
                 colonne_da_tenere = [c for c in feature_selezionate if c != target_col] + [target_col]
@@ -378,26 +265,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
             dao.save_dataset(path=test_data_path, df=test_df)
 
             if num_shards is not None and num_shards > 1:
-                # SHARDING DINAMICO (12/9/2026): seed fisso per riproducibilita'
-                # in entrambi i rami sotto. np.array_split copre l'INTERO
-                # array anche con resti non divisibili esattamente (es.
-                # 800000/3): ogni riga finisce in esattamente una fetta,
-                # nessuna persa o duplicata - vero per entrambi i rami.
+            # Seed fisso per garantire riproducibilità in entrambi i rami. 
+            # Si utilizza np.array_split perché copre l'intero array senza perdere 
+            # o duplicare righe, gestendo automaticamente anche i resti non divisibili 
+            # esattamente (es. 800000/3).
                 print(f"[{self.orchestrator_name}] [SHARDING] Partizionamento train_df "
                       f"({train_df.shape[0]} righe) in {num_shards} shard...")
                 rng = np.random.RandomState(base_seed)
 
                 if tree_type == "classifier":
-                    # STRATIFICATO (solo classificatore/reale, 12/9/2026):
-                    # shuffle e split SEPARATI per classe, poi distribuiti
-                    # proporzionalmente tra gli shard - invece di un unico
-                    # shuffle globale. Garantisce che ogni shard riceva
-                    # (quasi) esattamente la stessa proporzione di ciascuna
-                    # classe presente in train_df (gia' vicina a 1:1 grazie
-                    # all'undersampling a monte, vedi FASE 5 sopra), invece
-                    # di affidarsi alla sola probabilita' di uno shuffle non
-                    # stratificato. Il regressore (ramo else sotto) non ha
-                    # un concetto di classe: resta con lo shuffle puro.
+                # SPLIT STRATIFICATO: shuffle e split eseguiti separatamente per classe e poi 
+                # distribuiti proporzionalmente tra gli shard. 
+                # Garantisce che ogni shard riceva l'esatta proporzione di ciascuna classe 
+                # presente nel train_df (già ribilanciato 1:1), senza affidarsi alla sola 
+                # probabilità di uno shuffle globale.
+                # Il regressore (ramo else sotto) non avendo classi ricade su uno shuffle puro.
                     actual_target_shard = target_col if target_col in train_df.columns else (
                         "Target" if "Target" in train_df.columns else "Label"
                     )
@@ -435,9 +317,8 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         for i in range(num_shards)
                     ]
 
-                # Scrittura in PARALLELO, non sequenziale: stesso volume totale
-                # di byte del file unico di oggi, ma N upload concorrenti
-                # invece di uno solo.
+            # Scrittura in PARALLELO (N upload concorrenti invece di uno sequenziale).
+            # A parità di volume totale di byte, l'uso del multithreading abbatte i tempi di I/O.
                 def _write_shard(i):
                     shard_df = train_df.iloc[shard_indices[i]]
                     dao.save_dataset(path=shard_paths[i], df=shard_df)
@@ -467,20 +348,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
                       f"{' [da cache]' if from_cache else ''}")
                 print(f"[{self.orchestrator_name}] [OK] Dataset di Train e Test archiviati correttamente.")
 
-                # CACHE EFS (11/9/2026): scrittura best-effort, SOLO se
-                # EFS_MOUNT_PATH e' impostata (vedi orchestrator_ec2.tf) - se la
-                # variabile manca o la scrittura fallisce per qualunque motivo,
-                # non deve MAI far fallire il job: S3 sopra e' gia' il
-                # salvataggio canonico richiesto dalla traccia, questo e' solo
-                # un'ottimizzazione di velocita' per i worker che leggeranno lo
-                # stesso file (vedi dataset_dao.py per la logica di lettura/
-                # fallback lato worker). Solo train_df: e' quello che ogni
-                # worker scarica per il training (il collo di bottiglia
-                # misurato), non test_df (letto una sola volta dall'orchestrator
-                # stesso per l'inferenza, nessuna ridondanza da eliminare li').
-                # SOLO modalita' 'shared': in modalita' 'sharded' ogni worker
-                # legge una fetta DIVERSA, non c'e' ridondanza N-way da
-                # eliminare con una cache condivisa nello stesso modo.
+                # CACHE EFS: Scrittura best-effort attivata SOLO se EFS_MOUNT_PATH è impostata 
+                # (vedi orchestrator_ec2.tf). Se fallisce o manca, il job prosegue in sicurezza 
+                # usando S3 (salvataggio canonico). È un'ottimizzazione per la lettura dai worker 
+                # (vedi dataset_dao.py).
+                #
+                # - Solo train_df: è l'unico file scaricato da più worker. test_df viene 
+                #   letto una sola volta dall'orchestratore in inferenza (nessuna ridondanza).
+                # - Solo modalità 'shared': in 'sharded' ogni worker legge una fetta diversa, 
+                #   rendendo inutile una cache condivisa.
                 efs_mount_path = os.environ.get("EFS_MOUNT_PATH", "").strip()
                 if efs_mount_path:
                     try:
@@ -502,18 +378,11 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 self.train_data_path = train_data_path
                 self.train_data_shards = None
 
-            # CACHE DELL'INTERMEDIO (12/9/2026, fix): solo se questa e' stata
-            # una computazione FRESCA (non gia' servita dalla cache) -
-            # altrimenti train_df/test_df SONO GIA' gli oggetti in cache,
-            # riassegnarli sarebbe un no-op innocuo ma inutile. A differenza
-            # del comportamento precedente (del train_df, test_df
-            # incondizionato subito dopo il salvataggio), ora li MANTENIAMO
-            # vivi in memoria sull'orchestratore per essere riusati da round
-            # futuri con parametri identici - costo di memoria accettato
-            # (un'unica copia extra, ordine di grandezza comparabile a
-            # quanto gia' tenuto in memoria durante un singolo round oggi),
-            # a fronte del risparmio di tempo enorme (l'intera pipeline
-            # pesante evitata nei round successivi).
+            # CACHE DELL'INTERMEDIO: aggiornata solo in caso di computazione fresca 
+            # (se from_cache=True, gli oggetti sono già in cache e riassegnarli è inutile).
+            # Mantiene train_df e test_df vivi in memoria sull'orchestratore per riutilizzarli 
+            # in round futuri con parametri identici. Il costo in RAM (un'unica copia extra) 
+            # è ampiamente giustificato dal risparmio di tempo sull'intera pipeline ETL.
             if not from_cache:
                 self._cached_prepared_key = prepared_key
                 self._cached_prepared_train_df = train_df
@@ -525,30 +394,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.test_data_path = test_data_path
 
     def _execute_training_step(self, payload: dict, start_alberi: int, target_alberi: int, seed: int) -> int:
-        """
-        Esegue lo step di addestramento distribuito centralizzato.
-        Restituisce il numero REALE di alberi totali validati e salvati con successo.
 
-        NOTA (12/9/2026): la stima Out-Of-Bag è stata rimossa interamente da
-        questo metodo (era presente come funzionalità opzionale, poi col
-        default per saltarla, ora rimossa del tutto). Le metriche di
-        accuratezza finali (accuracy_metrics nei report) vengono sempre
-        dall'inferenza reale su un test set separato, mai dall'OOB -
-        calcolarla non serviva a nessun consumatore del sistema.
-        """
+        #Esegue lo step di addestramento distribuito centralizzato.
+        #Restituisce il numero REALE di alberi totali validati e salvati con successo.
+        
         expected_job_id = payload.get("job_id", "unknown_job")
-        # Risolto qui (non solo più avanti, dove viene ri-letto per altri usi
-        # nello stesso metodo - ridondante ma innocuo) perché serve SUBITO,
-        # prima ancora dell'ETL, per decidere fisso-vs-dinamico sotto.
+        # Estratto anticipatamente perché il tree_type è necessario PRIMA dell'ETL 
+        # per determinare la strategia di sharding (fisso vs dinamico).
         hp = payload.get("hyperparameters", {})
         tree_type = hp.get("tree_type", "classifier")
 
-        # SHARDING (12/9/2026 dinamico, esteso 13/9/2026 con un numero
-        # fisso solo per il reale): toggle via env var, default 'shared'
-        # (comportamento identico a sempre). In modalita' 'sharded', serve
-        # conoscere i worker PRIMA di generare/scrivere il dataset - a
-        # differenza della modalita' 'shared' dove l'ordine resta invariato
-        # (ETL, poi scoperta worker piu' sotto, invariata).
+        # SHARDING: gestito tramite variabile d'ambiente CENTRALIZED_DATASET_MODE (default 'shared').
+        # In modalità 'sharded' è strettamente necessario scoprire i worker attivi PRIMA 
+        # dell'ETL per poter determinare in quante fette partizionare il dataset.
         dataset_mode = os.environ.get("CENTRALIZED_DATASET_MODE", "shared").strip().lower()
         sharded_mode = dataset_mode == "sharded"
         early_num_workers = None
@@ -566,15 +424,12 @@ class CentralizedOrchestrator(BaseOrchestrator):
                       f"anticipata. In attesa...")
                 time.sleep(10)
 
-            # NUMERO DI SHARD (13/9/2026): fisso (REAL_FIXED_SHARDS) solo
-            # per il classificatore/reale - permette il riuso dei file tra
-            # round con num_worker diverso (vedi commento sulla costante).
-            # Il regressore/sintetico resta con num_shard = num_worker
-            # rilevati, comportamento dinamico invariato dal 12/9/2026: le
-            # dimensioni ridotte del sintetico rendono l'ETL cosi' economico
-            # (< 1s di generazione) da non giustificare la complessita' in
-            # piu' dello schema fisso, che qui varrebbe solo a scapito di
-            # una divisione statistica per shard meno naturale.
+            # NUMERO DI SHARD:
+            # - Classificatore (reale): fisso (REAL_FIXED_SHARDS). Permette il riuso dei 
+            #   file generati tra round con un numero diverso di worker.
+            # - Regressore (sintetico): dinamico (pari al numero di worker). Poiché l'ETL 
+            #   sintetico è quasi istantaneo (< 1s), uno schema fisso aggiungerebbe solo 
+            #   complessità a scapito di una partizione statistica più naturale.
             if tree_type == "classifier":
                 effective_num_shards = REAL_FIXED_SHARDS
                 print(f"[{self.orchestrator_name}] [SHARDING] Classificatore/reale -> "
@@ -587,20 +442,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
         # 1. Preparazione dei dati (se non ancora pronti e non presenti su disco)
         if sharded_mode:
-            # Short-circuit basato su STORAGE (12/9/2026), non solo in-memoria:
-            # costruisce i path attesi per gli shard (stessa convenzione di
-            # _prepare_data) e controlla se esistono GIA' su storage. Questo
-            # copre DUE casi in un colpo solo:
-            #   1) round successivi sullo stesso job con lo stesso numero di
-            #      worker (stesso motivo della vecchia guardia in-memoria);
-            #   2) FAILOVER dell'orchestratore: un nuovo standby che prende
-            #      il comando e' un processo Python nuovo (self.train_data_shards
-            #      = None per costruzione, vedi __init__) - senza un controllo
-            #      su storage, pagherebbe sempre un re-sharding completo da
-            #      zero anche se gli shard del leader morto sono ancora li'
-            #      su S3, mentre la modalita' 'shared' lo evita gia' col suo
-            #      short-circuit (vedi ramo elif sotto) - BUCO TROVATO E
-            #      CHIUSO qui, non presente nella prima versione di oggi.
+           # SHORT-CIRCUIT SU STORAGE: verifica la presenza degli shard direttamente su 
+            # disco/S3 (stessa convenzione di _prepare_data) per evitare un re-sharding 
+            # completo. Copre due scenari:
+            # 1) Round successivi dello stesso job.
+            # 2) Failover dell'orchestratore: il nuovo standby è un processo pulito 
+            #    (self.train_data_shards = None al boot), ma rileva e riusa gli shard 
+            #    già generati e salvati su S3 dal leader caduto.
             if self.environment == "aws":
                 expected_shards = [
                     f"s3://{BUCKET_NAME}/distributed_trains/shared_train_{expected_job_id}_shard_{i}.csv"
@@ -649,10 +497,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 self.train_data_path = expected_train
                 self.test_data_path = expected_test
                 self.current_job_id = expected_job_id
-                # Sicurezza contro stati stantii: se un job PRECEDENTE era in
-                # modalita' sharded, self.train_data_shards potrebbe ancora
-                # contenere path vecchi - azzerato esplicitamente qui, dato
-                # che siamo nel ramo 'shared' (sharded_mode=False).
+            # Previene conflitti di stato: azzera esplicitamente self.train_data_shards 
+            # nel ramo 'shared'. Senza questo reset, l'orchestratore manterrebbe in 
+            # memoria i path obsoleti di un eventuale job precedente eseguito in 
+            # modalità 'sharded'.
                 self.train_data_shards = None
             else:
                 self._prepare_data(payload, seed)
@@ -706,18 +554,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     print(f"[{self.orchestrator_name}] [WARN] File di checkpoint fisico non trovato a {checkpoint_trees_path}. Riparto da zero.")
                     start_alberi = 0
 
-        # FIX MEMORIA (vedi OOM globale osservato sul container orchestratore/
-        # test-engine con RSS fino a ~3.9GB): 'all_trained_trees' non deve più
-        # restare l'unica fonte di 'n_features_in_'/'classes_' fino alla fine
-        # del round -- li estraiamo qui in modo incrementale (running_*) man
-        # mano che i batch vengono confermati su disco, cosi' gli alberi già
-        # persistiti possono essere sostituiti con None (vedi più sotto) senza
-        # perdere l'informazione che serve per il manifesto finale.
-        # Se stiamo riprendendo da un checkpoint fisico (FAILOVER-RESUME),
-        # 'all_trained_trees' contiene già alberi REALI e già durevoli su
-        # disco per definizione (li abbiamo appena letti da lì): estraiamo
-        # subito i metadati e liberiamo anche questi, invece di lasciarli
-        # materializzati per il resto del round.
+        # GESTIONE DELLA MEMORIA (Prevenzione OOM): 
+        # L'estrazione dei metadati (n_features_in_, classes_) viene eseguita 
+        # in modo incrementale man mano che i batch vengono confermati su disco, 
+        # evitando di mantenere l'intera lista 'all_trained_trees' in memoria fino alla fine 
+        # del round. 
+        # In caso di resume da checkpoint fisico (failover), i metadati vengono 
+        # estratti immediatamente e gli oggetti alberiformi vengono rilasciati 
+        # per liberare RAM.
         running_n_features = [None]
         running_classes = set()
         if all_trained_trees:
@@ -743,19 +587,18 @@ class CentralizedOrchestrator(BaseOrchestrator):
         hp = payload.get("hyperparameters", {})
         max_depth = hp.get("max_depth", None)
         tree_type = hp.get("tree_type", "classifier")
-        # Fallback allineato ai default "corretti" di RandomForest{Classifier,Regressor}
-        # se il manifesto non lo specifica esplicitamente.
+        # Fallback ai parametri di default nativi di RandomForest (Classifier/Regressor) 
+        # nel caso in cui non siano esplicitamente definiti nel manifesto.
         max_features = hp.get("max_features", "sqrt" if tree_type == "classifier" else 1 / 3)
         min_samples_split = hp.get("min_samples_split", 2)
         # class_weight ha senso solo in classificazione: il worker lo ignora comunque
         # per i regressori, ma evitiamo di forzarlo se il payload non lo prevede.
         class_weight = hp.get("class_weight", None)
         criterion = hp.get("criterion", None)
-        # Inoltrati esplicitamente al worker: prima non venivano trasmessi
-        # affatto e ogni albero usava i valori di boot del worker
-        # (self.bootstrap / self.max_samples), rendendo di fatto inerte quanto
-        # dichiarato nel manifesto della baseline. None = "non specificato",
-        # e il worker mantiene i propri valori di boot (comportamento storico).
+        # Parametri bootstrap e max_samples inoltrati esplicitamente al worker. 
+        # Se impostati a None, il worker mantiene i propri valori predefiniti. 
+        # Questo assicura che le impostazioni dichiarate nel manifesto della baseline 
+        # vengano correttamente applicate anziché essere sovrascritte dai default locali.
         bootstrap = hp.get("bootstrap", None)
         max_samples = hp.get("max_samples", None)
         print(f"[{self.orchestrator_name}] Iperparametri effettivi -> n_estimators(step)={total_step_trees}, "
@@ -769,7 +612,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.last_aggregation_seconds = 0.0
         self.last_oob_seconds = 0.0
 
-        # Caso limite: già finito tutto ma eravamo crashati prima di consolidare
+        # Edge case: training completato ma orchestratore crashato prima del consolidamento finale.
         if total_step_trees <= 0:
             print(f"[{self.orchestrator_name}] Tutti gli alberi richiesti ({len(all_trained_trees)}) sono già pronti in memoria.")
         else:
@@ -808,37 +651,32 @@ class CentralizedOrchestrator(BaseOrchestrator):
 
             results_lock = threading.Lock()
 
-            # Lock DEDICATO alla persistenza del checkpoint, separato da
-            # results_lock. Prima l'upload su S3 avveniva dentro results_lock,
-            # cioè dentro la stessa sezione critica che serve ad accodare gli
-            # alberi ricevuti: ogni worker che finiva restava fermo ad aspettare
-            # la fine dell'upload di un altro, non per calcolare ma solo per
-            # poter registrare il proprio risultato. Era un punto di
-            # serializzazione che cresceva col numero di worker, e falsava
-            # proprio la misura di strong scaling.
+            # Lock dedicato alla persistenza del checkpoint, disaccoppiato da results_lock.
+            # Evita che l'I/O di rete (upload su S3) blocchi la sezione critica adibita 
+            # alla sola registrazione dei risultati. Questo previene colli di bottiglia 
+            # di serializzazione all'aumentare dei worker e garantisce misurazioni 
+            # accurate dello strong scaling.
             checkpoint_lock = threading.Lock()
             # Contatore monotono dell'ultimo snapshot effettivamente persistito.
-            # Serve a due cose:
-            #  1) impedire che uno snapshot più VECCHIO sovrascriva uno più
-            #     recente — ora che la scrittura è fuori da results_lock, due
-            #     thread possono arrivarci in ordine diverso da quello in cui
-            #     hanno preso lo snapshot, e un checkpoint che regredisce
-            #     sposterebbe INDIETRO il punto di ripartenza dopo un guasto;
-            #  2) saltare le scritture già superate. Se quando un thread ottiene
-            #     il lock risulta già persistito uno snapshot con più alberi, il
-            #     suo è ridondante: il checkpoint resta comunque più avanti, la
-            #     tolleranza ai guasti non peggiora e si risparmiano byte.
-            # "parts" riparte dal numero di parti gia'su storage: scrivere di nuovo
-            # dalla 0 sovrascriverebbe un delta valido con un altro delta.
+            # Assicura due garanzie critiche:
+            # 1) Previene race condition: poiché la scrittura asincrona fuori dal lock 
+            #    può completarsi fuori ordine, il contatore evita che uno snapshot obsoleto 
+            #    sovrascriva uno più recente, impedendo regressioni nello stato di recovery.
+            # 2) Evita scritture ridondanti: se è già stato persistito uno stato con un 
+            #    numero maggiore di alberi, lo snapshot corrente viene saltato, riducendo 
+            #    il I/O inutile senza compromettere la fault tolerance.
+            # 
+            # Nota: L'indicizzazione delle parti riparte dal numero di file già presenti 
+            # su storage per evitare di sovrascrivere delta di checkpoint validi.
             last_checkpointed = {"count": start_alberi,
                                  "parts": self._count_trees_checkpoint_parts(self.current_job_id)}
 
             active_worker_names = list(worker_names)
 
-            # Reset dell'evento (già usato in fase di inferenza): qui serve a far sì
-            # che i test di fault injection possano attendere in modo affidabile il
-            # momento in cui il PRIMO task di training viene davvero inviato a un
-            # worker, invece di limitarsi a un'attesa temporale fissa.
+            # Reset dell'evento di sincronizzazione (utilizzato anche in inferenza).
+            # Consente ai test di fault injection di attendere in modo deterministico 
+            # l'invio effettivo del primo task di training a un worker, evitando sleep 
+            # a tempo fisso.
             self.chunk_sent_event.clear()
 
             # 5. Definizione della funzione consumatrice per i thread
@@ -859,15 +697,15 @@ class CentralizedOrchestrator(BaseOrchestrator):
                     with self.connessioni_lock:
                         self.connessioni_attive.append(worker_conn)
                     
-                    # ─── Il thread resta attivo finché non raccogliamo la quota di alberi globale ───
+                    # Il thread resta attivo finché non raccogliamo la quota di alberi globale
                     while len(all_trained_trees) < target_alberi:
                         try:
                             # Timeout breve (2 secondi) per controllare periodicamente lo stato e non restare appesi
                             task_id, start_t, end_t, chunk_seed = task_queue.get(timeout=2)
                         except queue.Empty:
-                            # Se la coda è momentaneamente vuota ma mancano alberi al target globale,
-                            # un altro worker attivo potrebbe crashare a breve e rimettere un task in coda.
-                            # Usciamo solo se l'addestramento è finito o se siamo l'ultimo worker attivo rimasto.
+                        # Se la coda è temporaneamente vuota ma il target globale di alberi non è raggiunto, 
+                        # i worker non devono terminare prematuramente (per gestire eventuali crash o task reinseriti). 
+                        # La terminazione è consentita solo a training completato o se si è l'ultimo worker attivo rimasto.
                             with results_lock:
                                 total_attuali = len(all_trained_trees)
                                 num_worker_attivi = len(active_worker_names)
@@ -883,32 +721,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                         try:
                             self.chunk_sent_event.set()
 
-                            # BUGFIX RPYC (13/9/2026): una lista Python passata
-                            # come argomento RPC viene trasmessa da RPyC PER
-                            # RIFERIMENTO (un "netref", proxy remoto verso
-                            # l'oggetto sull'Orchestratore), non per valore -
-                            # a differenza delle stringhe, sempre trasmesse
-                            # per valore. Qualunque confronto/uso della
-                            # "lista" lato worker (es. self._cached_source ==
-                            # source_info in CentralizedWorker._load_data)
-                            # scatena quindi una NUOVA chiamata remota
-                            # sincrona verso l'Orchestratore stesso - fragile,
-                            # e fallisce con EOFError ("stream has been
-                            # closed") se la connessione originale nel
-                            # frattempo non è più disponibile (osservato in
-                            # produzione, scenario reale/sharded con più
-                            # shard per worker). Il sintetico non aveva MAI
-                            # esibito questo bug perché con shard==worker la
-                            # lista collassa sempre a 1 elemento (vedi 'if
-                            # len==1' sotto), diventando una stringa PRIMA
-                            # della chiamata RPC - solo il reale (più shard
-                            # per worker) produceva liste con più di un
-                            # elemento, mai convertite a stringa.
-                            # FIX: mai una lista sulla rete - codificata come
-                            # stringa unica delimitata da '|' (i path S3 di
-                            # questo progetto non contengono mai quel
-                            # carattere), decodificata lato worker in
-                            # CentralizedWorker._load_data.
+                            # NOTA DI ARCHITETTURA RPYC: le liste Python passate come argomenti RPC 
+                            # vengono trasmesse per riferimento (netref) e non per valore, generando 
+                            # chiamate remote sincrone indesiderate a ogni confronto lato worker e 
+                            # causando EOFError in caso di instabilità della connessione.
+                            # Per evitare questo, le liste di path S3 vengono serializzate come stringhe 
+                            # uniche delimitate da '|' (carattere sicuro poiché assente nei path S3) 
+                            # e decodificate puntualmente lato worker in CentralizedWorker._load_data.
                             if self.train_data_shards:
                                 _n_shards = len(self.train_data_shards)
                                 _assigned_shards = [
@@ -934,46 +753,26 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                 job_id=self.current_job_id
                             )
 
-                            # Il worker NON restituisce più il blob degli alberi
-                            # (fino a 1+ GB su scenari di scalabilità) come valore
-                            # di ritorno RPC: lo ha già persistito nello storage
-                            # condiviso (S3/locale) prima di rispondere, e qui ci
-                            # limitiamo a un piccolo ack + rilettura diretta dallo
-                            # storage. Evita l'hang osservato quando RPyC deve
-                            # trasportare un payload sincrono molto grande come
-                            # valore di ritorno (vedi Scenario 2 - Scalabilità).
+                            # I worker persistono il blob degli alberi (che può raggiungere dimensioni notevoli) 
+                            # direttamente nello storage condiviso prima di rispondere. L'orchestratore 
+                            # riceve un ACK leggero e ricarica i dati dallo storage, evitando il trasporto 
+                            # di payload pesanti tramite chiamate RPC sincrone (prevenendo blocchi di rete in RPyC).
                             ack = obtain(ack_raw)
                             if not isinstance(ack, dict) or not ack.get("ack"):
                                 raise RuntimeError(
                                     f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                                 )
 
-                            # FIX: l'Orchestratore ricomponeva l'INTERO task in un
-                            # colpo solo (load_task_trees_from_shared_storage), con
-                            # 'tree_reconstruction_lock' a serializzare la
-                            # ricomposizione tra thread ma senza limite alla
-                            # dimensione del singolo task -- con pochi worker
-                            # attivi CHUNK_SIZE sale (total_step_trees / num_workers)
-                            # e un singolo task può arrivare a pesare oltre 1GB con
-                            # max_depth=None su dataset grandi (misurato: ~72MB per
-                            # albero su Friedman#1 1M righe). Ora leggiamo il task
-                            # UNA PARTE ALLA VOLTA (iter_task_parts_as_tree_lists) e
-                            # persistiamo+liberiamo ogni parte subito, prima di
-                            # caricare la successiva: il picco di ricomposizione
-                            # scende alla dimensione di UN batch worker, costante
-                            # indipendentemente da quanto è grande CHUNK_SIZE.
-                            # BUGFIX (13/9/2026): stesso problema/soluzione di
-                            # BaseWorker.py's 'storage_key_source' - questa
-                            # funzione deriva il prefisso di storage dal NOME
-                            # FILE (source_info), non dai dati veri. Con lo
-                            # sharding fisso del reale, task_source_info puo'
-                            # essere una LISTA (piu' shard uniti) - crasherebbe
-                            # identicamente al bug lato worker corretto sopra.
-                            # DEVE combaciare ESATTAMENTE con quanto sintetizza
-                            # il worker per scrivere (stesso self.current_job_id,
-                            # stesso formato 'shared_train_{job_id}.csv'),
-                            # altrimenti orchestratore e worker leggerebbero/
-                            # scriverebbero su chiavi diverse.
+                            # GESTIONE MEMORIA E CONSISTENZA STORAGE:
+                            # 1. Caricamento incrementale dei task: per prevenire picchi critici di memoria 
+                            #    (che possono superare 1GB con task massicci o alberi profondi), i task vengono 
+                            #    letti e processati iterativamente parte per parte (iter_task_parts_as_tree_lists). 
+                            #    Ciascuna parte viene persistita e rilasciata prima di caricare la successiva, 
+                            #    mantenendo il picco di RAM costante e indipendente dalla dimensione del chunk.
+                            # 2. Allineamento delle chiavi di storage: la derivazione del prefisso di storage 
+                            #    gestisce uniformemente sia file singoli che liste multi-shard, garantendo 
+                            #    una corrispondenza esatta tra orchestratore e worker per evitare disallineamenti 
+                            #    nelle chiavi di lettura/scrittura su storage condiviso.
                             storage_key_for_reread = f"shared_train_{self.current_job_id}.csv"
                             part_iter = iter_task_parts_as_tree_lists(
                                 storage_key_for_reread, chunk_seed, quota_chunk,
@@ -988,35 +787,19 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                         break
                                     except FileNotFoundError:
                                         if received_any_part:
-                                            # Già ricevuta almeno una parte: il task
-                                            # NON è "non ancora pronto", è
-                                            # genuinamente incompleto (una parte
-                                            # attesa dal manifest manca). Errore vero,
-                                            # non un semplice "aspetta ancora".
-                                            #
-                                            # NOTA SU UN CASO LIMITE RESIDUO: qui sotto
-                                            # (except Exception as e, più in basso) il
-                                            # task viene riaccodato PER INTERO come
-                                            # prima di questo fix -- ma a differenza di
-                                            # prima, ora alcune delle sue parti
-                                            # potrebbero essere GIÀ state persistite nel
-                                            # checkpoint dell'Orchestratore (quelle lette
-                                            # con successo prima di questa). Un retry
-                                            # completo del task rigenererebbe quegli
-                                            # stessi alberi da capo, causando un doppio
-                                            # conteggio. Nella pratica questo scenario
-                                            # richiede che una parte manchi DOPO che il
-                                            # manifest (scritto per ultimo, a garanzia
-                                            # che tutte le parti siano già su disco) è
-                                            # stato trovato -- una vera corruzione/
-                                            # cancellazione esterna, non una race del
-                                            # normale percorso di scrittura. Rischio
-                                            # accettato consapevolmente per la modalità
-                                            # 'a batch' richiesta; un hardening completo
-                                            # (retry solo delle parti mancanti, non
-                                            # dell'intero task) richiederebbe propagare
-                                            # l'informazione "quante parti già lette" nella
-                                            # coda dei task, fuori scope per questo fix.
+                                        # Rilevamento di task incompleto: se almeno una parte è stata ricevuta 
+                                        # ma il task risulta globalmente carente rispetto al manifesto, si tratta 
+                                        # di un errore effettivo (es. corruzione o cancellazione anomala su storage) 
+                                        # e non di una semplice attesa di sincronizzazione.
+                                        # 
+                                        # NOTA SUL COMPORTAMENTO DI RETRY: in caso di eccezione durante il recupero, 
+                                        # il task viene riaccodato per intero. Poiché alcune parti potrebbero essere 
+                                        # state già registrate prima del fallimento, un retry completo potrebbe 
+                                        # teoricamente rigenerare gli stessi alberi (rischio di doppio conteggio). 
+                                        # Tale scenario presuppone una corruzione del file system/storage successiva 
+                                        # alla scrittura del manifesto ed è un rischio accettato in questa fase; 
+                                        # un hardening completo richiederebbe il tracciamento granulare delle parti 
+                                        # già elaborate all'interno della coda dei task.
                                             raise
                                         raise RuntimeError(
                                             f"Worker {w_name}: task {task_id} confermato (ack) ma il blob "
@@ -1024,20 +807,21 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                         )
                                 received_any_part = True
 
-                                # SEZIONE CRITICA MINIMA: solo l'aggiornamento della
-                                # lista condivisa e uno snapshot immutabile. L'upload
-                                # su S3 e la scrittura su DynamoDB, che prima stavano
-                                # qui dentro, sono stati spostati FUORI: tenerli nel
-                                # lock significava che ogni worker che finiva restava
-                                # bloccato dietro l'upload di un altro solo per poter
-                                # registrare il proprio risultato.
+                               # SEZIONE CRITICA MINIMA: la sezione protetta si limita all'aggiornamento 
+                                # della lista condivisa e alla creazione di uno snapshot immutabile. 
+                                # Le operazioni di I/O (upload su S3 e scrittura su DynamoDB) sono eseguite 
+                                # all'esterno del lock per evitare che i worker si blocchino a vicenda 
+                                # in attesa della rete, prevenendo colli di bottiglia nella registrazione 
+                                # dei risultati.
                                 with results_lock:
                                     all_trained_trees.extend(part_trees)
                                     current_total = len(all_trained_trees)
-                                    # list(...) crea una copia: la serializzazione fuori
-                                    # dal lock non deve poter vedere la lista mutare.
+                                    # list(...) crea una copia difensiva: garantisce l'immutabilità dello snapshot 
+                                    # durante la serializzazione eseguita all'esterno del lock.
                                     snapshot = list(all_trained_trees)
-                                part_trees = None  # non serve più: droppa il riferimento
+                                # Rilascia esplicitamente il riferimento per consentire il recupero 
+                                # della memoria (Garbage Collection) dopo il salvataggio della parte corrente.
+                                part_trees = None  
 
                                 # --- fuori da results_lock ---
                                 with checkpoint_lock:
@@ -1053,12 +837,10 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                             last_checkpointed["count"] = current_total
                                             last_checkpointed["parts"] += 1
 
-                                            # FIX MEMORIA: estraiamo i metadati leggeri
-                                            # (n_features_in_ una sola volta, classes_ per
-                                            # union) dal SOLO batch appena persistito, PRIMA
-                                            # di liberarlo -- non da tutto 'all_trained_trees'
-                                            # (che a questo punto può già contenere molte
-                                            # posizioni azzerate da batch precedenti).
+                                            # GESTIONE DELLA MEMORIA: estrazione incrementale dei metadati (n_features_in_ 
+                                            # e classes_) direttamente dal batch corrente prima del suo rilascio, evitando 
+                                            # l'ispezione dell'intera collezione 'all_trained_trees' (la quale può contenere 
+                                            # placeholder nulli derivanti da batch precedentemente liberati).
                                             newly_persisted = snapshot[prev_checkpointed:current_total]
                                             if running_n_features[0] is None and newly_persisted:
                                                 running_n_features[0] = int(newly_persisted[0].n_features_in_)
@@ -1068,49 +850,36 @@ class CentralizedOrchestrator(BaseOrchestrator):
                                                     [np.asarray(t.classes_) for t in trees_with_classes_batch]))
                                                 running_classes.update(batch_classes.tolist())
 
-                                            # Liberiamo gli alberi appena confermati su
-                                            # disco: _persist_trees_delta (vedi
-                                            # BaseOrchestrator.py) per part_index >= 1 usa
-                                            # SOLO 'snapshot[already_persisted:]' -- non
-                                            # tocca mai più il prefisso già scritto, quindi
-                                            # può restare fatto di soli 'None' (stessa
-                                            # LUNGHEZZA, così lo slicing per posizione resta
-                                            # corretto per le scritture successive) senza
-                                            # rompere nulla. Questo è ciò che teneva
-                                            # l'orchestratore a ridosso di diversi GB di RAM
-                                            # con alberi non potati su dataset grandi.
+                                            # GESTIONE DELLA MEMORIA: gli alberi già persistiti su disco vengono sostituiti 
+                                            # da placeholder 'None' nella collezione in memoria. 
+                                            # Poiché il metodo _persist_trees_delta utilizza uno slicing posizionale 
+                                            # (snapshot[already_persisted:]) per i delta successivi, preservare la lunghezza 
+                                            # originaria della lista tramite i valori nulli garantisce la correttezza degli 
+                                            # indici, prevenendo al contempo un consumo eccessivo di RAM su dataset estesi 
+                                            # con alberi non potati.
                                             with results_lock:
                                                 for _idx in range(prev_checkpointed, current_total):
                                                     all_trained_trees[_idx] = None
                                             snapshot = None
 
-                                            # FIX MEMORIA (parte 2): 'gc.collect()' da
-                                            # solo non basta -- CPython/glibc spesso NON
-                                            # restituisce al sistema operativo la memoria
-                                            # liberata (la tiene in riserva per riusarla
-                                            # internamente), quindi l'RSS visto da
-                                            # 'docker stats'/cgroup può restare alto anche
-                                            # quando dentro il processo non è rimasto
-                                            # nulla di vivo. 'malloc_trim(0)' (glibc,
-                                            # Linux) chiede esplicitamente all'allocatore
-                                            # di restituire i blocchi liberi all'OS: è
-                                            # quello che chiude il cerchio tra "l'ho
-                                            # liberato in Python" e "il container vede
-                                            # meno RAM usata". Innocuo se non c'è nulla da
-                                            # restituire (no-op), quindi sicuro da
-                                            # chiamare ad ogni batch persistito senza
-                                            # doverlo controllare a monte.
+                                            # GESTIONE DELLA MEMORIA (Rilascio dell'RSS verso il sistema operativo):
+                                            # gc.collect() da solo non è sufficiente, poiché glibc tende a trattenere 
+                                            # la memoria liberata nelle proprie riserve interne, lasciando l'RSS del 
+                                            # container (visibile via Docker/cgroup) artificialmente alto.
+                                            # La chiamata a malloc_trim(0) forza l'allocatore C a restituire i blocchi 
+                                            # liberi direttamente al sistema operativo. L'operazione è sicura e idempotente 
+                                            # (agisce come no-op se non ci sono blocchi da rilasciare), risultando 
+                                            # ideale per l'invocazione sistematica dopo il completamento di ogni batch.
                                             gc.collect()
                                             try:
                                                 ctypes.CDLL("libc.so.6").malloc_trim(0)
                                             except Exception:
-                                                pass  # piattaforme non-glibc (es. macOS): nessun problema, solo nessun effetto
+                                                pass  # piattaforme non-glibc (es. macOS)
 
-                                            # La cache di istanza ora referenzia la STESSA
-                                            # lista già alleggerita (non una copia piena):
-                                            # la continuazione same-process (STATE-SYNC)
-                                            # resta valida per il conteggio, senza tenere
-                                            # in vita gli alberi già persistiti.
+                                            # La cache di istanza referenzia direttamente la lista alleggerita 
+                                            # (evitando duplicazioni di memoria): la sincronizzazione intra-processo 
+                                            # (STATE-SYNC) mantiene la coerenza del conteggio senza preservare in RAM 
+                                            # i payload degli alberi già persistiti.
                                             self._trees_cache[self.current_job_id] = all_trained_trees
                                             print(f"   [RPC <- {w_name}] [CHECKPOINT FS OK] Parte di Task {task_id} archiviata. Progressivo in RAM/Storage: {current_total} alberi.")
                                         except Exception as e_fs:
@@ -1174,25 +943,14 @@ class CentralizedOrchestrator(BaseOrchestrator):
                             pass
 
             # 6. Avvio dei thread
-            # FIX: prima tutti i thread partivano in sequenza stretta, senza
-            # nessuna pausa -- ogni thread, appena avviato, chiama subito
-            # train_subset_forest sul worker, che a sua volta carica l'intero
-            # dataset condiviso (source_info, fino a 1M righe) in _load_data.
-            # Con N worker tutti avviati nello stesso istante, si ottengono N
-            # caricamenti simultanei dello stesso CSV -- un picco di memoria
-            # sincronizzato su tutti i container, causa più probabile degli
-            # OOM quasi-simultanei osservati su quasi tutti i worker nello
-            # scenario di scalabilità col dataset sintetico da 1M campioni.
-            # Una piccola pausa tra un avvio e l'altro spalma questo picco nel
-            # tempo invece di sincronizzarlo: costo totale trascurabile
-            # rispetto al training (con 10 worker, meno di 3s), ma i
-            # caricamenti si accavallano molto meno. Non elimina il problema
-            # se il dataset è enorme o il mem_limit troppo stretto, ma riduce
-            # sensibilmente la probabilità del crash sincronizzato visto nei
-            # test. Vale SOLO per il primo task di ogni worker: dal secondo in
-            # poi il dataset è già in cache locale (self._cached_X/_cached_y
-            # in CentralizedWorker), quindi non ricarica nulla e la pausa non
-            # si ripete.
+            # GESTIONE DELLA MEMORIA (Staggered Startup): l'avvio dei thread worker 
+            # è deliberatamente scaglionato tramite una breve pausa.
+            # Questo previene richieste simultanee di caricamento del dataset condiviso 
+            # da parte dei worker, evitando picchi di memoria concorrenti su tutti i 
+            # container (che potrebbero innescare OOM sincronizzati). L'overhead 
+            # temporale è trascurabile e impatta unicamente il primo task; i sotto-task 
+            # successivi utilizzano la cache locale del worker (self._cached_X/_cached_y) 
+            # senza innescare ulteriori ricaricamenti.
             WORKER_START_STAGGER_SECONDS = 0.3
             threads = []
             for i, name in enumerate(worker_names):
@@ -1246,11 +1004,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 classes_list = None
                 n_classes = None
                 if tree_type == "classifier":
-                    # Classi accumulate in modo incrementale (running_classes)
-                    # man mano che ogni batch veniva persistito e liberato,
-                    # invece di rileggerle qui da 'all_trained_trees' (che a
-                    # questo punto contiene quasi solo None -- vedi fix
-                    # memoria più sopra nel ciclo di dispatch).
+                    
                     if running_classes:
                         detected_classes = np.array(sorted(running_classes), dtype=np.int64)
                     else:
@@ -1301,16 +1055,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 del all_trained_trees
                 gc.collect()
 
-                # NOTA (12/9/2026): la stima OOB è stata rimossa interamente
-                # (era qui, con un fallback sequenziale + un percorso
-                # distribuito sperimentale). last_oob_seconds resta 0.0 dal
-                # reset a inizio metodo - nessun ricalcolo necessario.
+
                 print(f"[DEBUG TIMING] Riepilogo _execute_training_step -> "
                       f"ETL {self.last_etl_seconds:.2f}s | costruzione alberi "
                       f"{self.last_dispatch_seconds:.2f}s | aggregazione "
                       f"{self.last_aggregation_seconds:.2f}s | OOB {self.last_oob_seconds:.2f}s")
 
-                # ─── MODIFICA 3: Restituiamo la dimensione REALE degli alberi salvati ───
+                # Restituiamo la dimensione REALE degli alberi salvati
                 return n_trees_for_report
                 
             except Exception as e:
@@ -1319,7 +1070,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 return len(all_trained_trees)
 
         print(f"   [{self.orchestrator_name}] Nessun albero collezionato.")
-        # ─── Ritorna 0 se non è stato possibile generare o caricare nulla ───
+        # Ritorna 0 se non è stato possibile generare o caricare nulla 
         return 0
     
     def _execute_inference_step(self, payload: dict) -> dict:
@@ -1408,19 +1159,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
         self.chunk_sent_event.clear()   # <-- reset, così ogni run è pulita
         for tree_start, tree_end, chunk_estimators in self._iter_checkpoint_tree_ranges(job_id, CHUNK_SIZE):
             if tree_start not in already_done_ranges:
-                # FIX: prima l'intero chunk (fino a CHUNK_SIZE alberi, oltre
-                # 1GB con pochi worker attivi) veniva serializzato e scritto
-                # come UN blob unico -- il worker doveva poi scaricarlo e
-                # deserializzarlo tutto insieme (vedi
-                # exposed_predict_subset_forest in BaseWorker.py), tenendo
-                # contemporaneamente in RAM sia i byte grezzi sia gli oggetti
-                # albero appena decodificati: causa dell'OOM osservato sui
-                # worker in fase di inferenza dopo aver ridotto NUM_WORKERS
-                # (stesso identico problema già risolto lato Orchestratore
-                # per la ricomposizione dei task di training, qui speculare
-                # sul lato worker). Scriviamo ora il chunk a piccole parti
-                # (stesso pattern manifest+parti del training): il worker
-                # legge, predice e libera una parte alla volta.
+
                 chunk_key_prefix = f"inference_chunks/{job_id}/chunk_{tree_start}_{tree_end}"
                 save_chunk_in_parts_to_shared_storage(
                     chunk_key_prefix, chunk_estimators, self.environment, self.orchestrator_name
@@ -1617,9 +1356,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
             except Exception as e_db:
                 print(f"   [ERRORE] Impossibile scrivere lo stato COMPLETED su DynamoDB/local: {e_db}")
 
-        # Esposto esplicitamente (prima mancava): chi chiama questo metodo — inclusa
-        # la suite di test locale — deve poter leggere le metriche reali dal valore di
-        # ritorno, invece di affidarsi a un monkey-patch interno fragile.
+
         return {
             "status": "SUCCESS" if not failed_tasks else "PARTIAL",
             "testing_set_size": int(X_test.shape[0]),
@@ -1634,16 +1371,13 @@ class CentralizedOrchestrator(BaseOrchestrator):
         Estende il checkpoint della classe base aggiungendo il salvataggio FISICO
         degli alberi (specifico del calcolo centralizzato).
         """
-        # 1. Chiamiamo la classe base per aggiornare DynamoDB (evita duplicazione di codice)
+        # 1. Chiamiamo la classe base per aggiornare DynamoDB 
         super()._save_checkpoint(job_id, current_alberi, retries, base_random_state)
         
         # 2. Se ci sono alberi fisici da blindare su disco/S3, lo facciamo qui
         if alberi_reali is not None and len(alberi_reali) > 0:
             try:
-                # Sostituzione integrale dello stato: si azzera e si riscrive come
-                # parte 0. Percorso oggi mai esercitato — BaseOrchestrator chiama
-                # _save_checkpoint senza 'alberi_reali' — ma va tenuto coerente
-                # col formato a parti, altrimenti reintrodurrebbe un monolitico.
+
                 self._purge_trees_checkpoint(job_id)
                 self._persist_trees_delta(job_id, alberi_reali, 0, 0)
                 print(f"[{self.orchestrator_name}] [CENTRALIZED-CHECKPOINT-FISICO] {len(alberi_reali)} alberi salvati in storage.")
@@ -1651,31 +1385,7 @@ class CentralizedOrchestrator(BaseOrchestrator):
                 print(f"[{self.orchestrator_name}] [ERRORE STORAGE] Fallito salvataggio fisico degli alberi: {e}")
 
     def _clean_checkpoint(self, job_id: str):
-        """
-        Override del metodo di pulizia per rimuovere il file pickle parziale.
 
-        BUG CORRETTO (7/9/2026): questo metodo cancellava SEMPRE le parti del
-        checkpoint alberi (_purge_trees_checkpoint) subito dopo il
-        completamento di un job riuscito -- corretto PRIMA dell'introduzione
-        del manifesto leggero (vedi _execute_training_step), quando il
-        modello finale era un pickle scikit-learn autosufficiente e quelle
-        parti erano davvero solo stato temporaneo di resume tra i round.
-
-        Dopo il manifesto leggero, il modello NON contiene più gli alberi:
-        salva solo metadati e RIFERISCE le parti già persistite su storage
-        (vedi il commento "referenziati dalle parti già persistite" al
-        momento del salvataggio). Cancellarle qui distrugge l'unica copia
-        reale del modello subito dopo averlo "salvato" -- bug osservato
-        empiricamente il 7/9/2026: ogni inferenza su un job addestrato con
-        questo formato falliva con "ricevuta shape (0,)", perché tutte le
-        parti erano già state rimosse nello stesso istante in cui il
-        training terminava.
-
-        Le parti ora sopravvivono al completamento del job, esattamente come
-        saved_models/model_{job_id}.pkl -- la pulizia esplicita di un modello
-        non più necessario resta una scelta dell'utente (es. teardown.sh
-        --purge-models), mai automatica a fine training.
-        """
         super()._clean_checkpoint(job_id)
         self._trees_cache.pop(job_id, None)
  
