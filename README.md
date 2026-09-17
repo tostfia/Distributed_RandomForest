@@ -75,7 +75,8 @@ Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
 │   ├── run_test_engine.sh        # test engine su EC2 on demand
 │   ├── provision_federated_shards.py # provisioning offline degli shard federati su S3
 │   ├── teardown.sh                   # scala i Service/l'ASG a 0 e svuota DynamoDB/SQS/S3 (senza distruggere l'infrastruttura)
-│   └── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
+│   ├── check_left_over.sh            # controllo read-only di risorse AWS rimaste attive per errore
+│   └──  aws_creds.sh               # helper per impostare le credenziali AWS Academy Learner Lab
 ├── outputs_baseline/         # manifesti/modelli prodotti da run_baseline.py: config_real.json, config_synthetic.json
 │                             # (feature selection + iperparametri, fonte di verità condivisa col training distribuito)
 ├── dataset_cache/            # cache locale dei CSV grezzi del dataset reale (CICIDS)
@@ -87,8 +88,8 @@ Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
 ├── Dockerfile
 ├── requirements.txt
 ├── worker_supervisor.py       # restart-on-failure automatico dei worker (locale bare-metal e test engine)
-├── upload_dataset.sh          # upload multipart con retry verso S3
-└── aws_creds.sh               # helper per impostare le credenziali AWS Academy Learner Lab
+└── upload_dataset.sh          # upload multipart con retry verso S3
+ 
 ```
 
 > Le cartelle `outputs_baseline/`, `dataset_cache/`, `synthetic/`, `saved_models/`, `workers_cache/`, `test_reports/` sono in gran parte popolate a runtime (modelli, cache, report).
