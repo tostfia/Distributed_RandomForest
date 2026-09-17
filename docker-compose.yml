@@ -60,7 +60,7 @@ services:
     command: >
       sh -c "
       if command -v tc >/dev/null 2>&1; then
-        if ! tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 50ms}; then
+        if ! tc qdisc add dev eth0 root netem ${NET_SCENARIO:-delay 0ms}; then
           echo '[WARN] impossibile applicare tc netem sul worker (permessi/capability mancanti)' >&2;
         fi;
       fi;
