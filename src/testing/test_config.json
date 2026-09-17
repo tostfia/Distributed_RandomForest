@@ -73,14 +73,14 @@
   },
 
   "orchestrator_election_concurrency": {
-    "_NOTE": "Scenario 9 - verifica la mutua esclusione del lock di leadership sotto concorrenza reale (N candidati sincronizzati con threading.Barrier), non un test di failover: nessun job/dataset coinvolto. Su AWS le chiamate a DynamoDB reale sono più lente: valutare di abbassare num_rounds per contenere tempo/costo nel Learner Lab (vedi 'aws.suggested_overrides' sotto).",
+    "_NOTE": "Scenario 8 - verifica la mutua esclusione del lock di leadership sotto concorrenza reale (N candidati sincronizzati con threading.Barrier), non un test di failover: nessun job/dataset coinvolto. Su AWS le chiamate a DynamoDB reale sono più lente: valutare di abbassare num_rounds per contenere tempo/costo nel Learner Lab (vedi 'aws.suggested_overrides' sotto).",
     "num_rounds": 20,
     "num_candidates": 5,
     "lock_ttl_seconds": 5
   },
 
   "orchestrator_asg_replacement": {
-    "_NOTE": "Scenario 10 - sostituzione REALE, a livello infrastruttura, di un'istanza EC2 dell'orchestrator terminata (ec2:TerminateInstances, non un docker kill), verificata contro l'Auto Scaling Group 'orchestrator-asg'. Applicabile SOLO su environment='aws' (nessun equivalente locale/Docker per un ASG): sugli altri environment lo scenario si dichiara SKIPPED senza eseguire nulla. Complementare allo scenario 6/7 (failover applicativo su lock/lease): qui si verifica il ripristino della capacità, non la continuità del job.",
+    "_NOTE": "Scenario 9 - sostituzione REALE, a livello infrastruttura, di un'istanza EC2 dell'orchestrator terminata (ec2:TerminateInstances, non un docker kill), verificata contro l'Auto Scaling Group 'orchestrator-asg'. Applicabile SOLO su environment='aws' (nessun equivalente locale/Docker per un ASG): sugli altri environment lo scenario si dichiara SKIPPED senza eseguire nulla. Complementare allo scenario 6/7 (failover applicativo su lock/lease): qui si verifica il ripristino della capacità, non la continuità del job.",
     "max_wait_for_replacement_seconds": 420,
     "check_interval_seconds": 10
   },

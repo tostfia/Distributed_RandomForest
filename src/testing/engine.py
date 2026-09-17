@@ -147,8 +147,8 @@ class TestEngine:
             print("6. Failover dell'Orchestratore (addestramento)")
             print("7. Failover dell'Orchestratore (inferenza)")
             print("8. Elezione del Leader sotto Concorrenza (Safety)")
-            print("9. Genera Grafici")
-            print("10. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)")
+            print("9. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)")
+            print("10. Genera Grafici")
             valid_options = ["1", "2", "3", "4","5", "6", "7", "8", "9", "10", "all"]
             # Bypass non-interattivo: se la variabile d'ambiente SCENARIO è
             # impostata (usato da run_test_engine_ecs.sh / task ECS one-off
@@ -193,13 +193,13 @@ class TestEngine:
                 election_scenario = OrchestratorElectionConcurrencyScenario(self.config, self.orchestrator)
                 self.global_reports["orchestrator_election_concurrency"] = election_scenario.run()
             elif config_mode == "9":
+                asg_replacement_scenario = OrchestratorAsgReplacementScenario(self.config, self.orchestrator)
+                self.global_reports["orchestrator_asg_replacement"] = asg_replacement_scenario.run()
+            elif config_mode == "10":
                 from src.testing.plot_generator import PlotGenerator
                 plotter = PlotGenerator()
                 plotter.generate_all_plots()
-            elif config_mode == "10":
-                asg_replacement_scenario = OrchestratorAsgReplacementScenario(self.config, self.orchestrator)
-                self.global_reports["orchestrator_asg_replacement"] = asg_replacement_scenario.run()
-            if config_mode not in ("all", "9"):
+            if config_mode not in ("all", "10"):
                 self._print_final_summary()
         finally:
             docker = os.environ.get("RUNNING_IN_DOCKER")
@@ -239,16 +239,21 @@ class TestEngine:
         orchestrator_fault_inf = InferenceOrchestratorFaultScenario(self.config, self.orchestrator)
         self.global_reports["inference_orchestrator_failover"] = orchestrator_fault_inf.run()
 
-        #Scenario 9 (Elezione del Leader sotto Concorrenza - Safety)
+        #Scenario 8
         election_scenario = OrchestratorElectionConcurrencyScenario(self.config, self.orchestrator)
         self.global_reports["orchestrator_election_concurrency"] = election_scenario.run()
 
-        #Scenario 10 (Sostituzione ASG dell'Orchestratore - infrastruttura, solo AWS:
-        # SKIPPED immediato su locale/Docker, nessun rallentamento per quei run)
+        #Scenario 9
         asg_replacement_scenario = OrchestratorAsgReplacementScenario(self.config, self.orchestrator)
         self.global_reports["orchestrator_asg_replacement"] = asg_replacement_scenario.run()
 
         self._print_final_summary()
+
+        #Scenario 10 
+        print("\n--- Generazione grafici dai report appena prodotti ---")
+        from src.testing.plot_generator import PlotGenerator
+        plotter = PlotGenerator()
+        plotter.generate_all_plots()
 
     def _print_final_summary(self):
         print("\n==================================================")

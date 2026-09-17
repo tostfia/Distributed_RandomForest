@@ -1,19 +1,23 @@
 # Distributed_RandomForest
 
-Sistema distribuito per il **training** e l'**inferenza** di modelli Random Forest, sviluppato per il progetto congiunto dei corsi di **Machine Learning** e **Sistemi Distribuiti e Cloud Computing** (A.A. 2025/26 — Università degli Studi di Roma Tor Vergata).
+Sistema distribuito per il **training** e l'**inferenza** di modelli Random Forest, realizzato per il progetto congiunto dei corsi di **Machine Learning** e **Sistemi Distribuiti e Cloud Computing** (A.A. 2025/26 — Università degli Studi di Roma Tor Vergata), secondo la traccia ufficiale *"Progetto congiunto ML+SDCC 1: Training e Inferenza Distribuiti per Modelli Random Forest"*.
 
-Il sistema segue un'architettura **master-worker**: un *orchestrator* centrale distribuisce l'addestramento dei singoli alberi della foresta su più nodi *worker*, in due modalità:
+Il sistema segue l'architettura **master-worker**: un *orchestrator* centrale riceve dal client il dataset (URL a uno storage S3) e gli iperparametri del modello, distribuisce l'addestramento dei singoli alberi su più nodi *worker* e restituisce, a fine training, un **identificativo univoco del modello**. Le richieste di inferenza, identificate da quel model ID, vengono servite sfruttando l'infrastruttura distribuita e aggregando i risultati prodotti dai worker coinvolti. Il sistema gestisce inoltre la **tolleranza ai guasti** dei nodi durante training e inferenza, recuperando i risultati intermedi già salvati invece di far ripartire da zero i task falliti, e permette il download del modello addestrato in formato **Pickle** standard scikit-learn, per un utilizzo in un ambiente di inferenza locale.
+
+Due modalità di training, selezionabili con `TRAINING_MODE`:
 
 - **Centralizzata**: il dataset è caricato su uno storage condiviso e i worker addestrano porzioni della foresta sui medesimi dati.
-- **Federata**: il dataset è pre-partizionato e distribuito sui nodi; ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i modelli.
+- **Federata** (prevista dalla traccia per i gruppi di tre studenti, in alternativa al caricamento di un dataset centralizzato): il dataset è già pre-partizionato e distribuito sui nodi — ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i parametri del modello finale.
 
-Sono supportati due ambienti di esecuzione, alternativi o combinabili:
+Le prestazioni vengono valutate confrontando il sistema con una baseline locale non distribuita (accuratezza e tempo di esecuzione, sia in training sia in inferenza) su più task di predizione, uno dei quali su dati sintetici generati con scikit-learn — per controllare la dimensione del dataset e valutare la scalabilità al crescere del numero di worker (vedi `src/baseline/`).
 
-| Ambiente | Come si avvia | Quando usarlo |
+Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
+
+| Ambiente | Come si avvia | Differenze |
 |---|---|---|
-| **Locale** | `run_local.sh` | Sviluppo rapido, debugging diretto sul sistema host e simulazione di condizioni di rete con `tc netem`  |
-| **Docker Compose** | `run_docker.sh` | Test in ambiente containerizzato e isolato, verifica dell'interazione multi-nodo e validazione delle configurazioni prima del deploy cloud. |
-| **AWS** | `run_aws.sh` | Esecuzione su infrastruttura cloud per gli esperimenti di scalabilità richiesti dal progetto |
+| **Locale (bare-metal)** | `run_local.sh` | Ogni nodo (worker, orchestrator) gira come processo separato direttamente sull'host, in un proprio terminale, senza container. |
+| **Docker Compose** | `run_docker.sh` | Ogni nodo gira in un container Docker, con limiti di CPU/RAM configurabili da `.env`. |
+| **AWS** | `run_aws.sh` | I worker girano su ECS Fargate, l'orchestrator su istanze EC2, il tutto provisionato da Terraform. |
 
 ---
 
@@ -22,11 +26,11 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 1. [Struttura del repository](#struttura-del-repository)
 2. [Prerequisiti](#prerequisiti)
 3. [Esecuzione in locale (Docker Compose)](#esecuzione-in-locale-docker-compose)
-4. [Esecuzione su AWS (Terraform + ECS Fargate)](#esecuzione-su-aws-terraform--ecs-fargate)
+4. [Esecuzione su AWS (Terraform)](#esecuzione-su-aws-terraform)
 5. [Modalità di training: centralizzata vs federata](#modalità-di-training-centralizzata-vs-federata)
-6. [Simulazione/misura della latenza di rete](#simulazione-misura-della-latenza-di-rete)
+6. [Simulazione e misura della latenza di rete](#simulazione-e-misura-della-latenza-di-rete)
 7. [Test di sistema (performance, scalabilità, fault tolerance)](#test-di-sistema-performance-scalabilità-fault-tolerance)
-8. [Pulizia / teardown](#pulizia--teardown)
+8. [Pulizia](#pulizia)
 
 
 ---
@@ -55,7 +59,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   └── testing/               # test engine di sistema
 │       ├── engine.py                 # entry point, selezione scenario
 │       ├── scenarios/                # implementazione dei singoli scenari (1-10)
-│       ├── plot_generator.py         # scenario 9, grafici da report salvati
+│       ├── plot_generator.py         # scenario 10, grafici da report salvati
 │       └── test_config.json          # configurazione degli scenari di test
 ├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, EC2/ASG orchestrator, API Gateway, EFS) — vedi terraform/README.md
 ├── lambda_source/           # sorgente della funzione Lambda usata da Terraform per il deploy (copia distinta da terraform/lambda/ e src/shared/mock_aws/lambda/)
@@ -130,17 +134,87 @@ Il sistema viene configurato tramite il file `.env` presente nella root del prog
 ```bash
 cp .env.example .env
 ```
+**Modalità di esecuzione**
+
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione è in esecuzione dentro un container Docker. |
-| **TRAINING_MODE** | `centralized/federated` | Obbligatoria. Seleziona la modalità di addestramento (dataset unico condivisibile o partizionato per-nodo). |
-| **ENV_MODE** | `local/aws` | Obbligatoria. Ambiente di esecuzione (local per Docker/host, aws per Fargate/EC2/S3). |
-| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. |
-| **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se DATASET_TYPE=synthetic. |
-| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per TRAINING_MODE=centralized (ignorata in federated). `shared` (default): ogni worker scarica l'intero dataset. `sharded`: il dataset viene partizionato, ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
+| **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione gira dentro un container Docker. La impostano già gli script (`run_docker.sh`, `run_test.sh`): non serve toccarla a mano, a meno di lanciare `docker compose up` manualmente. |
+| **TRAINING_MODE** | `centralized/federated` | Seleziona la modalità di addestramento. In pratica va sempre impostata esplicitamente: i vari script che la leggono hanno fallback diversi tra loro se assente, con il rischio di far partire componenti in modalità incoerenti. |
+| **ENV_MODE** | `local/aws` | Seleziona l'ambiente di esecuzione: `local` per Docker/host, `aws` per Fargate/EC2/S3 — determina quale storage (locale o S3) e quale orchestrazione infrastrutturale usare. Va sempre impostata esplicitamente, per lo stesso motivo di `TRAINING_MODE`. |
+| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. Se la ometti, gli script di provisioning ricadono su `real` — ma il menu interattivo del client te lo richiede comunque a ogni avvio, quindi impostarla qui serve solo per gli script non interattivi (provisioning, test engine). `real` richiede il dataset scaricato in locale (vedi passo 4 più sotto), `synthetic` no. |
+| **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se `DATASET_TYPE=synthetic`. Ignorata con `DATASET_TYPE=real`. |
+| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per `TRAINING_MODE=centralized` (ignorata in federated). Se la ometti, il sistema usa `shared`: ogni worker scarica l'intero dataset. Con `sharded`, invece, il dataset viene partizionato e ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
+
+**Dimensionamento del cluster (locale/Docker)**
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **NUM_WORKERS** | Numero intero | Quanti worker avviare in locale/Docker (in AWS federated: quanti indici/shard fissi crea Terraform, vedi `terraform/README.md`). Se la ometti, il default varia da uno script all'altro (2 in alcuni casi, 3 in altri): impostala sempre esplicitamente, altrimenti client e provisioning potrebbero ragionare su un numero di worker diverso. |
+| **WORKER_CORES** | Numero intero (opzionale) | Override esplicito di quanti processi/thread paralleli usa UN worker per costruire gli alberi. Se la ometti, il numero è calcolato dinamicamente (core disponibili ÷ worker attivi sulla stessa macchina). Impostarla serve per esperimenti di strong scaling, dove ogni worker deve rappresentare una capacità di calcolo fissa e comparabile, indipendente da quanti altri worker girano in parallelo. **Non va confusa con `WORKER_CPUS`**, che è un limite Docker, non un parametro applicativo. |
+| **WORKER_CPUS** / **ORCHESTRATOR_CPUS** | Numero (es. `1`, `0.5`) | Limite CPU Docker Compose per container worker/orchestrator (evita di saturare la macchina di sviluppo con `NUM_WORKERS` alto). Se le ometti, Docker Compose non applica alcun limite: i container possono usare tutta la CPU disponibile sull'host. |
+| **WORKER_MEM_LIMIT** / **ORCHESTRATOR_MEM_LIMIT** | Es. `2048m` | Limite di memoria Docker Compose per container worker/orchestrator. Stesso discorso di `WORKER_CPUS`: se assenti, nessun limite applicato. |
+| **IMAGE_NAME** | Stringa | Nome:tag dell'immagine Docker locale (es. `rf-worker-local:latest`), usato da `docker-compose.yml` per sapere quale immagine costruire/avviare. |
+| **EC2_ID** | Stringa libera | Etichetta usata solo per comporre il nome interno dell'orchestratore (log, lock di leadership su DynamoDB) — non incide sulla logica applicativa. Se la ometti, il default nel codice è `Locale`; su AWS Terraform la imposta fissa a `EC2Orchestrator`. |
+| **MY_UID** / **MY_GID** | Numero intero | UID/GID mappati dentro i container per i permessi delle cartelle di storage locale. I valori nel template sono solo un punto di partenza: se non li sostituisci con `$(id -u)`/`$(id -g)` del tuo utente (vedi passo 5 sotto) prima della build, rischi errori di permessi sui volumi montati. |
+
+**Supervisor dei worker federati** (restart automatico in caso di crash)
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **FED_SUPERVISOR_MAX_RESTARTS** | Numero intero | Tentativi di restart automatico per worker federato caduto. `0` disabilita del tutto il restart automatico. |
+| **FED_SUPERVISOR_BACKOFF_SECONDS** | Numero intero | Attesa, in secondi, prima del primo tentativo di restart. |
+| **FED_SUPERVISOR_BACKOFF_MAX_SECONDS** | Numero intero | Tetto massimo dell'attesa tra tentativi successivi (il backoff cresce fino a questo valore, poi si ferma). |
+| **FED_WORKER_WAIT_TIMEOUT_SECONDS** | Numero intero | Timeout di attesa per il rientro di un worker sostituito, usato dagli scenari di fault tolerance. Se la ometti, il default nel codice è 60s — troppo poco su AWS reale (un rimpiazzo Fargate misurato empiricamente ha richiesto 81s dal kill alla steady state). Il valore 120 nel template lascia margine sopra quell'osservazione. |
+
+**Partizionamento federato** (solo `TRAINING_MODE=federated`, `DATASET_TYPE=real`)
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. Se la ometti, il default nel codice è `iid` (mescolamento casuale globale). `by_day` partiziona invece per giorno/file di origine — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata). |
+| **DAY_COLUMN** | Stringa (opzionale, solo con `PARTITION_STRATEGY=by_day`) | Nome della colonna da usare per partizionare per giorno. **Non obbligatoria**: se omessa, il sistema usa automaticamente la colonna generata dal loader (`_capture_day`) — `by_day` funziona senza configurarla. Impostarla serve solo per usare una colonna diversa già presente nel dataset. |
+
+**Timeout RPC**
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **RPC_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di training. Se la ometti, il default nel codice è 1800s (30 minuti). |
+| **RPC_INFERENCE_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di inferenza. Se la ometti, il default nel codice è 900s (15 minuti). |
+
+**Sorgenti dati**
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **DATASET_LOCAL_PATH** | Path | Cartella di cache locale per i CSV grezzi del dataset reale. Se la ometti, il default nel codice è `./dataset_cache`. |
+| **DEFAULT_DATASET_S3_URL** | URL S3 | URL S3 pubblico del dataset CICIDS2018 (sorgente esterna, non un bucket del progetto). **Puramente informativa**: nessuno script la legge davvero — il client ha lo stesso URL scritto direttamente nel codice come fallback per il dataset reale in locale. Impostarla o ometterla non cambia il comportamento del sistema; serve solo a chi legge il `.env` per sapere da dove viene il dataset. |
+
+**Risorse AWS** (solo `ENV_MODE=aws` — valori specifici dell'account, non committare quelli reali)
+
+| Variabile | Valori ammessi | Descrizione |
+|---|---|---|
+| **DATASETS_BUCKET_NAME** | Stringa | Nome del bucket S3 dei dataset (valore d'output di `terraform apply`, vedi `terraform/README.md`). Senza questa variabile, gli script AWS (provisioning, upload, test engine) falliscono esplicitamente invece di usare un bucket di default. |
+| **AWS_DEFAULT_REGION** | Es. `us-east-1` | Regione AWS del deploy. Se la ometti, gli script ricadono su `us-east-1`. |
+| **API_GATEWAY_URL** | URL | Endpoint API Gateway esposto dal deploy Terraform — **cambia ad ogni ricreazione dello stack**, va aggiornato dopo ogni `apply`. Se lasci un valore vecchio, il client non fallisce in modo esplicito: parla semplicemente con un endpoint che non esiste più. |
 
 
-### 4. Prepara i permessi delle cartelle dati locali
+### 4. Procurati il dataset reale (solo se `DATASET_TYPE=real`)
+
+Se hai impostato `DATASET_TYPE=synthetic`, salta questo passo: ogni worker genera il proprio dataset sintetico al boot, nessun file va scaricato.
+
+Per `DATASET_TYPE=real` (dataset **CICIDS2018**) il comportamento dipende da cosa stai per lanciare:
+
+- **Training centralizzato tramite il client**: non serve fare nulla in anticipo. Il client passa direttamente l'URL del bucket pubblico S3 (`s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/`), e il loader lo scarica automaticamente con accesso anonimo (nessuna credenziale AWS richiesta) se non trova già i CSV in `dataset_cache/`. **Attenzione**: questo download non viene salvato automaticamente — se lasci `dataset_cache/` vuota, ogni run scarica di nuovo tutto da S3.
+- **Modalità federata (provisioning locale) e baseline locale** (`run_baseline.py`): qui invece i CSV devono essere **già presenti** in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH`) — questi due script non hanno alcun fallback su S3 e falliscono con un errore esplicito se la cartella è vuota o assente.
+
+In entrambi i casi, per evitare di riscaricare da S3 a ogni esecuzione (e per usare la modalità federata/la baseline), conviene popolare `dataset_cache/` una volta sola:
+
+```bash
+mkdir -p dataset_cache
+aws s3 sync "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/" ./dataset_cache --no-sign-request
+```
+
+`--no-sign-request` funziona perché è un bucket pubblico dell'AWS Open Data Registry: non servono credenziali AWS per questo download. Se il comando fallisce, verifica sulla pagina ufficiale del dataset ([registry.opendata.aws](https://registry.opendata.aws/cse-cic-ids2018/)) che il path non sia cambiato.
+
+### 5. Prepara i permessi delle cartelle dati locali
 
 Prima della prima build, assicurati che Docker possa scrivere nelle cartelle di storage locale:
 
@@ -153,10 +227,10 @@ export MY_UID=$(id -u)
 export MY_GID=$(id -g)
 ```
 
-### 5. Build e avvio
+### 6. Build e avvio
 
 **Consigliato: `run_docker.sh` questo script:
-- esegue automaticamente il **provisioning degli shard federati** se `TRAINING_MODE=federated` (senza, l'orchestrator si aspetta shard già presenti e non li genera più a runtime — vedi [provision_local_shards.py](#modalità-di-training-centralizzata-vs-federata));
+- esegue automaticamente il **provisioning degli shard federati** se `TRAINING_MODE=federated` (senza, l'orchestrator si aspetta shard già presenti e non li genera più a runtime — vedi `script_local/provision_local_shards.py`);
 - **azzera il delay di rete di default**: `docker-compose.yml` applica `50ms` di latenza artificiale su ogni worker se la variabile `NET_SCENARIO` non è impostata — `run_docker.sh puro` la neutralizza esplicitamente (`delay 0ms`), `run_docker.sh delay` la usa apertura per introdurre latenza voluta. Un `docker compose up` manuale **non fa questo azzeramento**: i worker partirebbero con 50ms di ritardo artificiale non richiesto;
 - applica i limiti di CPU/RAM da `.env` (`WORKER_CPUS`, `WORKER_MEM_LIMIT`, ecc.), utile per non saturare la macchina di sviluppo con `NUM_WORKERS` alto.
 
@@ -241,7 +315,7 @@ Lo script attende che i Service ECS (worker + orchestrator) siano stabili prima 
 
 ### 6. Fermare/distruggere
 
-Per scalare a zero senza distruggere l'infrastruttura (utile per pause tra sessioni di test), il modo più completo è `script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
+Per scalare a zero senza distruggere l'infrastruttura, il modo più completo è `script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
 
 ```bash
 ./script_aws/teardown.sh
@@ -256,13 +330,13 @@ aws ecs update-service --cluster forest-cluster --service worker-service --desir
 # in modalità federated, ripeti l'ultimo comando per ciascun worker-service-<N>
 ```
 
-Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifica (in sola lettura) che non sia rimasto nulla attivo che continui a fatturare — task Fargate, istanze EC2 dell'orchestrator, NAT Gateway, Load Balancer, Elastic IP non associati:
+Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifica che non sia rimasto nulla attivo che continui a fatturare:
 
 ```bash
 ./script_aws/check_left_over.sh
 ```
 
-Per distruggere tutto (ECS, ECR con l'immagine, EC2/ASG dell'orchestrator, DynamoDB, SQS, Security Group) a fine sessione di valutazione:
+Per distruggere tutto a fine sessione di valutazione:
 
 ```bash
 cd terraform
@@ -291,36 +365,44 @@ aws logs tail /ec2/rf-test-engine --follow --region <REGION>   # segui i log in 
 Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tfvars` per AWS):
 
 - **`centralized`**: dataset unico su S3 (o storage locale), il coordinatore distribuisce la costruzione dei singoli alberi tra i worker. Due sotto-modalità, selezionate da `CENTRALIZED_DATASET_MODE` nel `.env`:
-  - **`shared`** (default): ogni worker scarica l'**intero** dataset — comportamento storico, identico per qualunque `DATASET_TYPE`.
+  - **`shared`** (default): ogni worker scarica l'**intero** dataset: comportamento storico, identico per qualunque `DATASET_TYPE`.
   - **`sharded`**: il dataset viene partizionato e ogni worker scarica solo una fetta, per ridurre il traffico di rete per worker. Il criterio di partizionamento **dipende dal tipo di dataset**, non è lo stesso in entrambi i casi:
     - **Sintetico**: numero di shard = numero di worker rilevati al momento (dinamico, un worker = uno shard).
-    - **Reale**: numero di shard **fisso** (indipendente dal numero di worker, per permettere il riuso degli stessi file tra round di scaling diversi), e ogni worker può ricevere **più shard**, che unisce localmente prima del training — necessario perché con pochi worker attivi un solo shard fisso conterrebbe troppi pochi dati per albero, con impatto misurabile sull'accuratezza (in particolare sul recall, in un task di classificazione con classe minoritaria).
-- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguente variabili nel file `.env`:
+    - **Reale**: numero di shard **fisso** (indipendente dal numero di worker, per permettere il riuso degli stessi file tra round di scaling diversi), e ogni worker può ricevere **più shard**, che unisce localmente prima del training.
+- **`federated`**: il dataset è pre-partizionato (uno shard per nodo, generato con `provision_federated_shards.py` in ambiente AWS). Ogni worker addestra localmente sui propri dati e restituisce solo gli alberi addestrati, mai i dati grezzi. Dovranno essere impostate le seguenti variabili nel file `.env`:
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
 | **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
 
 
-
 La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
 
 ---
 
-## Simulazione/misura della latenza di rete
+## Simulazione e misura della latenza di rete
 
-Il progetto richiede di valutare l'impatto della latenza di rete tra i nodi, usando `tc`/`iproute2` con la capability Linux `CAP_NET_ADMIN` — punto discusso esplicitamente col docente durante il ricevimento sui Sistemi Distribuiti.
+Il progetto richiede di valutare l'impatto della latenza di rete tra i nodi. Abbiamo notato che in locale/Docker la latenza reale tra i container è pressoché nulla (rete bridge), quindi per avere qualcosa di significativo da misurare abbiamo introdotto un ritardo artificiale con `tc`/`iproute2` (capability Linux `CAP_NET_ADMIN`). Su AWS, dove questa strada non è percorribile (vedi sotto), abbiamo adottato un approccio diverso.
 
 Il comportamento cambia in base all'ambiente:
 
 - **Locale/Docker**: viene iniettato un ritardo artificiale reale con `tc netem` su un'interfaccia del container worker (altrimenti la latenza RPC su rete bridge Docker sarebbe pressoché nulla e non ci sarebbe nulla da misurare). La capability è già abilitata nel `docker-compose.yml` (`cap_add: NET_ADMIN`), quindi i comandi `tc` funzionano senza `sudo` dentro i container. Se lanci lo scenario di rete **fuori** da Docker (bare metal), serve invece una regola `NOPASSWD` in `/etc/sudoers` per `tc`, oppure lanciare l'intero engine con `sudo`; in assenza di permessi lo scenario prosegue comunque ma senza applicare un delay reale (stato `SKIPPED_NO_TC_PERMISSIONS`).
-- **AWS/ECS Fargate**: `CAP_NET_ADMIN` **non è disponibile** nei task Fargate, e l'account AWS Academy Learner Lab usato per questo progetto non ha accesso ad AWS Fault Injection Simulator (verificato: `aws fis list-experiment-templates` → `AccessDeniedException`). Di conseguenza su AWS **non viene iniettato alcun ritardo artificiale**: lo scenario diventa invece una *misura* della latenza RPC reale tra i task (leader↔worker, stessa VPC, ENI separate), su più probe consecutivi. Questo valore **non è direttamente comparabile** al delay artificiale impostato in locale — vanno presentati nella relazione come due esperimenti distinti, non come lo stesso esperimento su due ambienti.
+- **AWS/ECS Fargate**: `CAP_NET_ADMIN` **non è disponibile** nei task Fargate, e l'account AWS Academy Learner Lab usato per questo progetto non ha accesso ad AWS Fault Injection Simulator. Di conseguenza su AWS **non viene iniettato alcun ritardo artificiale**: lo scenario diventa invece una *misura* della latenza RPC reale tra i task (leader↔worker, stessa VPC, ENI separate), su più probe consecutivi. Questo valore **non è direttamente comparabile** al delay artificiale impostato in locale — vanno presentati nella relazione come due esperimenti distinti, non come lo stesso esperimento su due ambienti.
 
 ---
 
-## Test di sistema 
+## Test di sistema (performance, scalabilità, fault tolerance)
 
 La validazione e la verifica dell'architettura distribuita sono affidate ad un **Test Engine** automatizzato (`src/testing/engine.py`). L'engine permette di eseguire una suite completa di scenari sia in **ambiente locale** (tramite gli script dedicati) sia su **AWS** (`./script_aws/run_test_engine.sh`), raccogliendo metriche e salvando i report finali.
+
+### Locale/Docker
+
+```bash
+chmod +x script_local/run_test.sh
+./script_local/run_test.sh
+```
+
+Lo script legge `NUM_WORKERS`/`TRAINING_MODE` dal `.env` (provisionando gli shard federati automaticamente se necessario, come `run_docker.sh`), poi avvia il cluster e apre il container `test-engine` in modalità **interattiva**: da lì si sceglie lo scenario da eseguire (menu identico a quello mostrato sotto). Al termine il cluster viene fermato automaticamente. I report finiscono in `test_reports/docker/`.
 
 I test disponibili coprono le seguenti aree operative:
 1. Performance e metriche
@@ -331,11 +413,17 @@ I test disponibili coprono le seguenti aree operative:
 6. Failover dell'orchestratore (durante addestramento)
 7. Failover dell'orchestratore (durante inferenza)
 8. Elezione del leader sotto concorrenza (safety)
-9. Generazione grafici a partire dai report salvati
-10. Sostituzione ASG dell'Orchestratore (solo AWS)
+9. Sostituzione ASG dell'Orchestratore (solo AWS)
+10. Generazione grafici a partire dai report salvati
+
+> **Nota sullo scenario 10**: a differenza degli altri, non esegue training/inferenza — legge e basta i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Selezionando `all`, viene eseguito automaticamente **per ultimo**, dopo tutti gli altri scenari (inclusa la sostituzione ASG). Se lanci gli scenari singolarmente uno alla volta, esegui prima quelli che ti interessano e lancia il `10` solo alla fine. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo, ma per una relazione pulita conviene svuotare la cartella e rilanciare gli scenari desiderati una volta sola, con la stessa configurazione.
+
+### AWS
+
+Vedi [Test engine su AWS](#test-engine-su-aws-istanza-ec2-usa-e-getta) nella sezione precedente: stesso menu di scenari, eseguito su un'istanza EC2 usa-e-getta con `./script_aws/run_test_engine.sh <scenario>`.
 
 
-## Pulizia / teardown
+## Pulizia
 
 **Locale** — pulizia **selettiva**, non totale: svuota `.local_storage/`, `saved_models/`, `workers_cache/` e `test_reports/local/`, ma preserva esplicitamente due cose attraverso il reset:
 

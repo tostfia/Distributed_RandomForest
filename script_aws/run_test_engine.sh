@@ -104,8 +104,8 @@ if [ -z "$SCENARIO_CHOICE" ]; then
   echo "6. Failover dell'Orchestratore (addestramento)"
   echo "7. Failover dell'Orchestratore (inferenza)"
   echo "8. Elezione del Leader sotto Concorrenza (Safety)"
-  echo "9. Genera Grafici"
-  echo "10. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)"
+  echo "9. Sostituzione ASG dell'Orchestratore (infrastruttura, solo AWS)"
+  echo "10. Genera Grafici"
   while true; do
     read -p "Scelta (1-10, o 'all' per eseguire tutti): " SCENARIO_CHOICE
     SCENARIO_CHOICE="$(echo "$SCENARIO_CHOICE" | tr '[:upper:]' '[:lower:]' | xargs)"
@@ -179,7 +179,7 @@ ORCH_RUNNING=$(aws ec2 describe-instances --region "$REGION" \
   --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null || echo "")
 ORCH_COUNT=$(echo "$ORCH_RUNNING" | wc -w)
 if [ "$ORCH_COUNT" -eq 0 ]; then
-  echo "    [ATTENZIONE] Nessuna istanza EC2 dell'orchestrator RUNNING. Gli scenari 6/7/10"
+  echo "    [ATTENZIONE] Nessuna istanza EC2 dell'orchestrator RUNNING. Gli scenari 6/7/9"
   echo "                 (failover/sostituzione ASG) falliranno; gli altri scenari non ne"
   echo "                 hanno bisogno (orchestratore in-process)."
 else
