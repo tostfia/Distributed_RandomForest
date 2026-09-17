@@ -725,7 +725,10 @@ def run_baseline():
             # scalabilità con la baseline single-node (unico scopo di questo
             # dataset -- non serve massimizzare l'accuratezza del modello).
             n_samples = tmp_cfg.get("n_samples", 1_000_000)
-            # n_features=50 con Friedman #1: 5 informative + 5 redundant + 40 noise, per un SNR ≈ 10:1
+            # n_features: numero di feature del dataset sintetico Friedman #1
+            # (solo le prime 5 sono informative, generano il target; le restanti
+            # agiscono da rumore puro -- make_friedman1 non supporta feature
+            # "ridondanti" come make_classification).
             n_features = tmp_cfg.get("n_features", 50)
         else:
             n_features = tmp_cfg.get("n_features", 30)
@@ -734,12 +737,10 @@ def run_baseline():
             # baseline generava un dataset 1.67x più grande di quello del
             # cluster, e i tempi di addestramento non erano confrontabili.
             n_samples = tmp_cfg.get("n_samples", 300000)
-        # noise=0.5: calibrato sulla deviazione standard EMPIRICA del target
-        # "pulito" di Friedman #1 (misurata: std≈4.87, costante al variare di
-        # n_features perché dipende solo dalle 5 feature informative fisse),
-        # per un SNR ≈ 10:1 (rumore ≈ 10% della variabilità naturale del
-        # target) -- livello moderato, coerente con la pratica comune per
-        # dataset sintetici "non banali ma non dominati dal rumore".
+        # noise=2.5: livello di rumore gaussiano aggiunto al target di Friedman #1
+        # (deviazione standard EMPIRICA del target "pulito" ≈ 4.87, quindi
+        # noise=2.5 corrisponde a un SNR ≈ 2:1 -- rumore significativo ma non
+        # dominante rispetto alla variabilità naturale del target).
         noise = tmp_cfg.get("noise", 2.5)
         n_informative = tmp_cfg.get("n_informative", int(n_features * 0.35))
         n_redundant = tmp_cfg.get("n_redundant", 5)
