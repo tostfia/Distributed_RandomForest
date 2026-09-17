@@ -167,7 +167,7 @@ cp .env.example .env
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
 | **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
-| **DAY_COLUMN** | Stringa (solo se `PARTITION_STRATEGY=by_day`) | Nome della colonna usata per partizionare per giorno. |
+| **DAY_COLUMN** | Stringa (opzionale, solo con `PARTITION_STRATEGY=by_day`) | Nome della colonna da usare per partizionare per giorno. **Non obbligatoria**: se omessa, il sistema usa automaticamente la colonna generata dal loader (`_capture_day`) — `by_day` funziona senza configurarla. Impostarla serve solo per usare una colonna diversa già presente nel dataset. |
 
 **Timeout RPC**
 
