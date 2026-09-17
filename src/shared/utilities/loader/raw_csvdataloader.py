@@ -19,7 +19,7 @@ from src.dataset.dataset_dao import AwsS3DAO, LocalFileSystemDAO
 # sorgente. Non è una feature del traffico: va sempre esclusa dal training
 # (stesso trattamento delle colonne di metadata in CICIDSPreprocessor) e
 # serve solo per (a) il campionamento ribilanciato per giorno e (b) lo
-# split day-aware diagnostico (vedi dayaware_holdout.py). Prefissata con
+# split day-aware diagnostico (vedi diagnose_false_negative.py). Prefissata con
 # underscore per distinguerla a colpo d'occhio dalle feature vere.
 SOURCE_DAY_COLUMN = "_capture_day"
 
@@ -117,12 +117,13 @@ class RawCSVDataLoader(DatasetLoader):
 
     TAGGING DEL GIORNO DI CATTURA (tag_source_day) -- se True, aggiunge la
     colonna SOURCE_DAY_COLUMN ad ogni riga con il giorno di provenienza.
-    Necessario per lo split day-aware diagnostico (dayaware_holdout.py) a
-    valle del caricamento. La colonna NON è una feature: va rimossa prima
-    di qualunque fit/training (fatto esplicitamente in dayaware_holdout.py
-    e, per sicurezza, va comunque intercettata da CICIDSPreprocessor come le
-    altre colonne di metadata se dovesse sopravvivere fino a quel punto —
-    vedi nota nel modulo dayaware_holdout).
+    Usato dalla diagnostica per giorno/sotto-tipo (vedi
+    diagnose_false_negative.py) a valle del caricamento. La colonna NON è
+    una feature: va rimossa prima di qualunque fit/training (fatto
+    esplicitamente da chi la consuma), e va comunque intercettata da
+    CICIDSPreprocessor come le altre colonne di metadata se dovesse
+    sopravvivere fino a quel punto.
+    
     """
 
     ROW_COUNT_CACHE_PATH = os.path.join("./.local_storage", "row_counts_cache.json")
@@ -435,8 +436,9 @@ class RawCSVDataLoader(DatasetLoader):
             # più una lista di esclusione diversa (rischio di disallineamento
             # silenzioso tra le due). Rimossa: la tipizzazione numerica resta
             # un'unica responsabilità del preprocessor (chiamato sempre
-            # dopo, sia in run_baseline.py sia in dayaware_holdout.py),
-            # invece che duplicata qui. Il DataFrame restituito da questo
+            # dopo, sia in run_baseline.py sia dagli script diagnostici che
+            # riusano questo loader), invece che duplicata qui. Il DataFrame
+            # restituito da questo
             # loader può quindi contenere colonne ancora di tipo object/
             # stringa grezza: chi lo consuma direttamente (senza passare da
             # CICIDSPreprocessor) deve convertire esplicitamente prima del

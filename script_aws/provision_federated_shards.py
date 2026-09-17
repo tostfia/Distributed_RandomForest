@@ -130,7 +130,7 @@ def provision(num_workers: int, data_folder: str, bucket: str, force: bool = Fal
             Body=json.dumps(manifest, indent=2),
         )
         print(f"[PROVISIONING] Manifesto caricato su s3://{bucket}/federated_shards/_manifest.json "
-              f"(letto dal client per popolare automaticamente partition_strategy/alpha "
+              f"(letto dal client per popolare automaticamente partition_strategy "
               f"nella richiesta di training).")
 
     _upload_feature_config_manifests(s3_client, bucket)

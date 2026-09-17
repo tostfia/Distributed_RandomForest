@@ -234,9 +234,7 @@ class FaultToleranceScenario(BaseTestScenario):
             "trees_built": num_trees,
             "duration_seconds": round(duration, 2),
             # Se False, il guasto è stato annullato (job finito prima del
-            # kill_delay) o il thread non ha fatto in tempo a confermarlo:
-            # uno "status": "SUCCESS" con questo a False NON ha davvero
-            # testato la tolleranza ai guasti, va scartato dal confronto.
+            # kill_delay) o il thread non ha fatto in tempo a confermarlo
             "fault_actually_triggered": fault_triggered["value"],
         }
 

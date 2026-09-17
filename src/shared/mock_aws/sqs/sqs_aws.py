@@ -34,7 +34,7 @@ class AwsSQSQueue(SQSQueueInterface):
             except ClientError as e:
                 raise RuntimeError(
                     f"[AWS SQS] Coda '{queue_name}' non trovata su AWS. "
-                    f"Va creata (vedi setup_aws_resources.py) prima di avviare il sistema con ENV_MODE=aws."
+                    f"Va creata (vedi terraform/sqs.tf) prima di avviare il sistema con ENV_MODE=aws."
                 ) from e
             self._queue_url_cache[queue_name] = response["QueueUrl"]
         return self._queue_url_cache[queue_name]

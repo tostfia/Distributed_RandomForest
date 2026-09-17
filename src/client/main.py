@@ -304,7 +304,7 @@ def handle_inference():
         hp_obj = Hyperparameters(n_estimators=100, tree_type=tree_type)
 
     # Recupero indipendente (non legato a come hp_obj è stato risolto sopra)
-    # della strategia/alpha di partizionamento usati per il TRAINING di questo
+    # della strategia di partizionamento usati per il TRAINING di questo
     # job, per taggare coerentemente le metriche di inferenza. Il server
     # (state_manager.get_job_details) potrebbe non conservare questi campi
     # per job più vecchi: lo storico locale resta il fallback più affidabile.
@@ -510,7 +510,7 @@ def _read_partitioning_manifest(environment: str):
     generare gli shard su disco/S3 -- unica fonte di verità, non più
     dichiarata a mano dall'utente.
 
-    Ritorna un dict con partition_strategy/alpha/day_column/num_workers, o
+    Ritorna un dict con partition_strategy/day_column/num_workers, o
     None se il manifesto non è ancora stato scritto (provisioning non
     ancora eseguito, o dataset sintetico che non ne produce uno).
     """
