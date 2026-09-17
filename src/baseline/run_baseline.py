@@ -99,13 +99,28 @@ from src.shared.utilities.featureselection import CICIDSFeatureSelector
 
 REGRESSOR_DEFAULT_HP = {
     # Tutti i valori sotto sono i DEFAULT ufficiali di
-    # sklearn.ensemble.RandomForestRegressor (scikit-learn 1.6.1) --
-    # nessuno scelto da noi, tranne max_features (vedi commento dedicato).
+    # sklearn.ensemble.RandomForestRegressor (scikit-learn 1.6.1),
+    # tranne max_samples e max_features (vedi commenti dedicati sotto).
     "max_depth": None,
     "min_samples_split": 2,
     "criterion": "squared_error",
     "bootstrap": True,
-    "max_samples": 0.3,  # None = bootstrap sample_size = n_samples (default sklearn)
+    # max_samples=0.3 (NON il default sklearn, che sarebbe None = intero
+    # training set): stessa leva usata nel tuning del classificatore
+    # (vedi optuna_oob_hyperparameter_search) per abbassare rho_bar, la
+    # correlazione media tra gli alberi della foresta (Breiman 2001, Sec.
+    # 2.3), campioni bootstrap più piccoli e meno sovrapposti tra loro
+    # producono alberi più decorrelati, a parità di tutto il resto. Sul
+    # dataset sintetico (1.000.000 di righe) riduce anche il tempo di fit
+    # per albero. Valore tenuto allineato a quello del classificatore per
+    # coerenza, non ricavato da un tuning dedicato sul regressore.
+    "max_samples": 0.3,
+    # max_features=1/3 (NON il default sklearn, che sarebbe 1.0 = tutte le
+    # feature ad ogni split): regola empirica classica per la regressione
+    # (Breiman 2001; Hastie, Tibshirani, Friedman, "The Elements of
+    # Statistical Learning", Sec. 15.3, m ≈ p/3 per la regressione,
+    # contro m ≈ sqrt(p) usato per la classificazione), la stessa
+    # convenzione già applicata nella griglia di tuning del classificatore.
     "max_features": 1 / 3,
 }
 
