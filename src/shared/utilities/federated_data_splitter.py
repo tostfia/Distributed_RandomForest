@@ -11,7 +11,24 @@ VALID_PARTITION_STRATEGIES = ("iid","by_day")
 
 
 class FederatedDataSplitter:
+    """
+    Esegue il provisioning OFFLINE degli shard per il training federato: dato
+    un DatasetLoader, genera lo split train/test globale (stratificato) e poi
+    partiziona il train tra i worker secondo una strategia di sharding,
+    scrivendo il risultato su filesystem locale o S3 (mai a runtime durante
+    un job — vedi script_local/provision_local_shards.py e
+    script_aws/provision_federated_shards.py, che sono gli unici chiamanti).
 
+    Strategie supportate:
+      - 'iid' (default): mescolamento globale casuale, chunk di dimensione
+        uguale per ciascun worker, ogni worker vede una porzione
+        rappresentativa dell'intero dataset;
+      - 'by_day': partizionamento "naturale" per file/giorno di cattura di
+        origine, senza mescolamento, ogni worker riceve interi giorni,
+        preservando l'eterogeneità del traffico reale tra un giorno e
+        l'altro invece di distruggerla con uno shuffle globale. Usata per
+        simulare uno scenario federato realisticamente non-IID.
+    """
     def __init__(self, target_column="Label", test_size=0.20, random_state=123):
         self.target_column = target_column
         self.random_state = random_state

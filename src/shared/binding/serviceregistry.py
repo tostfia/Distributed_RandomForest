@@ -8,6 +8,20 @@ from src.shared.config import SystemConfig
 cfg = SystemConfig()
 
 class ServiceRegistry:
+    """
+    Registro dei nodi vivi del cluster (worker e orchestrator), basato su
+    DynamoDB (o il suo mock locale). Ogni nodo si registra all'avvio e invia
+    un heartbeat periodico con timestamp; un nodo è considerato "disponibile"
+    solo se il suo ultimo heartbeat è più recente di WORKER_HEARTBEAT_TIMEOUT
+    secondi — questo è il meccanismo con cui l'orchestrator scopre quali
+    worker può usare per un round di training/inferenza, e con cui rileva un
+    worker caduto (heartbeat scaduto, non un crash "annunciato").
+
+    Non gestisce l'assegnazione del lavoro né il failover: si limita a dire
+    "chi è vivo ora", lasciando alle classi Orchestrator la logica di cosa
+    fare con quell'informazione (redistribuire un task, attendere un worker
+    federato specifico, ecc.).
+    """
     WORKERS_TABLE = 'workers_registry'
     ORCHESTRATORS_TABLE = 'orchestrators_registry'
     TIME_OUT_SECONDS = int(os.environ.get("WORKER_HEARTBEAT_TIMEOUT", 120))

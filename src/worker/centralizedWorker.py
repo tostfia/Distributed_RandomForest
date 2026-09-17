@@ -7,7 +7,15 @@ from src.worker.BaseWorker import BaseWorker
 
 class CentralizedWorker(BaseWorker):
     
-    """Worker per la gestione dell'addestramento in modalità centralizzata."""
+    """
+    Worker per la modalità centralizzata: non possiede dati propri, li
+    scarica (o li trova già in cache locale, se non sono cambiati rispetto
+    all'ultimo job) dallo storage condiviso indicato dall'orchestrator ad ogni
+    richiesta di training/inferenza. Tutti i worker sono quindi anonimi e
+    intercambiabili: in caso di guasto, un chunk di alberi può essere
+    riassegnato a un worker qualunque già connesso, perché tutti hanno
+    accesso allo stesso dataset.
+    """
 
     def __init__(
         self,

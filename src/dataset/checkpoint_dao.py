@@ -1,24 +1,3 @@
-"""
-CheckpointDAO
-=============
-
-Astrae la persistenza di oggetti Python serializzati (alberi parziali,
-modello globale RandomForest, chunk di inferenza) in modo che il codice
-degli Orchestratori non debba mai sapere se sta scrivendo su disco locale
-o su S3.
-
-Con questo DAO, chi chiama scrive semplicemente:
-
-    dao = CheckpointDAOFactory.get_dao(self.environment)
-    dao.save(path, obj)
-    obj = dao.load(path)          # solleva FileNotFoundError se assente
-    dao.exists(path)
-    dao.delete(path)
-
-e il path (locale o "s3://...") viene risolto correttamente in entrambi
-i casi.
-"""
-
 import json
 import os
 import pickle
@@ -28,7 +7,34 @@ from botocore.exceptions import ClientError
 
 
 class CheckpointDAO(ABC):
-    """Interfaccia comune per la persistenza dei checkpoint."""
+    """
+    Interfaccia comune per la persistenza di oggetti Python serializzati 
+    (alberi parziali, manifesti del modello, checkpoint di stato) su storage condiviso.
+
+    Astrae l'ambiente di esecuzione: orchestrator e worker non devono mai 
+    sapere se stanno lavorando su disco locale o su S3. I metodi lavorano 
+    con un unico path testuale ("./..." in locale, "s3://..." su AWS).
+
+    USO TRAMITE FACTORY:
+        dao = CheckpointDAOFactory.get_dao(self.environment)
+        dao.save(path, obj)
+        obj = dao.load(path)          # solleva FileNotFoundError se assente
+        dao.exists(path)
+        dao.delete(path)
+
+    ---
+    IMPLEMENTAZIONI CONCRETE
+
+      - LocalCheckpointDAO: 
+        Scrive su file system locale. Garantisce scritture quasi-atomiche 
+        (file temporaneo + rename `os.replace`), assicurando che un crash 
+        a metà scrittura non lasci mai un checkpoint corrotto/troncato sul disco.
+
+      - S3CheckpointDAO: 
+        Scrive su bucket AWS S3. Mappa internamente le eccezioni native 
+        di boto3 (es. NoSuchKey, 404) in un classico `FileNotFoundError`, 
+        offrendo ai chiamanti un contratto di errore identico in entrambi gli ambienti.
+    """
 
     @abstractmethod
     def save(self, path: str, obj) -> None:

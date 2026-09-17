@@ -164,6 +164,39 @@ class MessageOwnershipLostError(Exception):
 
 
 class BaseOrchestrator(ABC):
+
+    """
+    Classe base per il coordinatore (master) dell'architettura master-worker.
+
+    Ruolo nel sistema: implementa tutto ciò che è comune alle due strategie di
+    distribuzione (centralizzata e federata) e che riguarda il ciclo di vita di
+    un job, indipendentemente da come gli alberi vengono effettivamente costruiti:
+      - leader election tra più istanze orchestrator (lock su DynamoDB/mock
+        locale, con heartbeat periodico e recovery automatico in caso di crash
+        del leader);
+      - consumo della coda SQS (o mock locale) dei job di training/inferenza,
+        con gestione dell'ownership del messaggio (visibility timeout) e della
+        job lease;
+      - checkpointing incrementale della foresta parziale su storage condiviso
+        (locale o S3), organizzato "a parti" per poter riprendere un job
+        interrotto senza dover ricostruire l'intera foresta in RAM;
+      - aggregazione delle predizioni per-albero in un'unica predizione finale
+        (soft voting per la classificazione, media per la regressione) e
+        calcolo delle metriche di valutazione.
+
+    Le sottoclassi (CentralizedOrchestrator, FederatedOrchestrator) implementano
+    solo la parte specifica della strategia di distribuzione:
+      - _execute_training_step: come vengono distribuiti/assegnati gli alberi
+        ai worker per un singolo round di training;
+      - _execute_inference_step: come viene distribuita l'inferenza tra i worker.
+
+    Fault tolerance: ogni job possiede una "lease" con TTL (tabella JobLocks)
+    che l'orchestrator che lo gestisce deve rinnovare periodicamente; se il
+    leader muore, un altro orchestrator (o una nuova istanza, subentrata dopo
+    un riavvio) può reclamare la lease scaduta e riprendere il job dal
+    checkpoint più recente (vedi _perform_active_recovery), senza ripartire
+    da zero.
+    """
     def __init__(self, orchestrator_name: str, queue_name: str):
         self.cfg = SystemConfig()
         self.environment = self.cfg.env

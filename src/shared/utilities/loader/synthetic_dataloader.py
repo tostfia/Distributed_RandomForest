@@ -11,33 +11,50 @@ RANDOM_SEED = 123
 
 class SyntheticDataLoader(DatasetLoader):
     """
-    Generatore di dataset sintetico tramite sklearn.
+    Generatore di dataset sintetico tramite scikit-learn.
 
-    Supporta due task distinti, selezionabili tramite il parametro `task`:
-    - "classification" (default): usa make_classification.
-    - "regression": usa make_friedman1.
+    Usato sia per il task "controllato" di classificazione (richiesto dalla
+    traccia per valutare la scalabilità a dimensione nota), sia per quello 
+    di regressione. 
 
-    REGRESSIONE -- perché make_friedman1 e non make_regression: la traccia
-    del progetto chiede genericamente "i generatori di scikit-learn" (nota a
-    piè di pagina alla pagina generale dei sample generator, non a una
-    funzione specifica) per il task sintetico. make_friedman1 (Friedman 1991,
-    "Multivariate adaptive regression splines"; Breiman 1996, "Bagging
-    predictors" -- lo stesso lavoro di Breiman già citato nella
-    bibliografia del progetto) genera un problema NON lineare
-    (y = 10·sin(π·X0·X1) + 20·(X2−0.5)² + 10·X3 + 5·X4 + noise·N(0,1)):
-    a differenza di make_regression (default: relazione lineare, dove una
-    Random Forest è in un certo senso "overkill"), qui l'interazione
-    (sin(X0·X1)) e il termine quadratico non sono catturabili da un modello
-    lineare -- motiva meglio la scelta di un ensemble di alberi. Le feature
-    informative sono sempre esattamente 5 (X0..X4); tutte le altre
-    (n_features - 5) sono rumore puro per costruzione, indipendenti dal
-    target -- stessa proprietà "segnale/rumore noto a priori" già sfruttata
-    altrove nel progetto (nessuna feature selection necessaria sul
-    sintetico).
+    Legge i parametri di generazione (n_samples, n_features, ecc.) dal
+    manifesto della baseline (config_synthetic.json) se non passati 
+    esplicitamente. In questo modo la stessa identica ricetta di dataset 
+    può essere riprodotta sia dalla baseline locale sia dai worker 
+    distribuiti (centralizzati o federati, questi ultimi con un offset 
+    di seed per worker per ottenere shard diversi ma dallo stesso spazio 
+    campionario).
 
-    Restituisce un DataFrame già coerente con la pipeline:
-    - feature numeriche;
-    - colonna target (Label binaria 0/1 per la classificazione, valore continuo per la regressione).
+    Restituisce un DataFrame già coerente con la pipeline: feature numeriche
+    e una colonna target (binaria 0/1 per classificazione, continua per regressione).
+
+    ---
+    DETTAGLI E SCELTE IMPLEMENTATIVE
+
+    Supporta due task distinti:
+    - "classification" (default): usa `make_classification`.
+    - "regression": usa `make_friedman1`.
+
+    PERCHÉ MAKE_FRIEDMAN1 PER LA REGRESSIONE?
+    La traccia del progetto chiede genericamente di usare "i generatori 
+    di scikit-learn" (pagina generale, non una funzione specifica). 
+    Si è scelto `make_friedman1` (Friedman 1991; Breiman 1996, "Bagging 
+    predictors" — stesso lavoro citato nel progetto) invece del classico 
+    `make_regression` perché quest'ultimo genera relazioni puramente lineari, 
+    dove una Random Forest risulta quasi sprecata ("overkill"). 
+    
+    Friedman #1 genera invece un problema NON lineare:
+    y = 10·sin(π·X0·X1) + 20·(X2−0.5)² + 10·X3 + 5·X4 + noise·N(0,1)
+    
+    L'interazione (sin(X0·X1)) e il termine quadratico non sono catturabili 
+    da un modello lineare, motivando in modo forte e naturale la scelta di un 
+    ensemble di alberi. 
+    
+    Inoltre, per costruzione, le feature informative di Friedman #1 sono 
+    SEMPRE esattamente 5 (X0..X4). Tutte le restanti (n_features - 5) sono 
+    rumore puro introdotto per testare la robustezza del modello, indipendenti 
+    dal target. Questa proprietà ("segnale/rumore noto a priori") giustifica 
+    il fatto che sul dataset sintetico non sia necessaria alcuna feature selection.
     """
 
     def __init__(
