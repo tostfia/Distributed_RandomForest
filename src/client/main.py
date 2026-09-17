@@ -86,8 +86,9 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
                     "max_features", "criterion"}
     hp_data = {k: v for k, v in raw_hp.items() if k in known_fields}
     if mode == "federated":
-        hp_data["bootstrap"] = False
-        hp_data["max_samples"] = 1.0
+        #hp_data["bootstrap"] = False
+       
+       # hp_data["max_samples"] = 1.0
         hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
 
     # n_samples/n_features/noise/n_informative_reg vivono a livello RADICE
