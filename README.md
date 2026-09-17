@@ -11,7 +11,7 @@ Due modalità di training, selezionabili con `TRAINING_MODE`:
 
 Le prestazioni vengono valutate confrontando il sistema con una baseline locale non distribuita (accuratezza e tempo di esecuzione, sia in training sia in inferenza) su più task di predizione, uno dei quali su dati sintetici generati con scikit-learn.
 
-Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
+Sono supportati tre ambienti di esecuzione:
 
 | Ambiente | Come si avvia | Differenze |
 |---|---|---|
@@ -92,7 +92,7 @@ Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
  
 ```
 
-> Le cartelle `outputs_baseline/`, `dataset_cache/`, `synthetic/`, `saved_models/`, `workers_cache/`, `test_reports/` sono in gran parte popolate a runtime (modelli, cache, report).
+> Le cartelle `outputs_baseline/`, `dataset_cache/`, `synthetic/`, `saved_models/`, `workers_cache/`, `test_reports/` sono in gran parte popolate a runtime.
 
 ---
 
