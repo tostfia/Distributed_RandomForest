@@ -663,7 +663,7 @@ class PlotGenerator:
         sopra gli assi. Tenerli su due livelli distinti evita la sovrapposizione
         che si ottiene mettendo suptitle e ax.set_title alla stessa altezza.
         """
-        fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02, wrap=True)
         ax.set_title(subtitle, fontsize=10.5, color="#595959", fontweight="normal", pad=12)
 
     @staticmethod
@@ -1473,7 +1473,7 @@ class PlotGenerator:
             self._skip(f"{name} ({suffix})", "nessun valore di throughput di addestramento valido nei report")
             return
 
-        fig, ax = plt.subplots(figsize=(7.0, 5.4))
+        fig, ax = plt.subplots(figsize=(9.6, 6.0))
 
         values = np.array([v if v is not None else 0.0 for v in train], dtype=float)
         ax.plot(
@@ -1529,7 +1529,6 @@ class PlotGenerator:
                 color="#404040",
             )
 
-        ax.set_title("Addestramento", fontsize=13)
         ax.set_xlabel("Numero di worker")
         ax.set_ylabel("Throughput (alberi / secondo)")
         self._log_axis(ax, "x", ticks=workers)
@@ -1551,7 +1550,7 @@ class PlotGenerator:
         if trees:
             subtitle += f" - carico fisso di {trees} alberi"
         title = self._title_with_variant("Throughput addestramento del sistema distribuito", run)
-        fig.suptitle(f"{title} - {subtitle}", fontsize=14, fontweight="bold", y=1.0)
+        self._titles(fig, ax, title, subtitle)
 
         note = "Throughput misurato a carico fisso: cresce con i worker fintanto che la parte parallela domina il tempo totale."
         self._footnote(fig, note + " " + self._provenance(run))
