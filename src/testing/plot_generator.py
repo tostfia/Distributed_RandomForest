@@ -1152,31 +1152,31 @@ class PlotGenerator:
 
         fig, ax = plt.subplots(figsize=(9.6, 6.0))
 
-        # Curva "soli alberi": solo se realmente strumentata. Se
-        # 'training_only_instrumented' e' False il valore e' un placeholder pari
-        # al totale (vedi ScalabilityScenario) e disegnarlo sarebbe fuorviante.
-        only = [p["train_only"] for p in series]
-        instrumented = all(p["instrumented"] for p in series)
-        only_drawn = instrumented and all(v is not None for v in only)
+        # Curva principale: tempo TOTALE misurato (training end-to-end,
+        # ETL+alberi+aggregazione inclusi) - l'unica metrica omogenea con la
+        # baseline T_1node, che a sua volta e' un tempo totale. La precedente
+        # curva "solo costruzione alberi" (training_only_seconds) escludeva
+        # l'ETL e produceva uno speedup apparente non realmente confrontabile
+        # con la baseline (vedi nota metodologica in Sezione 8.2 della
+        # relazione): rimossa dal grafico per lo stesso motivo.
         plotted_values = []
-        if only_drawn:
-            only_arr = np.array(only, dtype=float)
-            ax.plot(workers, only_arr, marker="s", markersize=7,
+        if all(v is not None and v > 0 for v in totals):
+            ax.plot(workers, totals, marker="s", markersize=7,
                     linewidth=2.4, color=PALETTE["secondary"],
-                    label="Costruzione degli alberi (misurata)", zorder=4)
+                    label="Tempo totale di addestramento (misurato)", zorder=4)
 
             # Retta ideale in stile HPC: scaling lineare a partire dal primo
             # punto misurato (T proporzionale a 1/N). In scala log-log e' una
             # retta, cosi' lo scostamento dall'ideale si legge come distanza
             # verticale costante, non come curva che si appiattisce.
-            ideal = only_arr[0] * (workers[0] / workers)
+            ideal = totals[0] * (workers[0] / workers)
             ax.plot(workers, ideal, linestyle="--", linewidth=1.7,
                     color=PALETTE["neutral"], label="Scaling ideale (lineare)", zorder=2)
-            plotted_values.extend(only_arr.tolist())
+            plotted_values.extend(totals.tolist())
             plotted_values.extend(ideal.tolist())
         else:
-            print("[WARN] 'training_only_seconds' non strumentato (o assente) per almeno una "
-                  "configurazione: ometto la curva della sola costruzione degli alberi.")
+            print("[WARN] 'total' non disponibile per almeno una configurazione: "
+                  "ometto la curva di strong scaling.")
 
         # Riferimento della baseline locale multicore (T_1node). Preso dal
         # JSON 'baseline_tempi_locali_<N>_alberi.json' che corrisponde al
@@ -1221,9 +1221,9 @@ class PlotGenerator:
         self._titles(fig, ax, title, subtitle)
         self._footnote(fig, "Assi log-log: la retta ideale rappresenta uno scaling lineare "
                             "perfetto a partire dalla configurazione piu' piccola misurata. "
-                            "Il divario verticale dalla curva misurata e' l'overhead "
-                            "distribuito: parte seriale (ETL, aggregazione, OOB) piu' costo "
-                            "di comunicazione RPC. " + self._provenance(run))
+                            "La curva misurata e' il tempo totale di addestramento "
+                            "(ETL, costruzione alberi e aggregazione inclusi), omogeneo con "
+                            "il riferimento T_1node della baseline. " + self._provenance(run))
         self._save(fig, f"sdcc_01_strong_scaling_{suffix}.png")
 
     def _trees_per_scale(self, run=None):
@@ -1502,20 +1502,13 @@ class PlotGenerator:
             )
             plotted_values.extend(ideal.tolist())
 
-        only = [p.get("throughput_train_only") for p in series]
-        if all(p.get("instrumented", False) for p in series) and any(v for v in only if v):
-            only_vals = [v or 0.0 for v in only]
-            ax.plot(
-                workers,
-                only_vals,
-                marker="D",
-                markersize=7,
-                linewidth=2.2,
-                color=PALETTE["secondary"],
-                zorder=4,
-                label="Soli alberi (al netto dell'overhead)",
-            )
-            plotted_values.extend([v for v in only_vals if v])
+        # NOTA METODOLOGICA (rimosso volutamente): la curva "soli alberi al
+        # netto dell'overhead" (throughput_train_only) confrontava un tempo
+        # che esclude l'ETL con una baseline il cui tempo totale lo include,
+        # producendo speedup apparenti superlineari non realmente confrontabili
+        # con la baseline monolitica. Il grafico mostra ora solo il throughput
+        # misurato end-to-end (values sopra), l'unica metrica omogenea con il
+        # tempo totale della baseline.
 
         for xi, v in zip(workers, values):
             ax.annotate(
