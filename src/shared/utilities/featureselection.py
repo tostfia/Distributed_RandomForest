@@ -13,41 +13,33 @@ except ImportError:
 
 class CICIDSFeatureSelector:
     """
-    Feature selector per CIC-IDS2018.
+    Feature selector usato dalla baseline (run_baseline.py) e riusato "in sola
+    lettura" dal training distribuito (BaseOrchestrator.read_selected_features_from_config):
+    la selezione delle feature avviene UNA sola volta, qui, e viene poi applicata 
+    identica sia al modello locale sia a quello distribuito, mantenendo valido il confronto.
 
-    Criterio primario: OOB permutation importance, fedele a Breiman (2001),
-    Section 10 ("Exploring the random forest mechanism"). Si addestra una
-    foresta preliminare, e per ciascun albero si permuta una feature alla
-    volta SOLO sui suoi campioni out-of-bag, misurando l'aumento percentuale
-    del tasso di errore rispetto al baseline OOB (con tutte le feature
-    intatte) — esattamente la metrica di Figure 4-6 del paper. Cattura anche
-    importanza non-lineare e di interazione, perché usa il modello stesso
-    (e i suoi OOB, non un validation set esterno) come strumento di misura —
-    a differenza di un filtro per correlazione lineare, che scarterebbe
-    feature predittive solo per interazione o non linearmente.
+    USO:
+    - fit(train_df): calcola le colonne da scartare.
+    - transform(df): le scarta su qualunque split (train/test/val).
+    - fit_transform(train_df): esegue entrambe in sequenza.
 
-    LIMITE NOTO di questo criterio da solo, e SECONDO criterio che lo
-    completa (riduzione della multicollinearità, opzionale, vedi
-    reduce_multicollinearity=True): la permutation importance misura
-    l'effetto di rimuovere UNA feature alla volta. Se due feature sono
-    fortemente ridondanti tra loro (es. entrambe misure quasi equivalenti
-    della durata/tempistica di un flusso), rimuoverne una singolarmente ha
-    un impatto quasi nullo sull'errore OOB — perché l'altra "copre" per
-    lei — quindi la permutation importance le giudica ENTRAMBE importanti e
-    le tiene entrambe, anche se una delle due è ridondante. Questo è un
-    limite esplicitamente documentato dalla stessa scikit-learn:
-        "Permutation Importance with Multicollinear or Correlated Features"
-        https://scikit-learn.org/stable/auto_examples/inspection/plot_permutation_importance_multicollinear.html
-        (The scikit-learn developers, BSD-3-Clause)
-        "When features are collinear, permuting one feature has little
-        effect on the model's performance because it can get the same
-        information from a correlated feature."
-    La ridondanza tra feature altamente correlate contribuisce anche alla
-    correlazione ρ tra gli alberi della foresta finale (Breiman 2001, Sec.
-    2): alberi diversi, allenati su bootstrap sample diversi, convergono
-    comunque sugli stessi split "quasi equivalenti" pescando da un cluster
-    di feature ridondanti, producendo alberi più simili tra loro di quanto
-    servirebbe.
+    ---
+    CRITERIO PRIMARIO: OOB Permutation Importance
+    Fedele a Breiman (2001, Sez. 10). Per ogni albero di una foresta preliminare 
+    si permuta una feature alla volta sui suoi campioni out-of-bag (OOB), misurando 
+    l'aumento di errore. Cattura importanza non-lineare e di interazione usando il 
+    modello stesso come strumento di misura, senza bisogno di un validation set esterno.
+
+    CRITERIO SECONDARIO: Riduzione Multicollinearità (Opzionale)
+    LIMITE NOTO del primo criterio: se due feature sono fortemente ridondanti tra loro 
+    (es. due misure equivalenti del tempo), rimuoverne UNA singolarmente non peggiora 
+    l'errore perché l'altra "copre" per lei. Quindi la permutation importance le terrebbe 
+    entrambe. Questo limite è documentato qui:
+    https://scikit-learn.org/stable/auto_examples/inspection/plot_permutation_importance_multicollinear.html
+
+    Per compensare (con reduce_multicollinearity=True), si applica un clustering gerarchico 
+    sulla correlazione di Spearman delle feature sopravvissute. Per ogni cluster di feature 
+    ridondanti, si tiene solo quella con importanza OOB più alta.
     """
 
     def __init__(

@@ -59,71 +59,44 @@ def _extract_capture_day(source: str) -> str:
 
 class RawCSVDataLoader(DatasetLoader):
     """
-    Loader CSV grezzo per sorgenti locali o S3.
+    Loader del dataset reale (CIC-IDS2018) da CSV grezzi, locali o su S3.
 
-    Il DAO usato per LEGGERE ogni singola sorgente viene scelto in base al
-    TIPO di path (s3:// vs locale), non in base all'ambiente di deploy:
-    questo loader può girare sia in locale che su AWS e può ricevere
-    sorgenti miste (es. test in locale che puntano a un bucket S3).
+    Oltre alla semplice lettura/concatenazione dei file sorgente, implementa
+    due correzioni allo squilibrio naturale del dataset:
+      - campionamento RIBILANCIATO per giorno di cattura (target_rows_per_day);
+      - trattamento speciale dei giorni con classi di attacco rare.
 
-    La cache locale dei CSV scaricati da S3 resta invece legata
-    all'ambiente di SystemConfig: ha senso solo quando si lavora in
-    locale (filesystem persistente tra un'esecuzione e l'altra),
-    mentre su AWS/Fargate lo storage dei container è effimero e
-    scrivere cache su disco lì non porta alcun beneficio, anzi rischia
-    di riempire lo storage del task.
+    Supporta anche il tagging opzionale di ogni riga col proprio giorno di
+    cattura (tag_source_day), usato dal partizionamento federato 'by_day' e
+    da alcuni script diagnostici, mai una feature di training, va sempre
+    rimossa prima del fit.
 
-    CAMPIONAMENTO RIBILANCIATO PER GIORNO (target_rows_per_day) --
-    CIC-IDS2018 è composto da 10 CSV (uno per giorno di cattura) di volume
-    molto disomogeneo: un solo giorno (Thuesday-20-02-2018, traffico DDoS)
-    può rappresentare da solo quasi la metà dell'intero dataset. Campionando
-    ogni file alla STESSA sample_fraction (comportamento di default, invariato
-    se target_rows_per_day non è specificato), quello squilibrio si propaga
-    identico nel campione: il train set risultante è dominato da un singolo
-    contesto di cattura, il che tende a ridurre la varietà tra gli alberi
-    della foresta (più alberi "vedono" pattern simili -> correlazione ρ più
-    alta -> convergenza OOB più rapida su un problema che appare più facile
-    di quanto sarebbe con un mix di giorni più equilibrato — vedi Breiman
-    2001, errore atteso della foresta ≈ ρ·σ²).
+    ---
+    DETTAGLI E SCELTE IMPLEMENTATIVE
 
-    Se target_rows_per_day è specificato, il loader:
-      1. conta le righe di ciascun file sorgente (DatasetDAO.count_rows,
-         SENZA scaricare/parsare l'intero contenuto — per S3 via S3 Select
-         lato server, per file locali via conteggio di righe grezzo);
-      2. calcola una sample_fraction PER-FILE tale da ottenere circa
-         target_rows_per_day righe da ciascuna sorgente (fraction=1.0, cioè
-         tutto il file, se il file ha meno righe del target);
-      3. campiona ogni file con la propria fraction calcolata, invece della
-         stessa fraction globale per tutti.
-    I conteggi vengono cachati su disco (row_counts_cache.json) per non
-    ripetere il conteggio ad ogni run — rilevante soprattutto su S3, dove
-    ogni conteggio è comunque una chiamata di rete, seppur economica.
+    1. DAO e Gestione Cache su AWS:
+       Il DAO per la lettura viene scelto in base al TIPO di path (s3:// vs locale), 
+       permettendo sorgenti miste. La cache locale dei CSV scaricati da S3, invece, 
+       è legata all'ambiente (SystemConfig): si attiva in locale (filesystem persistente), 
+       ma resta disattiva su AWS/Fargate dove lo storage dei container è effimero e 
+       scrivere su disco rischierebbe solo di saturare lo spazio del task.
 
-    GIORNI "PROTETTI" (protected_minority_days) -- eccezione al punto 3
-    sopra. Alcuni giorni contengono una classe di attacco rara che non
-    compare in nessun altro file (es. Infiltration, vedi
-    DEFAULT_PROTECTED_MINORITY_DAYS): campionarli con la stessa fraction
-    uniforme riga-per-riga usata per gli altri giorni diluirebbe
-    ulteriormente una classe già scarsa PRIMA che split/undersampling
-    possano intervenire. Per questi giorni il loader:
-      1. legge il file per intero (fraction=1.0, nessun campionamento in
-         streaming);
-      2. tiene TUTTE le righe non-Benign (qualunque sotto-tipo di attacco
-         presente in quel file);
-      3. sotto-campiona SOLO il Benign per restare vicino a
-         target_rows_per_day (budget = target_rows_per_day - n_non_benign),
-         stesso principio di undersample_majority_class ma applicato
-         per-file, PRIMA dello split (vedi _rebalance_protected_source).
+    2. Campionamento Ribilanciato (target_rows_per_day):
+       I 10 CSV di CIC-IDS2018 hanno volumi disomogenei (un giorno DDoS fa quasi il 50% 
+       del totale). Un campionamento uniforme (stessa fraction per tutti) propagherebbe 
+       lo squilibrio, facendo dominare il train set da un singolo contesto e riducendo 
+       la varietà tra gli alberi (convergenza precoce, correlazione ρ più alta — 
+       Breiman 2001). 
+       Se `target_rows_per_day` è specificato, il loader conta le righe (usando una cache 
+       JSON locale o chiamate S3 Select per non scaricare i file interi) e calcola una 
+       `sample_fraction` dinamica PER-FILE.
 
-    TAGGING DEL GIORNO DI CATTURA (tag_source_day) -- se True, aggiunge la
-    colonna SOURCE_DAY_COLUMN ad ogni riga con il giorno di provenienza.
-    Usato dalla diagnostica per giorno/sotto-tipo (vedi
-    diagnose_false_negative.py) a valle del caricamento. La colonna NON è
-    una feature: va rimossa prima di qualunque fit/training (fatto
-    esplicitamente da chi la consuma), e va comunque intercettata da
-    CICIDSPreprocessor come le altre colonne di metadata se dovesse
-    sopravvivere fino a quel punto.
-    
+    3. Giorni "Protetti" (protected_minority_days):
+       Eccezione al punto 2. Classi come "Infiltration" compaiono solo in due giorni specifici. 
+       Campionare questi giorni in streaming (riga-per-riga) diluirebbe fatalmente una 
+       classe già rara prima che lo split/undersampling possano intervenire. 
+       Per questi giorni, il loader legge l'intero file, tiene TUTTE le righe non-Benign, 
+       e sotto-campiona SOLO il traffico Benign fino a raggiungere il target.
     """
 
     ROW_COUNT_CACHE_PATH = os.path.join("./.local_storage", "row_counts_cache.json")
@@ -428,21 +401,12 @@ class RawCSVDataLoader(DatasetLoader):
             if self.tag_source_day:
                 df_temp[SOURCE_DAY_COLUMN] = _extract_capture_day(source)
 
-            # 4. NESSUNA conversione numerica qui. PRIMA veniva fatta anche a
-            # questo livello (pd.to_numeric su tutte le colonne tranne
-            # "Label"/SOURCE_DAY_COLUMN) -- doppione con l'identica
-            # conversione già eseguita a valle da
-            # CICIDSPreprocessor._convert_feature_columns_to_numeric, con in
-            # più una lista di esclusione diversa (rischio di disallineamento
-            # silenzioso tra le due). Rimossa: la tipizzazione numerica resta
-            # un'unica responsabilità del preprocessor (chiamato sempre
-            # dopo, sia in run_baseline.py sia dagli script diagnostici che
-            # riusano questo loader), invece che duplicata qui. Il DataFrame
-            # restituito da questo
-            # loader può quindi contenere colonne ancora di tipo object/
-            # stringa grezza: chi lo consuma direttamente (senza passare da
-            # CICIDSPreprocessor) deve convertire esplicitamente prima del
-            # training.
+            # 4. NESSUNA conversione numerica a questo livello.
+            # La tipizzazione numerica è responsabilità unica ed esclusiva
+            # di CICIDSPreprocessor (chiamato a valle). Il DataFrame restituito
+            # conserva quindi i tipi grezzi (object/stringa): chi lo consuma
+            # direttamente senza passare dal preprocessor deve gestirne la
+            # conversione esplicitamente prima del training.
 
             # 5. Cache locale: solo se attiva (ambiente locale) e sorgente S3
             if is_s3_source and self._cache_enabled:

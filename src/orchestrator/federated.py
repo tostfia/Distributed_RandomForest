@@ -38,7 +38,36 @@ RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 1800)
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 900)
 
 class FederatedOrchestrator(BaseOrchestrator):
+    """
+    Implementazione "federata" della distribuzione del training: il dataset è
+    già partizionato in shard per-worker, provisionati OFFLINE prima
+    dell'avvio del cluster (script_local/provision_local_shards.py o
+    script_aws/provision_federated_shards.py) (mai a runtime durante un job).
+    Ogni worker addestra i propri alberi esclusivamente sul proprio shard
+    locale e non trasferisce mai i dati grezzi al coordinatore: solo gli
+    alberi già addestrati attraversano la rete, riducendo sia il traffico che
+    l'esposizione dei dati.
 
+    Ruolo del coordinatore: orchestrare i round di training (quanti alberi
+    assegnare a ciascun worker, in proporzione alla dimensione del proprio
+    shard o in parti uguali, secondo tree_allocation_strategy), aggregare gli
+    alberi ricevuti in un modello globale (salvato come file separati, uno per
+    albero, per poterlo leggere in inferenza senza materializzare l'intera
+    foresta in RAM) e calibrare la soglia di decisione del modello globale su
+    un validation set federato (pool dei fold locali di ciascun worker).
+
+    Fault tolerance: a differenza della modalità centralizzata, un worker
+    guasto NON viene sostituito da un altro (il suo shard è unico, nessun
+    altro nodo lo possiede): l'orchestrator attende che quello stesso worker
+    ritorni disponibile e gli riassegna lo stesso chunk. Il failover
+    dell'orchestrator segue lo stesso meccanismo di checkpoint della classe
+    base.
+
+    Partizionamento non-IID: supporta strategie di sharding diverse dall'IID
+    puro (es. 'by_day', shard naturalmente sbilanciati), con allocazione degli
+    alberi e calibrazione della soglia che ne tengono conto (vedi
+    _allocate_tree_quotas, _calibrate_federated_threshold).
+    """
     def __init__(self, orchestrator_name: str = None, num_workers: int = None):
         self.cfg = SystemConfig()
         self.num_workers = num_workers or int(os.environ.get("NUM_WORKERS", getattr(self.cfg, "num_workers", 3)))

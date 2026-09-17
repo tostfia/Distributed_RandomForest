@@ -64,6 +64,35 @@ RPC_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_SYNC_TIMEOUT_SECONDS", 600)
 RPC_INFERENCE_SYNC_TIMEOUT_SECONDS = env_timeout_seconds("RPC_INFERENCE_SYNC_TIMEOUT_SECONDS", 600)
 
 class CentralizedOrchestrator(BaseOrchestrator):
+    """
+    Implementazione "centralizzata" della distribuzione del training: il
+    dataset risiede in un'unica posizione condivisa (S3 o storage locale),
+    preparato una sola volta da questo orchestrator (ETL: caricamento,
+    binarizzazione, split stratificato, preprocessing, undersampling,
+    eventuale feature selection riusata dalla baseline) e reso accessibile a
+    tutti i worker.
+
+    Distribuzione del carico: gli alberi richiesti vengono divisi in chunk e
+    assegnati ai worker disponibili via RPC (RPyC); ogni worker scarica (o
+    trova già in cache) il dataset condiviso, costruisce il proprio chunk e lo
+    persiste incrementalmente su storage condiviso, mai per intero via RPC,
+    per evitare timeout su payload di centinaia di MB/GB. L'orchestrator si
+    limita a orchestrare l'assegnazione dei task, monitorare il progresso e
+    ricomporre il modello globale come un manifesto leggero (numero di alberi,
+    classi, feature) che referenzia le parti già scritte, senza mai
+    materializzare l'intera foresta in memoria.
+
+    Fault tolerance: un worker che si disconnette a metà task fa sì che il suo
+    chunk venga riassegnato a un altro worker disponibile (redistribuzione
+    dinamica, i worker sono anonimi/intercambiabili); il failover
+    dell'orchestrator è gestito dalla classe base tramite checkpoint
+    incrementale su storage condiviso.
+
+    Modalità dataset: CENTRALIZED_DATASET_MODE nel .env sceglie tra 'shared'
+    (ogni worker scarica l'intero dataset) e 'sharded' (il dataset è
+    partizionato tra i worker, con criteri diversi per dataset reale e
+    sintetico, vedi _prepare_data).
+    """
     def __init__(self, orchestrator_name: str = None):
         self.cfg = SystemConfig()
         name = orchestrator_name or f"Orchestrator-Centralizzato-{socket.gethostname()}"

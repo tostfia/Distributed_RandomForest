@@ -173,19 +173,21 @@ def _weighted_forest_predict_regression_streaming(model_dir, num_trees, checkpoi
     return weighted_sum / weight_total
 
 class FederatedWorker(BaseWorker):
-    """Worker per la gestione dell'addestramento in modalità federata.
+    """
+    Worker per la modalità federata: possiede un indice fisso (1..N),
+    assegnato in fase di provisioning (variabile d'ambiente WORKER_INDEX su
+    AWS, o reclamato con un lock su file in locale), che lo lega in modo
+    permanente al proprio shard di dataset. Al boot scarica/carica solo il
+    proprio shard (mai l'intero dataset), e addestra sempre sui medesimi dati
+    locali per tutta la vita del job: a differenza del worker centralizzato,
+    non è intercambiabile con gli altri, perché nessun altro nodo possiede i
+    suoi stessi dati.
 
-    In ambiente AWS, il worker possiede GIÀ i propri dati (shard reale +
-    manifesti di feature selection) prima ancora di registrarsi come
-    disponibile: li scarica una volta sola nel proprio __init__, da un bucket
-    S3 seminato in precedenza da uno script di provisioning standalone
-    (script_aws/provision_federated_shards.py). Nessun download o generazione di
-    dati avviene più reattivamente durante un job, questo simula un vero
-    scenario federato, dove il nodo nasce già con il proprio dataset locale.
-
-    In ambiente locale (single machine) resta invece il comportamento
-    precedente: il vincolo tecnico della macchina unica rende necessario un
-    passaggio intermedio gestito dall'Orchestratore.
+    Oltre a training/inferenza, espone anche i metodi RPC usati dal
+    coordinatore per stimare la dimensione del proprio shard locale (usata
+    per l'allocazione proporzionale degli alberi) e per fornire le predizioni
+    sul proprio validation set locale (usate per calibrare la soglia di
+    decisione del modello federato aggregato).
     """
 
     def __init__(

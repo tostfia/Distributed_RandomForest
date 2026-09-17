@@ -114,6 +114,30 @@ def _train_single_tree_thread(args):
     return tree
 
 class BaseWorker(Service, ABC):
+    """
+    Classe base per il nodo di calcolo (worker), esposta come servizio RPyC:
+    riceve dall'orchestrator, via RPC, l'ordine di costruire un certo numero
+    di alberi (training) o di predire su un certo sottoinsieme di alberi
+    (inferenza). Implementa ciò che è comune a entrambe le modalità
+    (centralizzata/federata):
+      - registrazione/heartbeat periodico nel Service Registry, così
+        l'orchestrator sa quali worker sono vivi e raggiungibili;
+      - addestramento parallelo dei singoli alberi con un ThreadPool nativo
+        (i thread condividono la memoria del processo: niente copie di X/y
+        per processo, a differenza di un Pool a processi separati) e
+        bootstrap "zero-copy" tramite sample_weight, invece di duplicare
+        fisicamente le righe campionate;
+      - persistenza incrementale degli alberi appena addestrati su storage
+        condiviso, a batch, per contenere il picco di memoria (mai l'intero
+        chunk di alberi accumulato in RAM finché il task non è finito);
+      - inferenza in streaming sugli alberi (letti a blocchi dallo storage
+        condiviso, mai l'intera foresta caricata in un colpo solo).
+
+    Le sottoclassi (CentralizedWorker, FederatedWorker) implementano solo il
+    modo in cui il worker si procura i dati di training/test (_load_data) e
+    la classe di albero da usare (_get_tree_class); tutta la logica di
+    parallelizzazione, checkpointing e gestione della memoria è condivisa qui.
+    """
     def __init__(
         self,
         worker_name: str,
