@@ -118,6 +118,10 @@ FARGATE sia EC2-backed). La variabile `worker_memory` in `variables.tf` è
 già impostata di default a `8192` per questo motivo — **non alzarla** oltre
 questo valore, o il deploy fallirà con `AccessDeniedException`.
 
+> Questo limite è anche il motivo per cui l'orchestrator gira su istanze EC2
+> dedicate invece che su ECS: vedi sezione
+> [Note di design](#note-di-design).
+
 ### 3.4 Tag obbligatorio sulle risorse ECS
 
 La stessa SCP nega anche la creazione di risorse ECS (task definition,
@@ -331,7 +335,9 @@ aws ecs describe-services --cluster forest-cluster \
 ### 8.3 Provisioning dati: solo per il dataset reale
 
 Se lavori con `dataset_type=synthetic`, **salta questo passo**: i dati
-vengono generati al volo al primo training, nessun file va pre-caricato.
+vengono generati al volo al primo training, nessun file va pre-caricato
+(vedi `federatedWorker.py::exposed_get_local_shard_size`, che gestisce
+esplicitamente l'assenza dello shard file per il sintetico).
 
 Solo per `dataset_type=real` (partizionamento `by_day` su CICIDS), esegui
 **prima** di sottomettere un job:
@@ -356,16 +362,14 @@ tra i due lascerebbe worker senza shard assegnato (vedi il fallback a
 - **Orchestrator su EC2, non su ECS**: a differenza dei worker (che restano
   su ECS Fargate), l'orchestrator gira su istanze EC2 dedicate (tipo
   `r5.large`, 16 GiB) gestite da un Auto Scaling Group (`orchestrator-asg`,
-  vedi `orchestrator_ec2.tf`). Il motivo è la stessa SCP del punto 3.3: nega
-  `ecs:RegisterTaskDefinition` per qualunque memoria > 8192 MiB, sia su
-  launch type FARGATE sia EC2-backed — un tetto insufficiente per gli
-  scenari di scalabilità più pesanti (fino a ~7 GiB di alberi in RAM con 10
-  worker). `ec2:RunInstances` su un tipo whitelisted non è invece soggetto a
-  questa restrizione, quindi l'orchestrator è stato spostato lì. L'Auto
-  Scaling Group ha `min=max=desired` fissi (nessuna scalabilità automatica
-  in base al carico: serve solo a mantenere sempre presente il numero di
-  istanze desiderato, sostituendo quelle terminate) — è ciò che lo scenario
-  di test 10 ("Sostituzione ASG dell'Orchestratore") verifica.
+  vedi `orchestrator_ec2.tf`). Il motivo è il vincolo di memoria della SCP
+  descritto in [sezione 3.3](#33-limite-di-memoria-per-le-task-ecs): un
+  tetto insufficiente per gli scenari di scalabilità più pesanti. 
+  L'Auto Scaling Group ha `min=max=desired` fissi 
+  (nessuna scalabilità automatica in base al carico: 
+  serve solo a mantenere sempre presente il numero di istanze
+  desiderato, sostituendo quelle terminate) — è ciò che lo scenario di
+  test 10 ("Sostituzione ASG dell'Orchestratore") verifica.
 - **Cache EFS del dataset**: `efs.tf` crea un filesystem EFS condiviso,
   montato in lettura/scrittura dall'orchestrator EC2 e in sola lettura dai
   worker della modalità `centralized` (vedi `ecs_task_definitions.tf`,
@@ -376,14 +380,8 @@ tra i due lascerebbe worker senza shard assegnato (vedi il fallback a
   errori (vedi `dataset_dao.py`). Non utilizzata in modalità `federated`
   (ogni worker legge il proprio shard, nessun dataset condiviso da mettere
   in cache).
-- **Modalità `federated`**: il provisioning degli shard
-  (`provision_federated_shards.py`) serve **solo** per `dataset_type=real`
-  (partizionamento `by_day` su S3, letto da ogni worker al boot). Per
-  `dataset_type=synthetic` **non va eseguito**: i dati vengono generati
-  pigramente al primo training, non richiedono nulla pre-caricato su S3
-  (vedi `federatedWorker.py::exposed_get_local_shard_size`, che gestisce
-  esplicitamente l'assenza dello shard file per il sintetico). Vedi anche
-  la sezione [8. Passare tra centralized e federated](#8-passare-tra-centralized-e-federated).
+- **Provisioning degli shard federati**: quando e come eseguirlo è descritto
+  in [sezione 8.3](#83-provisioning-dati-solo-per-il-dataset-reale).
 - **Rebuild dell'immagine**: avviene automaticamente solo se cambiano
   `Dockerfile` o file sotto `src/` (hash calcolato nei `triggers` di
   `docker_build.tf`). Per forzare sempre il rebuild, imposta
