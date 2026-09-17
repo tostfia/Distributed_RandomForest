@@ -337,28 +337,8 @@ Prima di chiudere una sessione di lavoro, `script_aws/check_left_over.sh` verifi
 ./script_aws/check_left_over.sh
 ```
 
-Per distruggere tutto a fine sessione di valutazione:
+Per distruggere tutta l'infrastruttura a fine sessione di valutazione, vedi [sezione Pulizia](#pulizia).
 
-```bash
-cd terraform
-terraform destroy
-```
-
-> Il bucket S3 e i log group CloudWatch, creati manualmente per aggirare le restrizioni SCP del Learner Lab (vedi `terraform/README.md`), **non** vengono rimossi da `terraform destroy` — richiedono pulizia manuale separata se vuoi eliminarli del tutto.
-
-### Test engine su AWS (istanza EC2 usa e getta)
-
-Per eseguire uno degli scenari di test (1-10 o `all`) direttamente dentro la VPC, con i worker raggiungibili sul loro IP privato senza esporre le porte RPC su Internet:
-
-```bash
-./script_aws/run_test_engine.sh <scenario>      # es. ./script_aws/run_test_engine.sh 2
-./script_aws/run_test_engine.sh                 # chiede lo scenario a terminale prima di lanciare l'istanza
-```
-Lo script avvia un'istanza EC2 usa-e-getta ed esegue il container Docker con lo scenario passato via variabile d'ambiente `SCENARIO`. L'istanza prosegue in background anche se chiudi il terminale e si autodistrugge automaticamente (`shutdown -h now`) al termine del test; i log finiscono su CloudWatch (`/ec2/rf-test-engine`) e il report finale viene caricato su `s3://<bucket>/test_reports/aws/`.
-
-```bash
-aws logs tail /ec2/rf-test-engine --follow --region <REGION>   # segui i log in tempo reale
-```
 ---
 
 ## Modalità di training: centralizzata vs federata
@@ -440,7 +420,14 @@ Se invece serve un reset totale, anche di queste due eccezioni, va fatto a mano 
 **AWS** — due livelli, dal meno al più distruttivo:
 
 1. `./script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 e svuota lo stato applicativo (DynamoDB, SQS, artefatti S3 temporanei), lasciando intatte task definition/cluster/ECR/ASG per un riavvio rapido. Supporta `--purge-shards`, `--purge-legacy-mode`, `--purge-models` (vedi commenti in testa allo script).
-2. `terraform destroy` — rimuove tutta l'infrastruttura (vedi [sezione 6 del flusso AWS](#6-fermaredistruggere)).
+2. `terraform destroy` — rimuove tutta l'infrastruttura creata da Terraform:
+
+   ```bash
+   cd terraform
+   terraform destroy
+   ```
+
+   > Il bucket S3 e i log group CloudWatch, creati manualmente per aggirare le restrizioni SCP del Learner Lab (vedi `terraform/README.md`), **non** vengono rimossi da `terraform destroy` — richiedono pulizia manuale separata se vuoi eliminarli del tutto.
 
 In entrambi i casi, prima di chiudere una sessione conviene lanciare `./script_aws/check_left_over.sh` per un controllo finale di eventuali risorse rimaste attive per errore.
 
