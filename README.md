@@ -7,9 +7,9 @@ Il sistema segue l'architettura **master-worker**: un *orchestrator* centrale ri
 Due modalità di training, selezionabili con `TRAINING_MODE`:
 
 - **Centralizzata**: il dataset è caricato su uno storage condiviso e i worker addestrano porzioni della foresta sui medesimi dati.
-- **Federata** (prevista dalla traccia per i gruppi di tre studenti, in alternativa al caricamento di un dataset centralizzato): il dataset è già pre-partizionato e distribuito sui nodi — ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i parametri del modello finale.
+- **Federata** : il dataset è già pre-partizionato e distribuito sui nodi: ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i parametri del modello finale.
 
-Le prestazioni vengono valutate confrontando il sistema con una baseline locale non distribuita (accuratezza e tempo di esecuzione, sia in training sia in inferenza) su più task di predizione, uno dei quali su dati sintetici generati con scikit-learn — per controllare la dimensione del dataset e valutare la scalabilità al crescere del numero di worker (vedi `src/baseline/`).
+Le prestazioni vengono valutate confrontando il sistema con una baseline locale non distribuita (accuratezza e tempo di esecuzione, sia in training sia in inferenza) su più task di predizione, uno dei quali su dati sintetici generati con scikit-learn.
 
 Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
 
@@ -140,10 +140,10 @@ cp .env.example .env
 |---|---|---|
 | **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione gira dentro un container Docker. La impostano già gli script (`run_docker.sh`, `run_test.sh`): non serve toccarla a mano, a meno di lanciare `docker compose up` manualmente. |
 | **TRAINING_MODE** | `centralized/federated` | Seleziona la modalità di addestramento. In pratica va sempre impostata esplicitamente: i vari script che la leggono hanno fallback diversi tra loro se assente, con il rischio di far partire componenti in modalità incoerenti. |
-| **ENV_MODE** | `local/aws` | Seleziona l'ambiente di esecuzione: `local` per Docker/host, `aws` per Fargate/EC2/S3 — determina quale storage (locale o S3) e quale orchestrazione infrastrutturale usare. Va sempre impostata esplicitamente, per lo stesso motivo di `TRAINING_MODE`. |
-| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. Se la ometti, gli script di provisioning ricadono su `real` — ma il menu interattivo del client te lo richiede comunque a ogni avvio, quindi impostarla qui serve solo per gli script non interattivi (provisioning, test engine). `real` richiede il dataset scaricato in locale (vedi passo 4 più sotto), `synthetic` no. |
+| **ENV_MODE** | `local/aws` | Seleziona l'ambiente di esecuzione: `local` per Docker/host, `aws` per Fargate/EC2/S3: determina quale orchestrazione infrastrutturale usare. Va sempre impostata esplicitamente, per lo stesso motivo di `TRAINING_MODE`. |
+| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. Se la ometti, gli script di provisioning ricadono su `real`, ma il menu interattivo del client te lo richiede comunque a ogni avvio, quindi impostarla qui serve solo per gli script non interattivi (provisioning, test engine). `real` richiede il dataset scaricato in locale (vedi passo 4 più sotto), `synthetic` no. |
 | **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se `DATASET_TYPE=synthetic`. Ignorata con `DATASET_TYPE=real`. |
-| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per `TRAINING_MODE=centralized` (ignorata in federated). Se la ometti, il sistema usa `shared`: ogni worker scarica l'intero dataset. Con `sharded`, invece, il dataset viene partizionato e ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
+| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per `TRAINING_MODE=centralized` (ignorata in federated). Se la ometti, il sistema usa `shared`: ogni worker scarica l'intero dataset. Con `sharded`, invece, il dataset viene partizionato e ogni worker scarica solo una fetta: vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
 
 **Dimensionamento del cluster (locale/Docker)**
 
@@ -185,7 +185,7 @@ cp .env.example .env
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
 | **DATASET_LOCAL_PATH** | Path | Cartella di cache locale per i CSV grezzi del dataset reale. Se la ometti, il default nel codice è `./dataset_cache`. |
-| **DEFAULT_DATASET_S3_URL** | URL S3 | URL S3 pubblico del dataset CICIDS2018 (sorgente esterna, non un bucket del progetto). **Puramente informativa**: nessuno script la legge davvero — il client ha lo stesso URL scritto direttamente nel codice come fallback per il dataset reale in locale. Impostarla o ometterla non cambia il comportamento del sistema; serve solo a chi legge il `.env` per sapere da dove viene il dataset. |
+| **DEFAULT_DATASET_S3_URL** | URL S3 | URL S3 pubblico del dataset CICIDS2018 (sorgente esterna, non un bucket del progetto). **Puramente informativa**: nessuno script la legge davvero: il client ha lo stesso URL scritto direttamente nel codice come fallback per il dataset reale in locale. Impostarla o ometterla non cambia il comportamento del sistema; serve solo a chi legge il `.env` per sapere da dove viene il dataset. |
 
 **Risorse AWS** (solo `ENV_MODE=aws` — valori specifici dell'account, non committare quelli reali)
 
@@ -202,10 +202,10 @@ Se hai impostato `DATASET_TYPE=synthetic`, salta questo passo: ogni worker gener
 
 Per `DATASET_TYPE=real` (dataset **CICIDS2018**) il comportamento dipende da cosa stai per lanciare:
 
-- **Training centralizzato tramite il client**: non serve fare nulla in anticipo. Il client passa direttamente l'URL del bucket pubblico S3 (`s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/`), e il loader lo scarica automaticamente con accesso anonimo (nessuna credenziale AWS richiesta) se non trova già i CSV in `dataset_cache/`. **Attenzione**: questo download non viene salvato automaticamente — se lasci `dataset_cache/` vuota, ogni run scarica di nuovo tutto da S3.
-- **Modalità federata (provisioning locale) e baseline locale** (`run_baseline.py`): qui invece i CSV devono essere **già presenti** in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH`) — questi due script non hanno alcun fallback su S3 e falliscono con un errore esplicito se la cartella è vuota o assente.
+- **Training centralizzato tramite il client**: non serve fare nulla in anticipo. Il client passa direttamente l'URL del bucket pubblico S3 (`s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/`), e il loader lo scarica automaticamente con accesso anonimo (nessuna credenziale AWS richiesta) se non trova già i CSV in `dataset_cache/`. **Attenzione**: questo download non viene salvato automaticamente: se lasci `dataset_cache/` vuota, ogni run scarica di nuovo tutto da S3.
+- **Modalità federata (provisioning locale) e baseline locale** (`run_baseline.py`): qui invece i CSV devono essere **già presenti** in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH`): questi due script non hanno alcun fallback su S3 e falliscono con un errore esplicito se la cartella è vuota o assente.
 
-In entrambi i casi, per evitare di riscaricare da S3 a ogni esecuzione (e per usare la modalità federata/la baseline), conviene popolare `dataset_cache/` una volta sola:
+In entrambi i casi, per evitare di riscaricare da S3 a ogni esecuzione, conviene popolare `dataset_cache/` una volta sola:
 
 ```bash
 mkdir -p dataset_cache
@@ -376,18 +376,18 @@ Impostata tramite `TRAINING_MODE` nel `.env` (o `training_mode` in `terraform.tf
 | **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
 
 
-La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito (anche su Colab), usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
+La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non distribuito, usato esclusivamente come termine di paragone per la valutazione delle prestazioni richiesta dal progetto.
 
 ---
 
 ## Simulazione e misura della latenza di rete
 
-Il progetto richiede di valutare l'impatto della latenza di rete tra i nodi. Abbiamo notato che in locale/Docker la latenza reale tra i container è pressoché nulla (rete bridge), quindi per avere qualcosa di significativo da misurare abbiamo introdotto un ritardo artificiale con `tc`/`iproute2` (capability Linux `CAP_NET_ADMIN`). Su AWS, dove questa strada non è percorribile (vedi sotto), abbiamo adottato un approccio diverso.
+Dal momento che in locale/Docker la latenza reale tra i container è pressoché nulla (rete bridge), si è introdotto un ritardo artificiale con `tc`/`iproute2` (capability Linux `CAP_NET_ADMIN`). Su AWS, dove questa strada non è percorribile (vedi sotto), si è adottato un approccio differente.
 
 Il comportamento cambia in base all'ambiente:
 
-- **Locale/Docker**: viene iniettato un ritardo artificiale reale con `tc netem` su un'interfaccia del container worker (altrimenti la latenza RPC su rete bridge Docker sarebbe pressoché nulla e non ci sarebbe nulla da misurare). La capability è già abilitata nel `docker-compose.yml` (`cap_add: NET_ADMIN`), quindi i comandi `tc` funzionano senza `sudo` dentro i container. Se lanci lo scenario di rete **fuori** da Docker (bare metal), serve invece una regola `NOPASSWD` in `/etc/sudoers` per `tc`, oppure lanciare l'intero engine con `sudo`; in assenza di permessi lo scenario prosegue comunque ma senza applicare un delay reale (stato `SKIPPED_NO_TC_PERMISSIONS`).
-- **AWS/ECS Fargate**: `CAP_NET_ADMIN` **non è disponibile** nei task Fargate, e l'account AWS Academy Learner Lab usato per questo progetto non ha accesso ad AWS Fault Injection Simulator. Di conseguenza su AWS **non viene iniettato alcun ritardo artificiale**: lo scenario diventa invece una *misura* della latenza RPC reale tra i task (leader↔worker, stessa VPC, ENI separate), su più probe consecutivi. Questo valore **non è direttamente comparabile** al delay artificiale impostato in locale — vanno presentati nella relazione come due esperimenti distinti, non come lo stesso esperimento su due ambienti.
+- **Locale/Docker**: viene iniettato un ritardo artificiale reale con `tc netem` su un'interfaccia del container worker (altrimenti la latenza RPC su rete bridge Docker sarebbe pressoché nulla). La capability è già abilitata nel `docker-compose.yml` (`cap_add: NET_ADMIN`), quindi i comandi `tc` funzionano senza `sudo` dentro i container. Se si lancia lo scenario di rete **fuori** da Docker (bare metal), serve invece una regola `NOPASSWD` in `/etc/sudoers` per `tc`, oppure si deve lanciare l'intero engine con `sudo`; in assenza di permessi lo scenario prosegue comunque ma senza applicare un delay reale (stato `SKIPPED_NO_TC_PERMISSIONS`).
+- **AWS/ECS Fargate**: `CAP_NET_ADMIN` **non è disponibile** nei task Fargate e l'account AWS Academy Learner Lab usato per questo progetto non ha accesso ad AWS Fault Injection Simulator. Di conseguenza su AWS **non viene iniettato alcun ritardo artificiale**: lo scenario diventa invece una *misura* della latenza RPC reale tra i task (leader↔worker, stessa VPC, ENI separate), su più probe consecutivi.
 
 ---
 
@@ -416,7 +416,7 @@ I test disponibili coprono le seguenti aree operative:
 9. Sostituzione ASG dell'Orchestratore (solo AWS)
 10. Generazione grafici a partire dai report salvati
 
-> **Nota sullo scenario 10**: a differenza degli altri, non esegue training/inferenza — legge e basta i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Selezionando `all`, viene eseguito automaticamente **per ultimo**, dopo tutti gli altri scenari (inclusa la sostituzione ASG). Se lanci gli scenari singolarmente uno alla volta, esegui prima quelli che ti interessano e lancia il `10` solo alla fine. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo, ma per una relazione pulita conviene svuotare la cartella e rilanciare gli scenari desiderati una volta sola, con la stessa configurazione.
+> **Nota sullo scenario 10**: a differenza degli altri, non esegue training/inferenza: legge i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Selezionando `all`, viene eseguito automaticamente **per ultimo**, dopo tutti gli altri scenari (inclusa la sostituzione ASG). Se lanci gli scenari singolarmente uno alla volta, esegui prima quelli che ti interessano e lancia il `10` solo alla fine. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo.
 
 ### AWS
 
@@ -431,8 +431,8 @@ Vedi [Test engine su AWS](#test-engine-su-aws-istanza-ec2-usa-e-getta) nella sez
 ./script_local/clean_local.sh
 ```
 
-- **`.local_storage/metrics/`** non viene toccata (esclusa esplicitamente dal `find` che fa la pulizia) — così non perdi lo storico delle metriche tra una sessione di test e l'altra.
-- **La sezione `baseline_boot`** di `.local_storage/config.json` (dataset_type, tree_type) sopravvive al reset tramite `preserve_baseline_boot.py`, che la estrae prima della pulizia e la reintegra subito dopo — tutto il resto del config (in particolare `last_training_request` e lo storico delle richieste) viene invece azzerato come da comportamento previsto.
+- **`.local_storage/metrics/`** non viene toccata da non perdere lo storico delle metriche tra una sessione di test e l'altra.
+- **La sezione `baseline_boot`** di `.local_storage/config.json` (dataset_type, tree_type) sopravvive al reset tramite `preserve_baseline_boot.py`, che la estrae prima della pulizia e la reintegra subito dopo; tutto il resto del config (in particolare `last_training_request` e lo storico delle richieste) viene invece azzerato come da comportamento previsto.
 
 Se invece serve un reset totale, anche di queste due eccezioni, va fatto a mano (es. cancellando direttamente `.local_storage/metrics/` o l'intero `.local_storage/config.json`).
 
