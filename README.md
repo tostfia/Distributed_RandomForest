@@ -200,7 +200,12 @@ cp .env.example .env
 
 Se hai impostato `DATASET_TYPE=synthetic`, salta questo passo: ogni worker genera il proprio dataset sintetico al boot, nessun file va scaricato.
 
-Per `DATASET_TYPE=real`, il sistema si aspetta di trovare i CSV del dataset **CICIDS2018** già presenti in locale in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH` nel `.env`) — non li scarica da solo, e fallisce con un errore esplicito se la cartella è vuota o assente. Il dataset è ospitato pubblicamente su AWS Open Data allo stesso URL S3 già presente in `DEFAULT_DATASET_S3_URL` nel `.env.example`:
+Per `DATASET_TYPE=real` (dataset **CICIDS2018**) il comportamento dipende da cosa stai per lanciare:
+
+- **Training centralizzato tramite il client**: non serve fare nulla in anticipo. Il client passa direttamente l'URL del bucket pubblico S3 (`s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/`), e il loader lo scarica automaticamente con accesso anonimo (nessuna credenziale AWS richiesta) se non trova già i CSV in `dataset_cache/`. **Attenzione**: questo download non viene salvato automaticamente — se lasci `dataset_cache/` vuota, ogni run scarica di nuovo tutto da S3.
+- **Modalità federata (provisioning locale) e baseline locale** (`run_baseline.py`): qui invece i CSV devono essere **già presenti** in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH`) — questi due script non hanno alcun fallback su S3 e falliscono con un errore esplicito se la cartella è vuota o assente.
+
+In entrambi i casi, per evitare di riscaricare da S3 a ogni esecuzione (e per usare la modalità federata/la baseline), conviene popolare `dataset_cache/` una volta sola:
 
 ```bash
 mkdir -p dataset_cache
