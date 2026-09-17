@@ -5,7 +5,28 @@ import time
 import random
 
 class ScalabilityScenario(BaseTestScenario):
-    """Copre lo Scenario 2: Analisi della Scalabilità e del Throughput al variare dei Worker."""
+    """
+    Copre lo Scenario 2: strong scaling. A parità di carico di lavoro (numero
+    fisso di alberi, letto dal manifesto della baseline), misura tempo di
+    training/inferenza e throughput al variare del numero di worker
+    effettivamente usati (worker_counts_to_test in test_config.json),
+    campionando un sottoinsieme casuale ma deterministico (seed fisso) dei
+    worker realmente registrati nel ServiceRegistry per ogni configurazione.
+
+    Per ogni configurazione calcola sia lo speedup "totale" (include ETL,
+    aggregazione, stima OOB — costi seriali pressoché costanti al variare dei
+    worker, che quindi comprimono artificialmente lo speedup misurato) sia lo
+    speedup della sola costruzione degli alberi (la parte realmente
+    parallela), quando l'orchestrator espone quella misura separata
+    (last_dispatch_seconds) — se non disponibile, lo dichiara esplicitamente
+    come placeholder invece di confondere le due misure.
+
+    Se disponibile, confronta anche lo speedup rispetto ai tempi VERI di
+    training monocore/multicore su singola macchina (T_seq/T_1node, salvati
+    dalla baseline in baseline_tempi_locali_<N>_alberi.json): risponde alla
+    domanda "conviene distribuire rispetto a non farlo affatto?", diversa da
+    "quanto scala rispetto alla configurazione minima testata?".
+    """
 
     def run(self) -> dict:
         print("\n--- [SCENARIO 2] Test di Scalabilità e Throughput ---")
@@ -43,16 +64,6 @@ class ScalabilityScenario(BaseTestScenario):
         # T_seq è confrontabile.
         target_trees = self._resolve_target_trees()
 
-        # T_seq/T_1node REALI dalla baseline locale (Breiman single-machine),
-        # non più solo il tempo della configurazione di worker più piccola
-        # testata: 'baseline_w = min(workers_to_test)' risponde a "quanto è
-        # più veloce N worker rispetto a 2?", non alla domanda che conta per
-        # la relazione ("conviene distribuire rispetto a non farlo affatto?").
-        # Letti dal pickle della baseline (run_baseline.py li salva SOLO lì,
-        # in metadata_pipeline['baseline_tempi_locali'], mai in un JSON) --
-        # se il pickle manca o non è quello atteso per questo dataset_type/
-        # task_type, ricadiamo su None: il confronto extra viene omesso dal
-        # report invece di far fallire l'intero scenario per un dato opzionale.
         dataset_type_cfg = self.config.get("dataset_type", "synthetic")
         t_seq_true, t_1node_true = self._load_true_sequential_baseline(dataset_type_cfg, task_type)
 
@@ -332,17 +343,8 @@ class ScalabilityScenario(BaseTestScenario):
     def _load_true_sequential_baseline(self, dataset_type: str, task_type: str):
         """
         Legge T_seq (monocore, n_jobs=1) e T_1node_parallel (multicore, sulla
-        stessa macchina) dal pickle prodotto da run_baseline.py -- l'unico
-        posto in cui questi due valori vengono persistiti (in
-        metadata_pipeline['baseline_tempi_locali'], mai in un JSON leggero:
-        vedi run_baseline.py righe ~1325-1349).
+        stessa macchina) dal pickle prodotto da run_baseline.py
 
-        Introdotto per rispondere alla domanda "conviene distribuire rispetto
-        a non farlo affatto?", che 'baseline_w = min(workers_to_test)' (lo
-        speedup storico calcolato sopra) non copre: quello risponde solo a
-        "quanto scala rispetto alla configurazione di worker più piccola
-        testata", un confronto interno al cluster, non contro l'alternativa
-        non distribuita.
 
         Carica l'intero pickle (include anche il modello addestrato, non solo
         i tempi) UNA VOLTA SOLA a inizio scenario, non ad ogni configurazione
@@ -350,7 +352,7 @@ class ScalabilityScenario(BaseTestScenario):
 
         Ritorna (t_seq, t_1node_parallel), o (None, None) se il pickle non
         esiste ancora per questo dataset_type/task_type (es. baseline mai
-        eseguita) o ha un formato inatteso -- il chiamante tratta l'assenza
+        eseguita) o ha un formato inatteso il chiamante tratta l'assenza
         come "confronto extra non disponibile", MAI come un errore bloccante:
         lo scenario di scalabilità deve poter girare anche senza una baseline
         locale già pronta.

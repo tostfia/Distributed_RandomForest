@@ -4,8 +4,26 @@ import pandas as pd
 
 class CICIDSPreprocessor:
     """
-    Pipeline di Preprocessing specifica per il dataset di network traffic CIC-IDS2018.
-    Configurata per emulare specularmente al millimetro la logica e i conteggi di Colab.
+    Pipeline di preprocessing per il dataset di traffico di rete CIC-IDS2018,
+    applicata identicamente sia dalla baseline locale sia dal training
+    distribuito (centralizzato e federato), così i tre percorsi lavorano
+    sempre sugli stessi identici dati.
+
+    Due fasi distinte, da chiamare in ordine su tutto il dataset PRIMA dello
+    split:
+
+      binarize_target(): converte l'etichetta multi-classe originale in
+      binaria (Benign=0, qualunque altro valore=1) va fatta sul dataset
+      COMPLETO prima dello split, altrimenti le classi di attacco più rare
+      rischierebbero di non comparire affatto in uno dei due split.
+
+    E poi, indipendentemente su ciascuno split (train/test) DOPO lo split:
+
+      process(): rimozione delle colonne di metadata non generalizzabili
+      (IP, porte, timestamp, la cui presenza causerebbe data leakage),
+      conversione a numerico, aggiunta di feature ingegnerizzate (rapporti/
+      coefficienti di variazione derivati dalle colonne CICFlowMeter) e
+      sanificazione finale di righe con NaN/inf residui.
     """
 
     # Colonne di metadata NOTE per lo schema CIC-IDS2018/CICFlowMeter-V3 (78-84
@@ -150,12 +168,10 @@ class CICIDSPreprocessor:
 
     def _convert_feature_columns_to_numeric(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Unico punto della pipeline in cui avviene la conversione a numerico
-        (pd.to_numeric, errors="coerce"). PRIMA veniva fatta anche dentro
-        RawCSVDataLoader, con un'esclusione leggermente diversa
-        (["Label", "_capture_day"] invece del solo target_column) --
-        doppione rimosso: la tipizzazione è ora una responsabilità unica di
-        questo preprocessor, chiamato sempre a valle del loader.
+        Esegue la conversione a numerico (pd.to_numeric, errors="coerce") di tutte 
+        le colonne ad eccezione del target. 
+        È l'unico punto dell'intera architettura responsabile della tipizzazione 
+        dei dati, posizionato strategicamente a valle del loader.
         """
         df = df.copy()
         feature_columns = df.columns.difference([self.target_column])

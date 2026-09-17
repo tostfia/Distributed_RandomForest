@@ -22,6 +22,38 @@ from src.shared.utilities.undersampling import undersample_majority_class
 from src.shared.config import SystemConfig
 from src.dataset.checkpoint_dao import CheckpointDAOFactory
 
+
+"""
+Addestramento locale, monolitico e non distribuito (il termine di paragone
+richiesto dalla traccia per valutare accuratezza e tempo di esecuzione del
+sistema distribuito, sia in training sia in inferenza).
+
+Copre tre dataset/task distinti, selezionabili interattivamente:
+  - classificazione sul dataset reale (CIC-IDS2018): con tuning degli
+    iperparametri via ricerca OOB (Breiman 2001, Sez. 3.1 — un solo fit per
+    combinazione, niente k-fold CV) e feature selection integrata nella
+    ricerca stessa (permutation importance OOB + riduzione della
+    multicollinearità);
+  - classificazione sintetica: eredita gli iperparametri già tunati sul
+    reale, stesso task, così il confronto resta metodologicamente corretto;
+  - regressione sintetica (Friedman #1): nessun tuning (il sintetico serve
+    solo da stress-test di scalabilità), iperparametri di default sklearn
+    tranne n_estimators, che va sempre determinato empiricamente con la
+    curva OOB warm_start (analyze_n_estimators.py).
+
+Il manifesto prodotto (outputs_baseline/config_real.json o
+config_synthetic.json: iperparametri, feature selezionate, soglia di
+decisione calibrata) è la FONTE DI VERITÀ condivisa con il training
+distribuito — CentralizedOrchestrator/FederatedOrchestrator lo rileggono per
+addestrare esattamente lo stesso modello, invece di ricalcolare in autonomia
+feature selection o iperparametri, cosa che invaliderebbe il confronto.
+
+I tempi di riferimento (T_seq monocore, T_1node multicore sulla stessa
+macchina) vengono salvati separatamente per numero di alberi
+(baseline_tempi_locali_<N>_alberi.json) e riusati dallo scenario di
+scalabilità come termine di paragone "conviene distribuire?".
+"""
+
 # Stesso bucket/convenzione env var di federated.py e BaseOrchestrator.py: il
 # manifesto va sincronizzato lì perché l'orchestratore su AWS (container
 # Fargate/EC2) non ha accesso al filesystem locale di questa macchina, quindi
@@ -235,11 +267,9 @@ def optuna_oob_hyperparameter_search(train_df, target_col, n_trials, random_stat
 
     def objective(trial):
         # ---------------------------------------------------------------
-        # GIUSTIFICAZIONE DELLA GRIGLIA -- non tutti i valori hanno lo
-        # stesso status epistemico, va dichiarato esplicitamente quali sono
-        # motivati e quali sono scelte pratiche non derivate dai dati:
+        # GIUSTIFICAZIONE DELLA GRIGLIA:
         #
-        #   ESAUSTIVI/TEORICAMENTE MOTIVATI (non un sottoinsieme arbitrario):
+        #   ESAUSTIVI/TEORICAMENTE MOTIVATI:
         #   - max_features ['sqrt','log2']: le due convenzioni standard per
         #     classificazione (Breiman 2001, 'sqrt' vicina a log2(M)+1).
         #   - criterion ['gini','entropy']: uniche due opzioni che
@@ -489,7 +519,7 @@ def run_baseline():
     # grandi — es. Thuesday-20-02-2018, da solo quasi la metà del dataset
     # totale). Vincolo: deve restare sotto il file più piccolo tra i 10
     # (Thursday-01-03-2018, 331.125 righe), altrimenti quel giorno smette di
-    # contribuire alla pari con gli altri. 100.000 è stato scelto per
+    # contribuire alla pari con gli altri. 200.000 è stato scelto per
     # restare con margine sotto quella soglia, per aumentare la varietà del
     # train set e verificare se questo sposta in avanti il plateau di
     # n_estimators osservato nella diagnostica OOB (vedi

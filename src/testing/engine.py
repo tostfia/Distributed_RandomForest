@@ -21,7 +21,27 @@ from src.testing.scenarios.orchestrator_asg_replacement import OrchestratorAsgRe
 CONFIG_FILE_PATH = os.path.join(os.path.dirname(__file__), "test_config.json")
 
 class TestEngine:
-    """Engine principale che orchestra l'esecuzione di tutte le suite di test."""
+    """
+    Entry point della suite di test di sistema. Istanzia l'orchestrator
+    (centralizzato o federato, secondo TRAINING_MODE) e, se non si gira già
+    dentro Docker/ECS, avvia anche i worker locali come sottoprocessi
+    supervisionati (worker_supervisor.py), indipendentemente da questo, il
+    ciclo di vita dei worker resta esterno agli scenari veri e propri, che
+    interagiscono con l'orchestrator già pronto.
+
+    Prima di eseguire qualunque scenario, ripulisce i job rimasti "PROCESSING"
+    da sessioni di test precedenti (gli scenari chiamano i metodi
+    _execute_training_step/_execute_inference_step dell'orchestrator
+    DIRETTAMENTE, bypassando _process_job, quindi non finalizzano mai lo
+    stato del job da soli — senza questa pulizia, _perform_active_recovery
+    riprenderebbe un job estraneo all'avvio successivo).
+
+    run_scenarios() chiede a terminale (o legge dalla variabile d'ambiente
+    SCENARIO, per l'esecuzione non interattiva su EC2/ECS) quale scenario
+    eseguire (1-10, o 'all' per l'intera batteria) e, al termine, salva un
+    report JSON in test_reports/<ambiente>/ (e su S3 se l'ambiente è 'aws').
+    """
+
     def __init__(self, mode: str , env: str ):
         self.config_path = CONFIG_FILE_PATH
         self.mode = mode

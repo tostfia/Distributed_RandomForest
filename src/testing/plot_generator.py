@@ -1,22 +1,21 @@
 """
-Generatore automatico dei grafici per la relazione finale.
+Genera tutti i grafici PNG per la relazione, leggendo i report JSON
+prodotti da TestEngine (in test_reports/<ambiente>/) e il manifesto/pickle
+prodotto da run_baseline().
 
-Legge i report JSON prodotti da TestEngine._print_final_summary() e il manifesto
-.pkl prodotto da run_baseline(), e produce i PNG in ./plots.
+Principio guida: UN FILE DI REPORT = UNA SESSIONE DI TEST (un dataset, un
+numero di alberi, una configurazione), mai fuse insieme. Confrontare dati
+di file diversi (es. un job da 30 alberi sul dataset reale con uno da 100
+alberi sul sintetico) produrrebbe grafici formalmente corretti ma
+sostanzialmente falsi — per questo _pick_run/_pick_scalability_runs
+scelgono sempre UNA sola run coerente per ciascun grafico, con priorità
+aws > docker > local ma senza mai mescolare run con "impronte" diverse
+(numero di alberi, dimensione del test set).
 
-PRINCIPIO DI ROBUSTEZZA (requisito esplicito del progetto):
-    Nessun metodo di questa classe puo' far fallire l'esecuzione. Ogni accesso a
-    file e' preceduto da os.path.exists(), ogni accesso a dizionario passa da
-    dict.get(), e ogni generatore e' eseguito dentro un wrapper che intercetta
-    qualunque eccezione. Se i dati per un grafico non ci sono (perche' quel test
-    non e' mai stato eseguito, o e' stato SKIPPED), il grafico viene saltato con
-    un [WARN] e la generazione prosegue.
-
-PRIORITA' DELLE SORGENTI:
-    test_reports/aws/  ->  test_reports/docker/  ->  test_reports/local/
-    Il primo ambiente che contiene dati utilizzabili diventa l'ambiente
-    "primario" per i grafici a singolo ambiente; gli altri restano comunque
-    caricati e vengono usati per i confronti cross-ambiente.
+Ogni chiamata a generate_all_plots() è avvolta in un try/except per
+grafico: dati mancanti per uno scenario (mai eseguito, o SKIPPED) non
+devono impedire la produzione degli altri grafici — vengono solo saltati
+con un [WARN] esplicito, riportato anche nel riepilogo finale.
 
 Uso:
     python -m src.testing.plot_generator

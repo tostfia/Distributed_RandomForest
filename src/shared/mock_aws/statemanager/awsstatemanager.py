@@ -15,6 +15,16 @@ WORKER_TASKS_JOB_INDEX = "job_id-index"
 cfg = SystemConfig()
 
 class AwsStateManager(StateManagerInterface):
+    """
+    Implementazione reale (DynamoDB via boto3) di StateManagerInterface,
+    usata quando ENV_MODE=aws. Stessa interfaccia e stessa semantica di
+    MockStateManager (stato dei job/task, lock di leadership, lease dei job),
+    ma con l'acquisizione/rinnovo dei lock che sfrutta le ConditionExpression
+    di DynamoDB valutate lato server (attribute_not_exists OR expires_at 
+    now) per garantire l'atomicità tra processi realmente distribuiti su
+    macchine diverse, a differenza del mock locale, dove basta un lock a
+    livello di file perché tutto gira sullo stesso host.
+    """
 
     def __init__(self):
         self._db = DynamoDBFactory.get_db(cfg.env)

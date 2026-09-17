@@ -99,7 +99,33 @@ def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
 
 
 class FaultToleranceScenario(BaseTestScenario):
-    """Copre lo Scenario 5: Sperimentazione della Tolleranza ai Guasti (Kill Worker)."""
+    """
+    Copre lo Scenario 4: guasto improvviso di un worker DURANTE il training
+    (non l'inferenza, per quella vedi InferenceWorkerFaultScenario in
+    fault_inf.py, Scenario 5).
+
+    Avvia il job in un thread separato e, in un thread "killer" parallelo,
+    attende un duplice segnale prima di simulare il crash: che sia già stato
+    inviato almeno un chunk reale a un worker (chunk_sent_event) E che sia
+    trascorso almeno kill_worker_after_seconds dall'avvio, mai uno dei due
+    da solo, altrimenti il guasto rischierebbe di colpire un worker ancora
+    inattivo (in attesa dell'ETL) invece che uno con lavoro reale in corso.
+    Il guasto viene annullato (non sparato) se il job termina prima che il
+    timer scada, per non colpire lo scenario SUCCESSIVO eseguito nella
+    stessa sessione.
+
+    Il meccanismo di kill dipende dall'ambiente: kill diretto del processo
+    worker locale (bare-metal), 'docker kill' sul container (Docker Compose),
+    o ecs:StopTask sul task Fargate (AWS), in tutti i casi il worker scelto
+    dev'essere intercambiabile (centralizzato) o, in modalità federata,
+    selezionato tra quelli che hanno davvero ricevuto una quota di alberi in
+    questo round (vedi BaseTestScenario._pick_worker_index_with_real_work).
+
+    Il campo 'fault_actually_triggered' nel risultato distingue un test che
+    ha davvero esercitato il crash da uno in cui il guasto è stato annullato
+    o non ha fatto in tempo a confermarsi: uno stato SUCCESS con questo flag
+    a False non ha testato nulla di reale e va scartato dal confronto.
+    """
 
 
     def run(self) -> dict:

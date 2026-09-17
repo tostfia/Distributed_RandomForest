@@ -20,6 +20,34 @@ from src.shared.utilities.model_assembly import (
 )
 import shutil
 
+
+"""
+Punto di ingresso utente del sistema (CLI interattiva): l'unico componente
+con cui l'utente comunica direttamente per avviare training/inferenza.
+
+Responsabilità principali:
+  - costruzione e invio delle richieste di training/inferenza (validate con
+    i modelli Pydantic in shared/sharedmodels/models.py) sulla coda SQS (o
+    mock locale) corretta, in base a TRAINING_MODE;
+  - recupero degli iperparametri di default dal manifesto della baseline
+    (load_hyperparameters_from_config), con possibilità di sovrascriverli
+    manualmente;
+  - interrogazione dello stato di un job (QUEUED/PROCESSING/COMPLETED/FAILED)
+    e download del modello addestrato, assemblato on-demand a partire dagli
+    artefatti distribuiti (un manifesto leggero + le parti degli alberi su
+    storage condiviso, mai un unico blob monolitico) in un oggetto
+    scikit-learn standard, utilizzabile in un ambiente locale con
+    model.predict(X): è il requisito opzionale di download del modello
+    addestrato;
+  - storico locale delle richieste (requests_history.json), usato come
+    fallback per recuperare gli iperparametri di un job quando lo
+    state_manager non li conserva (job più datati).
+
+Non contiene alcuna logica di training/inferenza: si limita a instradare le
+richieste dell'utente e a interrogare lo stato, lasciando l'intera
+esecuzione a orchestrator e worker.
+"""
+
 cfg = SystemConfig()
 
 CONFIG_PATH = os.path.join("./.local_storage", "config.json")
@@ -366,9 +394,11 @@ def handle_inference():
 
 
 def _resolve_training_mode(job_id: str) -> str:
-    """Stessa logica finora duplicata solo dentro download_model(): preferisce
-    la modalità registrata nella history locale per QUESTO job_id, altrimenti
-    ricade sulla modalità di sistema corrente (cfg.mode)."""
+    """
+    Determina la modalità di training usata per un dato job.
+    Preferisce la modalità registrata nello storico locale per QUESTO job_id; 
+    se assente, ricade sulla modalità di sistema corrente (cfg.mode).
+    """
     training_entry = next(
         (
             entry
@@ -406,8 +436,7 @@ def download_model(job_id: str) -> None:
     if cfg.env not in ("local", "aws"):
         raise ValueError(f"Ambiente '{cfg.env}' non supportato.")
 
-    # CheckpointDAOFactory astrae già locale/S3 (stesso DAO usato dagli
-    # orchestratori): non serve più distinguere i due rami a mano qui.
+
     checkpoint_dao = CheckpointDAOFactory.get_dao(cfg.env)
 
     print(f"[INFO] Assemblaggio del modello (job '{job_id}', modalità '{training_mode}')...")

@@ -3,6 +3,24 @@ import boto3
 from dotenv import load_dotenv
 
 class SystemConfig:
+    """
+    Configurazione di sistema, letta una sola volta dal file .env (pattern
+    singleton: __new__ restituisce sempre la stessa istanza nello stesso
+    processo) e condivisa da client, orchestrator e worker. Centralizza i
+    due parametri che determinano il comportamento dell'intero sistema:
+
+      - mode ('centralized'/'federated', da TRAINING_MODE): quale strategia
+        di distribuzione usare;
+      - env ('local'/'aws', da ENV_MODE): quale implementazione concreta dei
+        servizi infrastrutturali (coda messaggi, storage dataset, database di
+        stato) usare — mock locali su file, o i servizi AWS reali (SQS, S3,
+        DynamoDB) tramite le rispettive factory.
+
+    Deriva anche i nomi delle code SQS (con suffisso .fifo solo su AWS) e il
+    nome del bucket S3 dei dataset, così questi dettagli di naming non sono
+    duplicati in ogni componente che ne ha bisogno.
+    """
+
     _instance = None
 
     def __new__(cls):

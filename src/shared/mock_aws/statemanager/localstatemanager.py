@@ -8,6 +8,20 @@ TABLE_NAME = "ModelStatus"
 JOB_LOCKS_TABLE = "JobLocks"
 
 class MockStateManager(StateManagerInterface):
+    """
+    Implementazione locale (file JSON + lock via fcntl) di StateManagerInterface:
+    stato dei job, dei task worker, e i due tipi di lock distribuiti usati per
+    la fault tolerance, lock di leadership tra orchestratori (tabella
+    OrchestratorLocks) e lease di possesso di un job (tabella JobLocks),
+    entrambi con TTL e acquisizione/rinnovo atomici a livello di singolo
+    processo/thread grazie al mock di DynamoDB sottostante (MockDynamoDB,
+    che protegge ogni read-modify-write con un file lock esclusivo).
+
+    Specchio locale di AwsStateManager: stessa interfaccia, stesso
+    comportamento osservabile (claim/refresh/release di lock e lease), usato
+    quando ENV_MODE=local per non richiedere un vero account AWS durante lo
+    sviluppo/debug.
+    """
     _claim_lock = threading.Lock()  # Lock per la gestione della concorrenza nella simulazione
     
     def initiate_request(

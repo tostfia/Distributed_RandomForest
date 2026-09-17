@@ -14,22 +14,44 @@ BASELINE_MANIFEST_DIR = "outputs_baseline"
 
 
 class BaseTestScenario(ABC):
-    """Classe base astratta per tutti gli scenari di test."""
+    """
+    Classe base per tutti gli scenari di test di sistema. Fornisce ai
+    sottoscenari la logica comune necessaria per confrontarsi correttamente
+    con la baseline locale, senza doverla duplicare in ognuno:
 
-    # Cache A LIVELLO DI CLASSE (condivisa tra TUTTE le istanze di scenario
-    # create nello stesso processo dell'engine, es. quando si sceglie 'all').
-    # Chiave: firma dei parametri che determinano il CONTENUTO del dataset
-    # preprocessato (path, tipo, tipo di albero, seed). Valore: (train_path,
-    # test_path) del primo scenario che li ha prodotti.
-    #
-    # NOTA: questo NON tocca in alcun modo il codice dell'orchestratore. Sfrutta
-    # solo il fatto che l'orchestratore già cerca da sé, prima di rifare l'ETL,
-    # un file 'shared_train_{job_id}.csv'/'shared_test_{job_id}.csv' — se quel
-    # file esiste già quando lo scenario chiama _execute_training_step, il suo
-    # normale SHORT-CIRCUIT ETL interno lo trova e salta il preprocessing da
-    # solo. Qui ci limitiamo a "precopiare" un dataset già pronto (prodotto da
-    # uno scenario precedente con parametri IDENTICI) nel path che
-    # l'orchestratore si aspetterà per il prossimo job_id.
+      - _resolve_hyperparameters(): legge gli iperparametri dal manifesto
+        della baseline (outputs_baseline/config_*.json) invece che da
+        test_config.json, così il modello addestrato dal cluster è
+        confrontabile con quello della baseline (stessi alberi, stessa
+        profondità, ecc.). Il file locale resta solo un fallback esplicito.
+        
+      - _reuse_dataset_if_available() & _dataset_cache: meccanismo a livello 
+        di classe che evita di rifare l'intera ETL (che costa 130-260s) quando 
+        più scenari usano parametri identici. 
+        COME FUNZIONA: Sfrutta lo SHORT-CIRCUIT ETL nativo dell'orchestratore. 
+        "Pre-copia" un dataset già pronto nel path atteso per il nuovo job_id 
+        (con copia locale o CopyObject su AWS S3). L'orchestratore lo trova e 
+        salta il preprocessing da solo, SENZA bisogno di toccare il suo codice 
+        per adattarlo ai test.
+        
+      - _mark_job_finished(): finalizza esplicitamente lo stato di un job
+        chiamato direttamente (bypassando la coda SQS), per non lasciarlo in
+        "PROCESSING" e prevenire recovery indesiderati nei test successivi.
+        
+      - Helper di partizionamento: gestiscono il partizionamento federato 
+        (_resolve_federated_partitioning) e la selezione intelligente del worker 
+        da "uccidere" nei test di fault-tolerance (_pick_worker_index_with_real_work), 
+        puntando a quello con lo shard più grande per assicurarsi che ci sia 
+        effettiva redistribuzione di lavoro.
+
+    Ogni sottoclasse implementa solo run(), usando questi helper e chiamando
+    direttamente i metodi dell'orchestratore (_execute_training_step,
+    _execute_inference_step) invece di passare dalla coda SQS, per restare
+    rapida e isolata.
+    """
+
+    # Chiave: (dataset_path, dataset_type, tree_type, seed). 
+    # Valore: (train_path, test_path) del primo scenario che li ha prodotti.
     _dataset_cache: dict = {}
 
     def __init__(self, config: dict, orchestrator):
