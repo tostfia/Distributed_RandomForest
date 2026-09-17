@@ -314,7 +314,7 @@ Aggiorna il tuo `.env` locale con i valori d'output di Terraform (`ENV_MODE=aws`
 
 Lo script attende che i Service ECS (worker + orchestrator) siano stabili prima di procedere, per non sottomettere job mentre l'infrastruttura sta ancora avviandosi.
 
-### 6. Fermare/distruggere
+### 6. Fermare
 
 Per scalare a zero senza distruggere l'infrastruttura, il modo più completo è `script_aws/teardown.sh` — scala i worker e l'Auto Scaling Group dell'orchestrator a 0 **e** svuota le tabelle DynamoDB e le code SQS (stato applicativo pulito, schema e infrastruttura intatti):
 
