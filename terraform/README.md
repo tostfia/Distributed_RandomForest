@@ -1,9 +1,7 @@
 # Infrastruttura AWS via Terraform — Distributed_RandomForest
 
 Questo modulo Terraform crea **da zero** tutta l'infrastruttura AWS necessaria
-al sistema (ECR, S3, DynamoDB, SQS, ECS Fargate + Service worker, EC2 + Auto
-Scaling Group per l'orchestrator, EFS come cache di lettura condivisa del
-dataset), buildando e pushando anche l'immagine Docker dell'applicazione.
+al sistema, buildando e pushando anche l'immagine Docker dell'applicazione.
 Pensato per essere eseguito con un **singolo `terraform apply`** in un
 account **AWS Academy Learner Lab**.
 
@@ -120,25 +118,12 @@ FARGATE sia EC2-backed). La variabile `worker_memory` in `variables.tf` è
 già impostata di default a `8192` per questo motivo — **non alzarla** oltre
 questo valore, o il deploy fallirà con `AccessDeniedException`.
 
-> Questo limite riguarda **solo i worker**, che restano su ECS Fargate.
-> L'orchestrator non è più soggetto a questo vincolo: gira su istanze EC2
-> dedicate (vedi `orchestrator_ec2.tf`), proprio perché gli scenari di
-> scalabilità più pesanti possono richiedergli più memoria di quanta la SCP
-> permetterebbe a una task ECS (vedi sezione [Note di design](#note-di-design)).
-> Non esistono variabili `orchestrator_cpu`/`orchestrator_memory`: sono state
-> rimosse insieme alla vecchia task definition dell'orchestrator.
->
-> Se il pool di processi paralleli lato applicativo del worker risente della
-> RAM ridotta a 8 GiB, valuta di abbassare il numero di processi concorrenti
-> nel codice worker invece di alzare la memory della task.
-
 ### 3.4 Tag obbligatorio sulle risorse ECS
 
 La stessa SCP nega anche la creazione di risorse ECS (task definition,
 cluster) se la richiesta non porta **almeno un tag** (il nome/valore non
 sembra contare, solo la presenza). Il provider è già configurato con
-`default_tags` in `provider.tf`, quindi non serve fare nulla — è documentato
-qui solo per chiarezza, nel caso in futuro si tolga quel blocco per errore.
+`default_tags` in `provider.tf`, quindi non serve fare nulla.
 
 ## 4. Deploy
 
@@ -159,26 +144,26 @@ Dopo l'apply, dalla root del progetto (fuori da `terraform/`):
 
 > **L'apply crea l'infrastruttura ma la lascia ferma** (vedi sezione 6):
 > nessun worker né istanza orchestrator è in esecuzione subito dopo un
-> `apply` pulito. Avvia entrambi prima di lanciare qualunque test — un job
-> inviato a un'infrastruttura ferma resta semplicemente in coda SQS senza
-> che nessuno lo reclami, senza un errore esplicito che lo segnali.
+> `apply` pulito. Avvia entrambi prima di lanciare qualunque test.
 
 > **Prima di lanciare qualunque script, aggiorna `API_GATEWAY_URL` nel
 > `.env`** con il valore mostrato nell'output `next_steps` dell'apply appena
 > fatto. Questo endpoint **cambia a ogni ricreazione dello stack** (nuovo
-> apply dopo un `destroy`, o dopo un reset dell'account Lab): se lasci il
-> valore vecchio, il client non fallisce in modo esplicito all'avvio — parla
-> semplicemente con un endpoint API Gateway che non esiste più (o che
-> appartiene a un deploy precedente), quindi il sintomo è una richiesta che
-> non arriva mai a destinazione, non un errore chiaro. Vale anche per il
-> bucket S3 e la region, se sono cambiati.
-
+> apply dopo un `destroy`, o dopo un reset dell'account Lab).
 ```bash
 # aggiorna il tuo .env con i valori mostrati in output (bucket S3, regione,
 # e soprattutto API_GATEWAY_URL — vedi avviso sopra)
 ./run_aws.sh                          # avvia il client contro l'infrastruttura
-./script_aws/run_test_engine.sh       # oppure: sessione di test interattiva (scenari 1-10)
+./script_aws/run_test_engine.sh       # oppure: lancia una sessione di test contro
+                                       # un'istanza EC2 usa-e-getta (scenari 1-10)
 ```
+
+`run_test_engine.sh` non è interattivo per tutta la sua durata: chiede lo
+scenario da eseguire **una sola volta** all'avvio (a terminale, o passato
+come argomento), poi l'istanza EC2 prosegue da sola in background e si autodistrugge al termine del test.
+Diverso quindi da `run_test.sh` in locale/Docker (README principale, sezione
+Test di sistema), dove invece resti dentro un container interattivo e puoi
+scegliere più scenari in sequenza nella stessa sessione.
 
 ## 6. Avviare e fermare l'esecuzione senza distruggere l'infrastruttura
 
@@ -190,14 +175,8 @@ il valore "operativo" con Leader+Standby; è `terraform.tfvars.example` a
 sovrascriverlo esplicitamente con `0`, così un `apply` pulito parte fermo. Se
 ometti quella riga dal tuo `terraform.tfvars`, l'orchestrator partirebbe
 invece con 2 istanze). Nessun task Fargate né istanza EC2 dell'orchestrator
-parte da sola subito dopo l'apply — un passo esplicito è sempre richiesto,
+parte da sola subito dopo l'apply: un passo esplicito è sempre richiesto,
 in entrambe le modalità.
-
-> Se vieni da una versione precedente del progetto: `num_workers` ora
-> controlla **solo** quante risorse esistono (task definition/service, per
-> federated anche gli indici) — non più quante sono avviate. Per quello
-> serve `worker_desired_count` (vedi sotto). Vedi anche la sezione
-> [8. Passare tra centralized e federated](#8-passare-tra-centralized-e-federated).
 
 ### 6.1 Avviare
 
@@ -216,9 +195,13 @@ aws ecs update-service --cluster forest-cluster --service worker-service \
 ```
 
 **Worker, modalità `federated`** (N service separati, uno per indice — ognuno
-ospita al massimo un solo task, quindi qui non "quanti" ma "tutti o nessuno"):
+ospita al massimo un solo task, quindi qui non "quanti" ma "tutti o nessuno").
+Sostituisci `N` con il tuo `num_workers` di `terraform.tfvars` — non un
+valore fisso, deve coincidere con quanti indici Terraform ha effettivamente
+creato (vedi sezione 8.2):
 ```bash
-for i in $(seq 1 10); do
+N=10   # <-- il tuo num_workers
+for i in $(seq 1 $N); do
   aws ecs update-service --cluster forest-cluster --service "worker-service-$i" \
     --desired-count 1 --region us-east-1 > /dev/null
 done
@@ -235,7 +218,8 @@ controllando i log su CloudWatch.
 ### 6.2 Fermare
 
 Stessi comandi di sopra con `--desired-count 0` / `--min-size 0 --max-size 0
---desired-capacity 0` (loop identico per i worker federated).
+--desired-capacity 0` (loop identico per i worker federated, con lo stesso
+`N=num_workers`).
 
 **Verifica rapida che non ci sia nulla in esecuzione** (task Fargate e
 istanze EC2 sono le uniche risorse di questo stack che fatturano per tempo,
@@ -260,9 +244,8 @@ worker_desired_count       = 0   # NON num_workers: quello controlla solo
                                   # quante risorse esistono, non quante girano
 ```
 (sono già i default se usi `terraform.tfvars.example` come punto di
-partenza; il default "grezzo" di `orchestrator_desired_count` dichiarato in
-`variables.tf`, se omesso del tutto, è invece `2` — vedi la nota a inizio
-sezione 6.)
+partenza; per il default "grezzo" di `orchestrator_desired_count` se omesso
+del tutto, vedi la nota a inizio sezione 6.)
 
 ## 7. Distruggere tutto
 
@@ -335,11 +318,13 @@ terraform apply "tfplan"
 Per avviare/fermare i worker in entrambe le modalità, vedi la sezione
 [6. Avviare e fermare l'esecuzione](#6-avviare-e-fermare-lesecuzione-senza-distruggere-linfrastruttura),
 che copre già sia `centralized` sia `federated`. Un comando utile solo per
-`federated`, per vedere lo stato di tutti gli indici in un colpo solo:
+`federated`, per vedere lo stato di tutti gli indici in un colpo solo
+(sostituisci `N` con il tuo `num_workers`, come in sezione 6.1):
 
 ```bash
+N=10   # <-- il tuo num_workers
 aws ecs describe-services --cluster forest-cluster \
-  --services $(for i in $(seq 1 10); do echo -n "worker-service-$i "; done) \
+  --services $(for i in $(seq 1 $N); do echo -n "worker-service-$i "; done) \
   --region us-east-1 --query 'services[].[serviceName,status,runningCount,desiredCount]' --output table
 ```
 
