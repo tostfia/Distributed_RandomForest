@@ -360,7 +360,7 @@ La classe `Baseline` (in `src/baseline/`) rappresenta l'addestramento locale non
 
 ## Simulazione e misura della latenza di rete
 
-Il progetto richiede di valutare l'impatto della latenza di rete tra i nodi, usando `tc`/`iproute2` con la capability Linux `CAP_NET_ADMIN` — punto discusso esplicitamente col docente durante il ricevimento sui Sistemi Distribuiti.
+Il progetto richiede di valutare l'impatto della latenza di rete tra i nodi. Abbiamo notato che in locale/Docker la latenza reale tra i container è pressoché nulla (rete bridge), quindi per avere qualcosa di significativo da misurare abbiamo introdotto un ritardo artificiale con `tc`/`iproute2` (capability Linux `CAP_NET_ADMIN`). Su AWS, dove questa strada non è percorribile (vedi sotto), abbiamo adottato un approccio diverso.
 
 Il comportamento cambia in base all'ambiente:
 
@@ -393,6 +393,8 @@ I test disponibili coprono le seguenti aree operative:
 8. Elezione del leader sotto concorrenza (safety)
 9. Generazione grafici a partire dai report salvati
 10. Sostituzione ASG dell'Orchestratore (solo AWS)
+
+> **Nota sullo scenario 9**: a differenza degli altri, non esegue training/inferenza — legge e basta i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Vanno quindi eseguiti prima gli scenari che ti interessano (1, 2, ecc.), e solo dopo lo scenario 9. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo, ma per una relazione pulita conviene svuotare la cartella e rilanciare gli scenari desiderati una volta sola, con la stessa configurazione.
 
 ### AWS
 
