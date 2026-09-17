@@ -165,7 +165,7 @@ cp .env.example .env
 | **FED_SUPERVISOR_MAX_RESTARTS** | Numero intero | Tentativi di restart automatico per worker federato caduto. `0` disabilita del tutto il restart automatico. |
 | **FED_SUPERVISOR_BACKOFF_SECONDS** | Numero intero | Attesa, in secondi, prima del primo tentativo di restart. |
 | **FED_SUPERVISOR_BACKOFF_MAX_SECONDS** | Numero intero | Tetto massimo dell'attesa tra tentativi successivi (il backoff cresce fino a questo valore, poi si ferma). |
-| **FED_WORKER_WAIT_TIMEOUT_SECONDS** | Numero intero | Timeout di attesa per il rientro di un worker sostituito, usato dagli scenari di fault tolerance. Se la ometti, il default nel codice è 60s — troppo poco su AWS reale (un rimpiazzo Fargate misurato empiricamente ha richiesto 81s dal kill alla steady state). Il valore 120 nel template lascia margine sopra quell'osservazione. |
+| **FED_WORKER_WAIT_TIMEOUT_SECONDS** | Numero intero | Timeout di attesa per il rientro di un worker sostituito, usato dagli scenari di fault tolerance. |
 
 **Partizionamento federato** (solo `TRAINING_MODE=federated`, `DATASET_TYPE=real`)
 
