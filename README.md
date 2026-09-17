@@ -15,7 +15,7 @@ Sono supportati tre ambienti di esecuzione:
 
 | Ambiente | Come si avvia | Differenze |
 |---|---|---|
-| **Locale (bare-metal)** | `run_local.sh` | Ogni nodo (worker, orchestrator) gira come processo separato direttamente sull'host, in un proprio terminale, senza container. |
+| **Locale (bare-metal)** | `run_local.sh` | Ogni nodo gira come processo separato direttamente sull'host, in un proprio terminale, senza container. |
 | **Docker Compose** | `run_docker.sh` | Ogni nodo gira in un container Docker, con limiti di CPU/RAM configurabili da `.env`. |
 | **AWS** | `run_aws.sh` | I worker girano su ECS Fargate, l'orchestrator su istanze EC2, il tutto provisionato da Terraform. |
 
