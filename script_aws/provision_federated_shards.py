@@ -37,8 +37,7 @@ DEFAULT_BUCKET = os.environ.get("DATASETS_BUCKET_NAME")
 OUTPUTS_BASELINE_DIR = "outputs_baseline"
 TARGET_ROWS_PER_DAY = 200_000
 
-DEFAULT_PARTITION_STRATEGY = "by_day"  # 'by_day' = (naturale, per file/giorno di origine)
-
+DEFAULT_PARTITION_STRATEGY = "iid"
 
 def _shards_already_present(s3_client, bucket: str, num_workers: int) -> bool:
     for i in range(1, num_workers + 1):
