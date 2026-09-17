@@ -55,7 +55,7 @@ Sono supportati due ambienti di esecuzione, alternativi o combinabili:
 │   └── testing/               # test engine di sistema
 │       ├── engine.py                 # entry point, selezione scenario
 │       ├── scenarios/                # implementazione dei singoli scenari (1-10)
-│       ├── plot_generator.py         # scenario 9, grafici da report salvati
+│       ├── plot_generator.py         # scenario 10, grafici da report salvati
 │       └── test_config.json          # configurazione degli scenari di test
 ├── terraform/               # infrastruttura AWS as-code (ECR, S3, DynamoDB, SQS, ECS Fargate, EC2/ASG orchestrator, API Gateway, EFS) — vedi terraform/README.md
 ├── lambda_source/           # sorgente della funzione Lambda usata da Terraform per il deploy (copia distinta da terraform/lambda/ e src/shared/mock_aws/lambda/)
@@ -391,10 +391,10 @@ I test disponibili coprono le seguenti aree operative:
 6. Failover dell'orchestratore (durante addestramento)
 7. Failover dell'orchestratore (durante inferenza)
 8. Elezione del leader sotto concorrenza (safety)
-9. Generazione grafici a partire dai report salvati
-10. Sostituzione ASG dell'Orchestratore (solo AWS)
+9. Sostituzione ASG dell'Orchestratore (solo AWS)
+10. Generazione grafici a partire dai report salvati
 
-> **Nota sullo scenario 9**: a differenza degli altri, non esegue training/inferenza — legge e basta i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Vanno quindi eseguiti prima gli scenari che ti interessano (1, 2, ecc.), e solo dopo lo scenario 9. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo, ma per una relazione pulita conviene svuotare la cartella e rilanciare gli scenari desiderati una volta sola, con la stessa configurazione.
+> **Nota sullo scenario 10**: a differenza degli altri, non esegue training/inferenza — legge e basta i report JSON già salvati in `test_reports/` (priorità `aws > docker > local`) per produrre i grafici della relazione. Selezionando `all`, viene eseguito automaticamente **per ultimo**, dopo tutti gli altri scenari (inclusa la sostituzione ASG). Se lanci gli scenari singolarmente uno alla volta, esegui prima quelli che ti interessano e lancia il `10` solo alla fine. Se nella stessa cartella `test_reports/<ambiente>/` convivono report con configurazioni diverse (numero di alberi, dimensione dataset), sono esperimenti non confrontabili: il generatore li tiene separati e lo segnala a schermo, ma per una relazione pulita conviene svuotare la cartella e rilanciare gli scenari desiderati una volta sola, con la stessa configurazione.
 
 ### AWS
 
