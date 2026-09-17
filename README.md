@@ -1,19 +1,23 @@
 # Distributed_RandomForest
 
-Sistema distribuito per il **training** e l'**inferenza** di modelli Random Forest, sviluppato per il progetto congiunto dei corsi di **Machine Learning** e **Sistemi Distribuiti e Cloud Computing** (A.A. 2025/26 — Università degli Studi di Roma Tor Vergata). 
+Sistema distribuito per il **training** e l'**inferenza** di modelli Random Forest, realizzato per il progetto congiunto dei corsi di **Machine Learning** e **Sistemi Distribuiti e Cloud Computing** (A.A. 2025/26 — Università degli Studi di Roma Tor Vergata), secondo la traccia ufficiale *"Progetto congiunto ML+SDCC 1: Training e Inferenza Distribuiti per Modelli Random Forest"*.
 
-Il sistema segue un'architettura **master-worker**: un *orchestrator* centrale distribuisce l'addestramento dei singoli alberi della foresta su più nodi *worker*, in due modalità:
+Il sistema segue l'architettura **master-worker** richiesta dalla traccia: un *orchestrator* centrale riceve dal client il dataset (URL a uno storage S3) e gli iperparametri del modello, distribuisce l'addestramento dei singoli alberi su più nodi *worker* e restituisce, a fine training, un **identificativo univoco del modello** — non il modello stesso. Le richieste di inferenza, identificate da quel model ID, vengono servite sfruttando l'infrastruttura distribuita e aggregando i risultati prodotti dai worker coinvolti. Il sistema gestisce inoltre la **tolleranza ai guasti** dei nodi durante training e inferenza, recuperando i risultati intermedi già salvati invece di far ripartire da zero i task falliti (vedi [Test di sistema](#test-di-sistema-performance-scalabilità-fault-tolerance)), e permette — requisito opzionale della traccia — il download del modello addestrato in formato **Pickle** standard scikit-learn, per un utilizzo in un ambiente di inferenza locale.
+
+Due modalità di training, selezionabili con `TRAINING_MODE`:
 
 - **Centralizzata**: il dataset è caricato su uno storage condiviso e i worker addestrano porzioni della foresta sui medesimi dati.
-- **Federata**: il dataset è pre-partizionato e distribuito sui nodi: ogni worker addestra localmente sui propri dati senza mai trasferirli al coordinatore, che si limita ad aggregare i modelli.
+- **Federata** (prevista dalla traccia per i gruppi di tre studenti, in alternativa al caricamento di un dataset centralizzato): il dataset è già pre-partizionato e distribuito sui nodi — ogni worker addestra localmente sui propri dati senza mai trasferire i dati grezzi al coordinatore, che si limita ad aggregare i parametri del modello finale.
 
-Sono supportati due ambienti di esecuzione, alternativi o combinabili:
+Le prestazioni vengono valutate confrontando il sistema con una baseline locale non distribuita (accuratezza e tempo di esecuzione, sia in training sia in inferenza) su più task di predizione, uno dei quali su dati sintetici generati con scikit-learn — per controllare la dimensione del dataset e valutare la scalabilità al crescere del numero di worker (vedi `src/baseline/`).
 
-| Ambiente | Come si avvia | Quando usarlo |
+Sono supportati tre ambienti di esecuzione, alternativi o combinabili:
+
+| Ambiente | Come si avvia | Differenze |
 |---|---|---|
-| **Locale** | `run_local.sh` | Sviluppo rapido, debugging diretto sul sistema host e simulazione di condizioni di rete con `tc netem`  |
-| **Docker Compose** | `run_docker.sh` | Test in ambiente containerizzato e isolato, verifica dell'interazione multi-nodo e validazione delle configurazioni prima del deploy cloud. |
-| **AWS** | `run_aws.sh` | Esecuzione su infrastruttura cloud per gli esperimenti di scalabilità richiesti dal progetto |
+| **Locale (bare-metal)** | `run_local.sh` | Ogni nodo (worker, orchestrator) gira come processo separato direttamente sull'host, in un proprio terminale, senza container. |
+| **Docker Compose** | `run_docker.sh` | Ogni nodo gira in un container Docker, con limiti di CPU/RAM configurabili da `.env`. |
+| **AWS** | `run_aws.sh` | I worker girano su ECS Fargate, l'orchestrator su istanze EC2, il tutto provisionato da Terraform. |
 
 ---
 
@@ -134,65 +138,78 @@ cp .env.example .env
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione è in esecuzione dentro un container Docker. |
-| **TRAINING_MODE** | `centralized/federated` | Obbligatoria. Seleziona la modalità di addestramento (dataset unico condivisibile o partizionato per-nodo). |
-| **ENV_MODE** | `local/aws` | Obbligatoria. Ambiente di esecuzione (local per Docker/host, aws per Fargate/EC2/S3). |
-| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. |
-| **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se DATASET_TYPE=synthetic. |
-| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per TRAINING_MODE=centralized (ignorata in federated). `shared` (default): ogni worker scarica l'intero dataset. `sharded`: il dataset viene partizionato, ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
+| **RUNNING_IN_DOCKER** | `true/false` | Indica se l'applicazione gira dentro un container Docker. La impostano già gli script (`run_docker.sh`, `run_test.sh`): non serve toccarla a mano, a meno di lanciare `docker compose up` manualmente. |
+| **TRAINING_MODE** | `centralized/federated` | Seleziona la modalità di addestramento. In pratica va sempre impostata esplicitamente: i vari script che la leggono hanno fallback diversi tra loro se assente, con il rischio di far partire componenti in modalità incoerenti. |
+| **ENV_MODE** | `local/aws` | Seleziona l'ambiente di esecuzione: `local` per Docker/host, `aws` per Fargate/EC2/S3 — determina quale storage (locale o S3) e quale orchestrazione infrastrutturale usare. Va sempre impostata esplicitamente, per lo stesso motivo di `TRAINING_MODE`. |
+| **DATASET_TYPE** | `real/synthetic` | Specifica se caricare il dataset reale (CICIDS) o generare un dataset sintetico. Se la ometti, gli script di provisioning ricadono su `real` — ma il menu interattivo del client te lo richiede comunque a ogni avvio, quindi impostarla qui serve solo per gli script non interattivi (provisioning, test engine). `real` richiede il dataset scaricato in locale (vedi passo 4 più sotto), `synthetic` no. |
+| **SYNTHETIC_N_SAMPLES** | Numero intero | Numero di campioni generati se `DATASET_TYPE=synthetic`. Ignorata con `DATASET_TYPE=real`. |
+| **CENTRALIZED_DATASET_MODE** | `shared/sharded` | Solo per `TRAINING_MODE=centralized` (ignorata in federated). Se la ometti, il sistema usa `shared`: ogni worker scarica l'intero dataset. Con `sharded`, invece, il dataset viene partizionato e ogni worker scarica solo una fetta — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata) per il comportamento diverso tra reale e sintetico. |
 
 **Dimensionamento del cluster (locale/Docker)**
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **NUM_WORKERS** | Numero intero | Quanti worker avviare in locale/Docker (in AWS federated: quanti indici/shard fissi crea Terraform, vedi `terraform/README.md`). |
-| **WORKER_CORES** | Numero intero (opzionale) | Override esplicito di quanti processi/thread paralleli usa UN worker per costruire gli alberi. Senza questa variabile il numero è calcolato dinamicamente (core disponibili ÷ worker attivi sulla stessa macchina). Impostarla serve per esperimenti di strong scaling, dove ogni worker deve rappresentare una capacità di calcolo fissa e comparabile, indipendente da quanti altri worker girano in parallelo. **Non va confusa con `WORKER_CPUS`**, che è un limite Docker, non un parametro applicativo. |
-| **WORKER_CPUS** / **ORCHESTRATOR_CPUS** | Numero (es. `1`, `0.5`) | Limite CPU Docker Compose per container worker/orchestrator (evita di saturare la macchina di sviluppo con `NUM_WORKERS` alto). |
-| **WORKER_MEM_LIMIT** / **ORCHESTRATOR_MEM_LIMIT** | Es. `2048m` | Limite di memoria Docker Compose per container worker/orchestrator. |
-| **IMAGE_NAME** | Stringa | Nome:tag dell'immagine Docker locale (es. `rf-worker-local:latest`). |
-| **EC2_ID** | Stringa libera | Etichetta usata solo per comporre il nome interno dell'orchestratore (log, lock di leadership su DynamoDB) — non incide sulla logica applicativa. Default `Locale` se assente; su AWS Terraform la imposta fissa a `EC2Orchestrator`. |
-| **MY_UID** / **MY_GID** | Numero intero | UID/GID mappati dentro i container per i permessi delle cartelle di storage locale. I valori nel template sono solo un default: da impostare con `$(id -u)`/`$(id -g)` del proprio utente (vedi passo 4 sotto) prima della build, altrimenti si rischiano errori di permessi sui volumi montati. |
+| **NUM_WORKERS** | Numero intero | Quanti worker avviare in locale/Docker (in AWS federated: quanti indici/shard fissi crea Terraform, vedi `terraform/README.md`). Se la ometti, il default varia da uno script all'altro (2 in alcuni casi, 3 in altri): impostala sempre esplicitamente, altrimenti client e provisioning potrebbero ragionare su un numero di worker diverso. |
+| **WORKER_CORES** | Numero intero (opzionale) | Override esplicito di quanti processi/thread paralleli usa UN worker per costruire gli alberi. Se la ometti, il numero è calcolato dinamicamente (core disponibili ÷ worker attivi sulla stessa macchina). Impostarla serve per esperimenti di strong scaling, dove ogni worker deve rappresentare una capacità di calcolo fissa e comparabile, indipendente da quanti altri worker girano in parallelo. **Non va confusa con `WORKER_CPUS`**, che è un limite Docker, non un parametro applicativo. |
+| **WORKER_CPUS** / **ORCHESTRATOR_CPUS** | Numero (es. `1`, `0.5`) | Limite CPU Docker Compose per container worker/orchestrator (evita di saturare la macchina di sviluppo con `NUM_WORKERS` alto). Se le ometti, Docker Compose non applica alcun limite: i container possono usare tutta la CPU disponibile sull'host. |
+| **WORKER_MEM_LIMIT** / **ORCHESTRATOR_MEM_LIMIT** | Es. `2048m` | Limite di memoria Docker Compose per container worker/orchestrator. Stesso discorso di `WORKER_CPUS`: se assenti, nessun limite applicato. |
+| **IMAGE_NAME** | Stringa | Nome:tag dell'immagine Docker locale (es. `rf-worker-local:latest`), usato da `docker-compose.yml` per sapere quale immagine costruire/avviare. |
+| **EC2_ID** | Stringa libera | Etichetta usata solo per comporre il nome interno dell'orchestratore (log, lock di leadership su DynamoDB) — non incide sulla logica applicativa. Se la ometti, il default nel codice è `Locale`; su AWS Terraform la imposta fissa a `EC2Orchestrator`. |
+| **MY_UID** / **MY_GID** | Numero intero | UID/GID mappati dentro i container per i permessi delle cartelle di storage locale. I valori nel template sono solo un punto di partenza: se non li sostituisci con `$(id -u)`/`$(id -g)` del tuo utente (vedi passo 5 sotto) prima della build, rischi errori di permessi sui volumi montati. |
 
 **Supervisor dei worker federati** (restart automatico in caso di crash)
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **FED_SUPERVISOR_MAX_RESTARTS** | Numero intero | Tentativi di restart automatico per worker federato caduto (`0` = disabilitato). |
-| **FED_SUPERVISOR_BACKOFF_SECONDS** | Numero intero | Attesa (in secondi) prima del primo tentativo di restart. |
-| **FED_SUPERVISOR_BACKOFF_MAX_SECONDS** | Numero intero | Tetto massimo dell'attesa tra tentativi successivi. |
-| **FED_WORKER_WAIT_TIMEOUT_SECONDS** | Numero intero | Timeout di attesa per il rientro di un worker sostituito, usato dagli scenari di fault tolerance. Valore di default tarato empiricamente su AWS: un rimpiazzo Fargate reale (attach ENI + pull immagine + boot) ha richiesto 81s, quindi 120s lascia margine. |
+| **FED_SUPERVISOR_MAX_RESTARTS** | Numero intero | Tentativi di restart automatico per worker federato caduto. `0` disabilita del tutto il restart automatico. |
+| **FED_SUPERVISOR_BACKOFF_SECONDS** | Numero intero | Attesa, in secondi, prima del primo tentativo di restart. |
+| **FED_SUPERVISOR_BACKOFF_MAX_SECONDS** | Numero intero | Tetto massimo dell'attesa tra tentativi successivi (il backoff cresce fino a questo valore, poi si ferma). |
+| **FED_WORKER_WAIT_TIMEOUT_SECONDS** | Numero intero | Timeout di attesa per il rientro di un worker sostituito, usato dagli scenari di fault tolerance. Se la ometti, il default nel codice è 60s — troppo poco su AWS reale (un rimpiazzo Fargate misurato empiricamente ha richiesto 81s dal kill alla steady state). Il valore 120 nel template lascia margine sopra quell'osservazione. |
 
 **Partizionamento federato** (solo `TRAINING_MODE=federated`, `DATASET_TYPE=real`)
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. |
+| **PARTITION_STRATEGY** | `by_day/iid` | Strategia di partizionamento dello shard federato. Se la ometti, il default nel codice è `iid` (mescolamento casuale globale). `by_day` partiziona invece per giorno/file di origine — vedi [Modalità di training](#modalità-di-training-centralizzata-vs-federata). |
 | **DAY_COLUMN** | Stringa (opzionale, solo con `PARTITION_STRATEGY=by_day`) | Nome della colonna da usare per partizionare per giorno. **Non obbligatoria**: se omessa, il sistema usa automaticamente la colonna generata dal loader (`_capture_day`) — `by_day` funziona senza configurarla. Impostarla serve solo per usare una colonna diversa già presente nel dataset. |
 
 **Timeout RPC**
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **RPC_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di training. |
-| **RPC_INFERENCE_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di inferenza. |
+| **RPC_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di training. Se la ometti, il default nel codice è 1800s (30 minuti). |
+| **RPC_INFERENCE_SYNC_TIMEOUT_SECONDS** | Numero intero | Timeout per le chiamate RPC sincrone di inferenza. Se la ometti, il default nel codice è 900s (15 minuti). |
 
 **Sorgenti dati**
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **DATASET_LOCAL_PATH** | Path | Cartella di cache locale per i CSV grezzi del dataset reale. |
-| **DEFAULT_DATASET_S3_URL** | URL S3 | URL S3 pubblico di default per il dataset CICIDS2018 (sorgente esterna, non un bucket del progetto). |
+| **DATASET_LOCAL_PATH** | Path | Cartella di cache locale per i CSV grezzi del dataset reale. Se la ometti, il default nel codice è `./dataset_cache`. |
+| **DEFAULT_DATASET_S3_URL** | URL S3 | URL S3 pubblico del dataset CICIDS2018 (sorgente esterna, non un bucket del progetto). **Puramente informativa**: nessuno script la legge davvero — il client ha lo stesso URL scritto direttamente nel codice come fallback per il dataset reale in locale. Impostarla o ometterla non cambia il comportamento del sistema; serve solo a chi legge il `.env` per sapere da dove viene il dataset. |
 
 **Risorse AWS** (solo `ENV_MODE=aws` — valori specifici dell'account, non committare quelli reali)
 
 | Variabile | Valori ammessi | Descrizione |
 |---|---|---|
-| **DATASETS_BUCKET_NAME** | Stringa | Nome del bucket S3 dei dataset (valore d'output di `terraform apply`, vedi `terraform/README.md`). |
-| **AWS_DEFAULT_REGION** | Es. `us-east-1` | Regione AWS del deploy. |
-| **API_GATEWAY_URL** | URL | Endpoint API Gateway esposto dal deploy Terraform — **cambia ad ogni ricreazione dello stack**, va aggiornato dopo ogni `apply`. |
+| **DATASETS_BUCKET_NAME** | Stringa | Nome del bucket S3 dei dataset (valore d'output di `terraform apply`, vedi `terraform/README.md`). Senza questa variabile, gli script AWS (provisioning, upload, test engine) falliscono esplicitamente invece di usare un bucket di default. |
+| **AWS_DEFAULT_REGION** | Es. `us-east-1` | Regione AWS del deploy. Se la ometti, gli script ricadono su `us-east-1`. |
+| **API_GATEWAY_URL** | URL | Endpoint API Gateway esposto dal deploy Terraform — **cambia ad ogni ricreazione dello stack**, va aggiornato dopo ogni `apply`. Se lasci un valore vecchio, il client non fallisce in modo esplicito: parla semplicemente con un endpoint che non esiste più. |
 
 
-### 4. Prepara i permessi delle cartelle dati locali
+### 4. Procurati il dataset reale (solo se `DATASET_TYPE=real`)
+
+Se hai impostato `DATASET_TYPE=synthetic`, salta questo passo: ogni worker genera il proprio dataset sintetico al boot, nessun file va scaricato.
+
+Per `DATASET_TYPE=real`, il sistema si aspetta di trovare i CSV del dataset **CICIDS2018** già presenti in locale in `dataset_cache/` (o nel path indicato da `DATASET_LOCAL_PATH` nel `.env`) — non li scarica da solo, e fallisce con un errore esplicito se la cartella è vuota o assente. Il dataset è ospitato pubblicamente su AWS Open Data allo stesso URL S3 già presente in `DEFAULT_DATASET_S3_URL` nel `.env.example`:
+
+```bash
+mkdir -p dataset_cache
+aws s3 sync "s3://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/" ./dataset_cache --no-sign-request
+```
+
+`--no-sign-request` funziona perché è un bucket pubblico dell'AWS Open Data Registry: non servono credenziali AWS per questo download. Se il comando fallisce, verifica sulla pagina ufficiale del dataset ([registry.opendata.aws](https://registry.opendata.aws/cse-cic-ids2018/)) che il path non sia cambiato.
+
+### 5. Prepara i permessi delle cartelle dati locali
 
 Prima della prima build, assicurati che Docker possa scrivere nelle cartelle di storage locale:
 
@@ -205,7 +222,7 @@ export MY_UID=$(id -u)
 export MY_GID=$(id -g)
 ```
 
-### 5. Build e avvio
+### 6. Build e avvio
 
 **Consigliato: `run_docker.sh` questo script:
 - esegue automaticamente il **provisioning degli shard federati** se `TRAINING_MODE=federated` (senza, l'orchestrator si aspetta shard già presenti e non li genera più a runtime — vedi `script_local/provision_local_shards.py`);
