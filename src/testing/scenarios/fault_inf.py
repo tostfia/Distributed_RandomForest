@@ -39,11 +39,8 @@ def _resolve_aws_infra(config: dict):
 def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
     """
     Simula il crash improvviso di UN worker Fargate fermando fisicamente il suo
-    task ECS (ecs:StopTask) — l'equivalente AWS del 'docker kill worker-1' usato
-    in locale/Docker Compose. Su Fargate non esiste un docker.sock raggiungibile
-    dal task del test-engine, e la porta RPC 18861 del worker non è comunque
-    quella del container del test-engine (ogni worker ha la propria ENI/IP): né
-    il ramo Docker né quello 'lsof sulla porta locale' possono funzionare qui.
+    task ECS (ecs:StopTask) (l'equivalente AWS del 'docker kill worker-1') usato
+    in locale/Docker Compose. 
 
     In centralized il worker scelto è arbitrario (sono intercambiabili per
     design) e worker_index viene ignorato: si colpisce sempre 'worker-service'.
@@ -51,8 +48,7 @@ def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
     BaseTestScenario._pick_worker_index_with_real_work) invece di essere
     sempre fisso a 1: con l'allocazione proporzionale degli alberi
     (FederatedOrchestrator._allocate_tree_quotas), un worker con shard
-    piccolo/vuoto (tipico con partizionamento Dirichlet ad alpha basso)
-    potrebbe non avere ricevuto alcun lavoro reale da redistribuire.
+    piccolo/vuoto potrebbe non avere ricevuto alcun lavoro reale da redistribuire.
 
     Se il worker-service ha desired-count > 0 (sempre, salvo teardown), ECS
     pianifica automaticamente un task di rimpiazzo: è l'equivalente Fargate del
@@ -164,11 +160,7 @@ class InferenceWorkerFaultScenario(BaseTestScenario):
             mode = os.environ.get("TRAINING_MODE", "centralized")
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
 
-            # In centralized qualunque worker va bene. In federated, "sempre
-            # worker 1" rischiava di colpire un worker che con l'allocazione
-            # proporzionale degli alberi non ha ricevuto lavoro reale (shard
-            # piccolo/vuoto, tipico con Dirichlet ad alpha basso) — vedi
-            # BaseTestScenario._pick_worker_index_with_real_work.
+
             target_worker_index = 1
             if mode == "federated":
                 target_worker_index = self._pick_worker_index_with_real_work(environment, default_index=1)

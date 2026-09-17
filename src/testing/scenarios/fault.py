@@ -56,8 +56,7 @@ def _kill_one_ecs_worker_task(mode: str, config: dict, worker_index: int = 1):
     BaseTestScenario._pick_worker_index_with_real_work) invece di essere
     sempre fisso a 1: con l'allocazione proporzionale degli alberi
     (FederatedOrchestrator._allocate_tree_quotas), un worker con shard
-    piccolo/vuoto (tipico con partizionamento Dirichlet ad alpha basso)
-    potrebbe non avere ricevuto alcun lavoro reale da redistribuire.
+    piccolo/vuoto potrebbe non avere ricevuto alcun lavoro reale da redistribuire.
 
     Se il worker-service ha desired-count > 0 (sempre, salvo teardown), ECS
     pianifica automaticamente un task di rimpiazzo: è l'equivalente Fargate del
@@ -160,12 +159,6 @@ class FaultToleranceScenario(BaseTestScenario):
             is_docker = os.environ.get("RUNNING_IN_DOCKER") == "true"
             print("\n[TEST TRIGGER] Simulo guasto imprevisto: Interrompo forzatamente una connessione Worker...")
 
-            # In centralized qualunque worker va bene (sono intercambiabili per
-            # design). In federated, invece, "sempre worker 1" rischiava di
-            # colpire un worker che con l'allocazione proporzionale degli
-            # alberi non ha ricevuto alcun lavoro reale (shard piccolo/vuoto,
-            # tipico con Dirichlet ad alpha basso) — vedi
-            # BaseTestScenario._pick_worker_index_with_real_work.
             target_worker_index = 1
             if mode == "federated":
                 target_worker_index = self._pick_worker_index_with_real_work(environment, default_index=1)
@@ -257,10 +250,6 @@ class FaultToleranceScenario(BaseTestScenario):
             "dataset_path": self.config.get("dataset_path", ""),
             "hyperparameters": hp,
         }
-        # Solo in federato: senza questo, i log/le metriche di questo scenario
-        # etichetterebbero sempre "iid"/"proportional" anche se gli shard sul
-        # disco sono stati provisionati con Dirichlet/equal (vedi
-        # BaseTestScenario._augment_payload_with_partitioning).
         if os.environ.get("TRAINING_MODE", "centralized") == "federated":
             payload = self._augment_payload_with_partitioning(payload)
         return payload
