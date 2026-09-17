@@ -179,7 +179,7 @@ class FederatedWorker(BaseWorker):
     manifesti di feature selection) prima ancora di registrarsi come
     disponibile: li scarica una volta sola nel proprio __init__, da un bucket
     S3 seminato in precedenza da uno script di provisioning standalone
-    (scripts/provision_federated_shards.py). Nessun download o generazione di
+    (script_aws/provision_federated_shards.py). Nessun download o generazione di
     dati avviene più reattivamente durante un job, questo simula un vero
     scenario federato, dove il nodo nasce già con il proprio dataset locale.
 
@@ -289,7 +289,7 @@ class FederatedWorker(BaseWorker):
         (config_real.json / config_synthetic.json), se presenti.
 
         Questi artefatti sono generati offline da uno script di provisioning
-        dedicato (scripts/provision_federated_shards.py), MAI durante un job
+        dedicato (script_aws/provision_federated_shards.py), MAI durante un job
         di training.
         """
         bucket_name = os.environ.get(
@@ -315,7 +315,7 @@ class FederatedWorker(BaseWorker):
                 raise IOError(
                     f"[{self.worker_name}] Impossibile scaricare lo shard '{s3_key}' dal bucket "
                     f"'{bucket_name}'. Hai eseguito lo script di provisioning "
-                    f"(scripts/provision_federated_shards.py) prima di avviare i worker? Dettaglio: {e}"
+                    f"(scripts_aws/provision_federated_shards.py) prima di avviare i worker? Dettaglio: {e}"
                 )
 
         # 2. Manifesti di feature selection: best-effort, possono non esistere
@@ -567,7 +567,7 @@ class FederatedWorker(BaseWorker):
         if not os.path.exists(local_train_path):
             hint = (
                 " Il provisioning AWS non è stato eseguito o è fallito: lancia "
-                "'python -m scripts.provision_federated_shards' prima di avviare i worker."
+                "'python -m script_aws.provision_federated_shards' prima di avviare i worker."
                 if self.environment == "aws"
                 else ""
             )
