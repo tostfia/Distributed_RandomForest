@@ -109,6 +109,17 @@ class CICIDSPreprocessor:
         """
         Rimozione metadati, feature ingegnerizzate e sanificazione NaN/inf.
         Da eseguire in modo indipendente sulle singole fette (Train e Test) dopo lo split.
+
+        NOTA MEMORIA: l'unica copia difensiva del DataFrame in ingresso avviene
+        qui, una sola volta. I metodi privati sottostanti (_drop_metadata_columns,
+        _convert_feature_columns_to_numeric, _add_engineered_features,
+        _drop_invalid_rows) NON copiano più internamente: operano sulla stessa
+        reference, che viene comunque riassegnata ad ogni step (df = self._xxx(df)),
+        quindi il DataFrame precedente resta comunque libero per il garbage
+        collector. Copiare ad ogni sotto-fase era ridondante e, su dataset da
+        milioni di righe con colonne ancora in dtype object/stringa (vedi
+        RawCSVDataLoader), moltiplicava inutilmente il picco di RAM fino a
+        saturare il limite del container.
         """
         df = df.copy()
         initial_shape = df.shape
@@ -138,7 +149,6 @@ class CICIDSPreprocessor:
         return df
 
     def _drop_metadata_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
         columns_to_drop = [
             col for col in df.columns
             if col != self.target_column
@@ -173,7 +183,6 @@ class CICIDSPreprocessor:
         È l'unico punto dell'intera architettura responsabile della tipizzazione 
         dei dati, posizionato strategicamente a valle del loader.
         """
-        df = df.copy()
         feature_columns = df.columns.difference([self.target_column])
         df[feature_columns] = df[feature_columns].apply(pd.to_numeric, errors="coerce")
         return df
@@ -220,8 +229,6 @@ class CICIDSPreprocessor:
                 f"cambiato rispetto a quello atteso da CICFlowMeter-V3) prima di procedere."
             )
 
-        df = df.copy()
-
         df["Flow IAT CV"] = df["Flow IAT Std"] / df["Flow IAT Mean"].replace(0, np.nan)
         df["Fwd IAT CV"] = df["Fwd IAT Std"] / df["Fwd IAT Mean"].replace(0, np.nan)
         df["SYN_ACK_Ratio"] = df["SYN Flag Cnt"] / (df["ACK Flag Cnt"] + 1)
@@ -239,7 +246,6 @@ class CICIDSPreprocessor:
         return df
 
     def _drop_invalid_rows(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
         rows_before = df.shape[0]
         df = df.replace([np.inf, -np.inf], np.nan)
         df = df.dropna().reset_index(drop=True)
