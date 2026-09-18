@@ -543,7 +543,7 @@ def _read_partitioning_manifest(environment: str):
             with open(manifest_path, "r") as f:
                 return json.load(f)
         else:
-            bucket_name = os.getenv("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket")
+            bucket_name = os.getenv("DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1")
             s3_client = boto3.client("s3", region_name=cfg.aws_region)
             try:
                 resp = s3_client.get_object(Bucket=bucket_name, Key="federated_shards/_manifest.json")

@@ -30,7 +30,7 @@ def _derive_job_id(source_info: str) -> str:
 
 def get_task_storage_paths(source_info: str, base_seed: int, num_trees: int,
                             bucket_env_var: str = "DATASETS_BUCKET_NAME",
-                            default_bucket: str = "my-cluster-datasets-bucket-759804778194-us-east-1-an"):
+                            default_bucket: str = "rf-distributed-datasets-383056860320-us-east-1"):
     """
     Genera i percorsi per lo storage condiviso basandosi sul TASK.
     Estrae il job_id dal source_info per evitare collisioni tra job diversi.

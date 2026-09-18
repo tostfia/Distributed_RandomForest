@@ -17,7 +17,7 @@ from src.shared.binding.serviceregistry import ServiceRegistry
 from src.shared.binding.taskregistry import TaskRegistry
 from src.shared.mock_aws.dynamodb.dynamodb_factory import DynamoDBFactory
 
-BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an")
+BUCKET_NAME = os.environ.get("DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1")
 # Tabella DynamoDB utilizzata come sidecar per i metadati dei job.
 # Assicura che la procedura di recovery attivo (_perform_active_recovery) 
 # possa ripristinare il payload originale esatto (iperparametri, dataset, 

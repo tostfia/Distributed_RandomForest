@@ -295,7 +295,7 @@ class FederatedWorker(BaseWorker):
         di training.
         """
         bucket_name = os.environ.get(
-            "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+            "DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1"
         )
         s3_client = boto3.client("s3")
 

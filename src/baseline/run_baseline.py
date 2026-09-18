@@ -54,13 +54,8 @@ macchina) vengono salvati separatamente per numero di alberi
 scalabilità come termine di paragone "conviene distribuire?".
 """
 
-# Stesso bucket/convenzione env var di federated.py e BaseOrchestrator.py: il
-# manifesto va sincronizzato lì perché l'orchestratore su AWS (container
-# Fargate/EC2) non ha accesso al filesystem locale di questa macchina, quindi
-# non può leggere './outputs_baseline/config_<dataset_type>.json' come fa in
-# locale (vedi BaseOrchestrator._resolve_baseline_config_path).
 BASELINE_CONFIG_BUCKET_NAME = os.environ.get(
-    "DATASETS_BUCKET_NAME", "my-cluster-datasets-bucket-759804778194-us-east-1-an"
+    "DATASETS_BUCKET_NAME", "rf-distributed-datasets-383056860320-us-east-1"
 )
 
 
