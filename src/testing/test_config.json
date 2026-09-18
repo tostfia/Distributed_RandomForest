@@ -18,7 +18,7 @@
     "class_weight": null,
     "bootstrap": true,
     "max_samples": 0.3,
-    "tree_type": "regressor",
+    "tree_type": "classifier",
     "target_column": "Label",
     "random_state": 123
   },
