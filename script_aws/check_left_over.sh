@@ -9,7 +9,7 @@
 # NAT Gateway, Load Balancer, VPC Endpoint dimenticati).
 #
 # Uso:
-#   ./check_leftover.sh
+#   ./check_left_over.sh
 # =====================================================================
 set -u
 
