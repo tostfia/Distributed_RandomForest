@@ -64,10 +64,10 @@ PHASE_COLORS = {
 }
 
 PHASE_LABELS = {
-    "etl_seconds":            "ETL / preparazione dati (seriale)",
-    "training_only_seconds":  "Costruzione alberi (parallelo)",
-    "aggregation_seconds":    "Aggregazione modello (seriale)",
-    "oob_estimation_seconds": "Stima OOB (seriale)",
+    "etl_seconds":            "ETL / preparazione dati",
+    "training_only_seconds":  "Costruzione alberi",
+    "aggregation_seconds":    "Aggregazione modello",
+    "oob_estimation_seconds": "Stima OOB",
     "unaccounted_seconds":    "Overhead non attribuito",
 }
 
@@ -845,9 +845,7 @@ class PlotGenerator:
         ax.margins(x=0.2)
         self._titles(fig, ax, "Distribuzione delle classi nel test set",
                      f"{self._env_subtitle(run)} - sbilanciamento {ratio:.1f} : 1")
-        self._footnote(fig, f"Conteggi ricavati dal campo 'support' di {source}. "
-                            f"Lo sbilanciamento motiva l'uso di F1 e AUC accanto all'accuracy. "
-                            f"{self._provenance(run)}")
+        self._footnote(fig, f"Conteggi ricavati dal campo 'support' di {source}. {self._provenance(run)}")
         self._save(fig, "ml_01_distribuzione_classi.png")
 
     def plot_feature_importance(self, top_n: int = 15):
@@ -906,8 +904,7 @@ class PlotGenerator:
                      f"RandomForest {hp.get('tree_type', 'n/d')} - "
                      f"{hp.get('n_estimators', 'n/d')} alberi - "
                      f"le prime {k} feature pesano il {cumulative * 100:.1f} % del totale")
-        self._footnote(fig, "L'importanza MDI e' distorta a favore delle feature ad alta cardinalita': "
-                            "va letta come ordinamento indicativo, non come misura causale.")
+        self._footnote(fig, f"Fonte: '{self.baseline_pkl_path}'.")
         self._save(fig, "ml_02_feature_importance.png")
 
     @staticmethod
@@ -1040,9 +1037,7 @@ class PlotGenerator:
 
         legend_labels = ("Baseline monolitica (locale, n_jobs=1)",
                          "Sistema distribuito (Master-Worker RPC)")
-        note = (f"Distribuito: scenario '{source}'. Stesso random_state e stessi iperparametri "
-                f"della baseline: un Δ nullo e' il risultato atteso e dimostra la neutralita' "
-                f"algoritmica della distribuzione. {self._provenance(run)}")
+        note = f"Distribuito: scenario '{source}'. {self._provenance(run)}"
 
         if not is_classification:
             # Le metriche di regressione hanno ordini di grandezza diversi
@@ -1219,11 +1214,7 @@ class PlotGenerator:
             subtitle += f" - carico fisso di {trees} alberi"
         title = self._title_with_variant("Strong scaling: tempo di addestramento a carico costante", run)
         self._titles(fig, ax, title, subtitle)
-        self._footnote(fig, "Assi log-log: la retta ideale rappresenta uno scaling lineare "
-                            "perfetto a partire dalla configurazione piu' piccola misurata. "
-                            "La curva misurata e' il tempo totale di addestramento "
-                            "(ETL, costruzione alberi e aggregazione inclusi), omogeneo con "
-                            "il riferimento T_1node della baseline. " + self._provenance(run))
+        self._footnote(fig, self._provenance(run))
         self._save(fig, f"sdcc_01_strong_scaling_{suffix}.png")
 
     def _trees_per_scale(self, run=None):
@@ -1436,7 +1427,10 @@ class PlotGenerator:
         breakdown_subtitle = self._env_subtitle(run) + (f" ({variant})" if variant else "")
         fig.suptitle(f"Scomposizione del tempo di addestramento - {breakdown_subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, self._provenance(run))
+        self._footnote(fig, "Solo la fascia blu si riduce all'aumentare dei worker: le fasi "
+                            "seriali restano pressoche' costanti e, crescendo in quota "
+                            "relativa (pannello destro), fissano il tetto di Amdahl allo "
+                            "speedup ottenibile. " + self._provenance(run))
         filename = f"sdcc_03_scomposizione_tempi_{suffix}.png" if suffix else "sdcc_03_scomposizione_tempi.png"
         self._save(fig, filename)
 
@@ -1541,8 +1535,7 @@ class PlotGenerator:
         title = self._title_with_variant("Throughput addestramento del sistema distribuito", run)
         self._titles(fig, ax, title, subtitle)
 
-        note = "Throughput misurato a carico fisso: cresce con i worker fintanto che la parte parallela domina il tempo totale."
-        self._footnote(fig, note + " " + self._provenance(run))
+        self._footnote(fig, self._provenance(run))
         self._save(fig, f"sdcc_04_throughput_{suffix}.png")
 
     def plot_fault_tolerance_overhead(self):
@@ -1646,10 +1639,7 @@ class PlotGenerator:
 
         fig.suptitle(f"Costo della tolleranza ai guasti - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, "I tempi di addestramento sono normalizzati per albero perche' i tre "
-                            "scenari possono essere stati eseguiti con carichi diversi. "
-                            "La differenza rispetto al job pulito e' il costo di rilevazione del "
-                            "guasto piu' la ridistribuzione del lavoro perso. " + self._provenance(run))
+        self._footnote(fig, self._provenance(run))
         self._save(fig, "sdcc_05_overhead_fault_tolerance.png")
 
     # =======================================================================
@@ -1740,10 +1730,6 @@ class PlotGenerator:
 
         fig.suptitle("Ambiente di esecuzione: locale, containerizzato, cloud",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, "I tempi confrontano hardware diverso (CPU locale vs vCPU Fargate) e "
-                            "vanno letti come caratterizzazione dell'ambiente, non come merito "
-                            "dell'architettura. Le metriche di qualita', invece, devono coincidere: "
-                            "un loro scostamento segnalerebbe un bug, non un effetto dell'ambiente.")
         self._save(fig, "cmp_01_ambienti.png")
 
     def plot_network_impact(self):
@@ -1822,10 +1808,7 @@ class PlotGenerator:
 
         fig.suptitle(f"Sensibilita' alla latenza di rete - {self._env_subtitle(run)}",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, "Latenza iniettata con tc netem sull'interfaccia dei container. "
-                            "La degradazione misura quanto il protocollo RPC sincrono e' "
-                            "sensibile al RTT: piu' chiamate per job, piu' il ritardo si "
-                            "accumula sul percorso critico. " + self._provenance(run))
+        self._footnote(fig, self._provenance(run))
         self._save(fig, "cmp_02_latenza_rete.png")
 
 
@@ -1879,10 +1862,6 @@ class PlotGenerator:
                             f"{sample.get('sample_size', len(y_true)):,}{pop_note}. "
                             f"{self._provenance(run)}")
         self._save(fig, "ml_05_scatter_predetto_reale.png")
-
-    
-
-
 
 if __name__ == "__main__":
     PlotGenerator().generate_all_plots()
