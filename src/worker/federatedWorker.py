@@ -8,7 +8,7 @@ import boto3
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor 
+from sklearn.ensemble import RandomForestRegressor 
 from rpyc.utils.classic import obtain
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from src.shared.utilities.loader.synthetic_dataloader import SyntheticDataLoader
@@ -403,6 +403,7 @@ class FederatedWorker(BaseWorker):
         max_depth = hyperparameters.get("max_depth")
         base_seed = int(hyperparameters.get("random_state", 123))
         max_samples = hyperparameters.get("max_samples", self.max_samples) 
+        bootstrap = hyperparameters.get("bootstrap", self.bootstrap)
 
         self.tree_type = hyperparameters.get("tree_type", "classifier")
     
@@ -418,11 +419,15 @@ class FederatedWorker(BaseWorker):
         print(f"\n[{self.worker_name}] Ricevuto Task RPC Federato per Job {job_id[:8]}")
 
         if self._cached_job_id != job_id or self._cached_X_train is None:
+            load_start = time_module.perf_counter()
             if dataset_type == "synthetic":
                 self._load_synthetic_data(hyperparameters, worker_index=worker_index)
             else:
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
             self._cached_job_id = job_id
+            load_seconds = time_module.perf_counter() - load_start
+        else:
+            load_seconds = 0.0
 
         tree_type = hyperparameters.get("tree_type", "classifier")
         if tree_type == "classifier":
@@ -436,9 +441,8 @@ class FederatedWorker(BaseWorker):
         worker_tasks = []
         for i in range(n_estimators_local):
             seed = base_seed + i
-            worker_tasks.append((seed, max_depth, max_samples, self.bootstrap, tree_class, class_weight, max_features,
+            worker_tasks.append((seed, max_depth, max_samples, bootstrap, tree_class, class_weight, max_features,
                                 min_samples_split, criterion))
-
 
         synthetic_source_info = f"shared_train_{job_id}.csv"
         parts_num_trees = []
@@ -520,7 +524,7 @@ class FederatedWorker(BaseWorker):
         # Non restituiamo più gli alberi per intero via RPyC: l'Orchestratore
         # rilegge gli alberi dallo storage condiviso con lo stesso 'source_info' sintetico
 
-        return {"ack": True, "num_trees": n_estimators_local}
+        return {"ack": True, "num_trees": n_estimators_local, "load_seconds": load_seconds}
 
     def _resolve_selected_features(self, dataset_type: str, hyperparameters: dict):
         """
@@ -790,13 +794,12 @@ class FederatedWorker(BaseWorker):
         tree_type = hyperparameters.get("tree_type", "classifier")
         num_trees = hyperparameters.get("num_trees")
 
-        if self._cached_job_id != job_id or self._cached_X_test is None or self._cached_y_test is None:
-            print(f"[{self.worker_name}] Rigenerazione cache di test tramite pipeline ufficiale...")
+        if self._cached_job_id != job_id or self._cached_X_train is None:
             if dataset_type == "synthetic":
                 self._load_synthetic_data(hyperparameters, worker_index=worker_index)
             else:
                 self._load_and_preprocess_real_shard(worker_index, hyperparameters, dataset_type=dataset_type)
-        self._cached_job_id = job_id
+            self._cached_job_id = job_id
 
         y_probs = None
         positive_idx = None

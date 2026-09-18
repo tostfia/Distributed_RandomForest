@@ -86,9 +86,6 @@ def load_hyperparameters_from_config(mode: str, dataset_type: str = "real") -> H
                     "max_features", "criterion"}
     hp_data = {k: v for k, v in raw_hp.items() if k in known_fields}
     if mode == "federated":
-        #hp_data["bootstrap"] = False
-       
-       # hp_data["max_samples"] = 1.0
         hp_data.setdefault("target_column", "Target" if dataset_type == "synthetic" else "Label")
 
     # n_samples/n_features/noise/n_informative_reg vivono a livello RADICE
@@ -172,13 +169,7 @@ def ask_custom_hyperparameters(mode: str, dataset_type: str, tree_type: str) -> 
         print(f"  [ATTENZIONE] Valore non valido ('{max_samples_raw}'), uso il default 1.0.")
         max_samples = 1.0
 
-    if mode == "federated":
-        print("  [INFO] Modalità FEDERATED: forzo bootstrap=False e max_samples=1.0 per coerenza col protocollo.")
-        bootstrap = False
-        max_samples = 1.0
-    else:
-        bootstrap = True
-
+    bootstrap = True #per coerenza con baseline, non chiediamo all'utente di cambiarlo
     default_target = "Target" if dataset_type == "synthetic" else "Label"
     target_column = get_input(f"  target_column [Default: {default_target}]: ", default_target)
 

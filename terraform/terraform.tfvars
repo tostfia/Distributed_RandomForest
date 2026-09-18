@@ -1,0 +1,43 @@
+# Copia questo file in terraform.tfvars e personalizza secondo necessità.
+# terraform.tfvars NON va condiviso/committato se contiene dati sensibili
+# (qui non ce ne sono, ma è buona norma).
+
+aws_region   = "us-east-1"
+project_name = "rf-distributed"
+cluster_name = "forest-cluster"
+
+# "centralized" oppure "federated"
+training_mode = "federated"
+
+# "synthetic" oppure "real" - DEVE combaciare con dataset_type in
+# test_config.json e DATASET_TYPE nel .env locale del test-engine.
+dataset_type = "real"
+
+num_workers                = 10
+orchestrator_desired_count = 0
+# worker_desired_count non specificato: default 0 (vedi variables.tf) -
+# infrastruttura creata ma ferma, sia orchestrator che worker. Alza
+# entrambi (qui e/o worker_desired_count) quando sei pronta a lanciare
+# davvero un test, oppure usa i comandi 'aws ecs update-service' /
+# 'aws autoscaling update-auto-scaling-group' che gia' conosci, senza
+# dover rifare un apply ogni volta.
+
+# Abbassa worker_cpu durante lo sviluppo/debug per ridurre i costi; alzalo
+# solo per i test di performance finali che richiedono parallelismo reale
+# (vedi la relazione: valutazione della scalabilità).
+#
+# ATTENZIONE worker_memory: la SCP del Learner Lab nega 'ecs:RegisterTaskDefinition'
+# per qualunque memoria > 8192 MiB (vedi README.md, punto 3.3) - NON alzare
+# questo valore oltre 8192, o l'apply fallisce con AccessDeniedException.
+worker_cpu    = "4096"
+worker_memory = "8192"
+
+# NOTA: l'orchestrator NON e' piu' un task ECS (vedi orchestrator_ec2.tf:
+# gira su istanze EC2 in un Auto Scaling Group, dimensionate con
+# orchestrator_ec2_instance_type, di default "r5.large" - 16 GiB, fuori
+# dalla restrizione SCP sopra). Non esistono piu' variabili
+# orchestrator_cpu/orchestrator_memory: rimosse, erano orfane (Terraform le
+# segnalava con un warning "Value for undeclared variable").
+
+image_tag           = "latest"
+force_image_rebuild = false

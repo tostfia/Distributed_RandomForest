@@ -597,6 +597,7 @@ class FederatedOrchestrator(BaseOrchestrator):
             # che i test di fault injection possano attendere in modo affidabile il
             # momento in cui il PRIMO task di training viene davvero inviato a un
             # worker, invece di limitarsi a un'attesa temporale fissa.
+            shard_load_seconds_by_worker = {}
             self.chunk_sent_event.clear()
             def contact_worker(w_name, idx):
                 task = assigned_tasks.get(w_name)
@@ -673,6 +674,7 @@ class FederatedOrchestrator(BaseOrchestrator):
                             raise RuntimeError(
                                 f"Risposta inattesa dal worker {w_name} per il task {task_id}: {ack!r}"
                             )
+                        shard_load_seconds_by_worker[w_name] = ack.get("load_seconds", 0.0)
 
                         # 'source_info' sintetico: il federato non usa un path di
                         # dataset per il training locale (ogni worker ha già il
@@ -784,6 +786,14 @@ class FederatedOrchestrator(BaseOrchestrator):
             for t in threads:
                 t.join()
             self.last_dispatch_seconds = time.perf_counter() - dispatch_start
+            # Caricamento/preprocessing shard lato worker: avviene IN PARALLELO
+            # dentro la stessa finestra cronometrata sopra, quindi lo isoliamo
+            # usando il MASSIMO tra i worker (è quello che limita il wall-clock,
+            # come il dispatch stesso) e lo sottraiamo da last_dispatch_seconds,
+            # così 'training_only_seconds' torna confrontabile con quello del
+            # centralizzato (che esclude l'ETL) e con T_seq/T_1node della baseline.
+            self.last_etl_seconds = max(shard_load_seconds_by_worker.values(), default=0.0)
+            self.last_dispatch_seconds = max(0.0, self.last_dispatch_seconds - self.last_etl_seconds)
             print(f"[DEBUG] Tempo totale speso in I/O di checkpoint: {checkpoint_time_accum[0]:.2f}s")
 
             if not all_trained_trees:
