@@ -1436,10 +1436,7 @@ class PlotGenerator:
         breakdown_subtitle = self._env_subtitle(run) + (f" ({variant})" if variant else "")
         fig.suptitle(f"Scomposizione del tempo di addestramento - {breakdown_subtitle}",
                      fontsize=14, fontweight="bold", y=1.0)
-        self._footnote(fig, "Solo la fascia blu si riduce all'aumentare dei worker: le fasi "
-                            "seriali restano pressoche' costanti e, crescendo in quota "
-                            "relativa (pannello destro), fissano il tetto di Amdahl allo "
-                            "speedup ottenibile. " + self._provenance(run))
+        self._footnote(fig, self._provenance(run))
         filename = f"sdcc_03_scomposizione_tempi_{suffix}.png" if suffix else "sdcc_03_scomposizione_tempi.png"
         self._save(fig, filename)
 
