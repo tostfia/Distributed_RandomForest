@@ -7,11 +7,11 @@ project_name = "rf-distributed"
 cluster_name = "forest-cluster"
 
 # "centralized" oppure "federated"
-training_mode = "federated"
+training_mode = "centralized"
 
 # "synthetic" oppure "real" - DEVE combaciare con dataset_type in
 # test_config.json e DATASET_TYPE nel .env locale del test-engine.
-dataset_type = "real"
+dataset_type = "synthetic"
 
 num_workers                = 10
 orchestrator_desired_count = 0

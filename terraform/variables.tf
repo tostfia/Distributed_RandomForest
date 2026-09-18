@@ -39,7 +39,7 @@ variable "worker_desired_count" {
 }
 
 variable "dataset_type" {
-  description = "Tipo di dataset: 'synthetic' o 'real'. 
+  description = "Tipo di dataset: 'synthetic' o 'real'."
   type        = string
   default     = "synthetic"
   validation {

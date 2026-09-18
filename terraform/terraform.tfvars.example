@@ -13,7 +13,7 @@ training_mode = "centralized"
 # test_config.json e DATASET_TYPE nel .env locale del test-engine.
 dataset_type = "synthetic"
 
-num_workers                = 10
+num_workers                = 0
 orchestrator_desired_count = 0
 # worker_desired_count non specificato: default 0 (vedi variables.tf) -
 # infrastruttura creata ma ferma, sia orchestrator che worker. Alza
