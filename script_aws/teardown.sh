@@ -264,7 +264,7 @@ else
 fi
 
 echo "==> [4/6] Svuotamento stato applicativo su DynamoDB..."
-echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks, WorkerIndexLocks, JobMetadata"
+echo "    Tabelle: workers_registry, orchestrators_registry, JobLocks, ModelStatus, OrchestratorLocks, WorkerTasks, JobMetadata"
 echo "    Nota: vengono rimossi solo gli ITEM, le tabelle restano intatte."
 
 # Elenco confermato dalla console DynamoDB (8 tabelle totali usate dal sistema)
@@ -277,7 +277,6 @@ DYNAMO_TABLES=(
   "ModelStatus"
   "OrchestratorLocks"
   "WorkerTasks"
-  "WorkerIndexLocks"
   "JobMetadata"
 )
 

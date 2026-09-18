@@ -1147,13 +1147,6 @@ class PlotGenerator:
 
         fig, ax = plt.subplots(figsize=(9.6, 6.0))
 
-        # Curva principale: tempo TOTALE misurato (training end-to-end,
-        # ETL+alberi+aggregazione inclusi) - l'unica metrica omogenea con la
-        # baseline T_1node, che a sua volta e' un tempo totale. La precedente
-        # curva "solo costruzione alberi" (training_only_seconds) escludeva
-        # l'ETL e produceva uno speedup apparente non realmente confrontabile
-        # con la baseline (vedi nota metodologica in Sezione 8.2 della
-        # relazione): rimossa dal grafico per lo stesso motivo.
         plotted_values = []
         if all(v is not None and v > 0 for v in totals):
             ax.plot(workers, totals, marker="s", markersize=7,

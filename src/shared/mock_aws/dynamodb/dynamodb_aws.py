@@ -33,7 +33,6 @@ class AwsDynamoDB:
         'WorkerTasks': 'task_id',
         'OrchestratorLocks': 'lock_key',
         'JobLocks': 'lock_key',
-        'WorkerIndexLocks': 'lock_key',
         'JobMetadata': 'job_id',
     }
 
