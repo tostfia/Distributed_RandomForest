@@ -948,52 +948,64 @@ class FederatedOrchestrator(BaseOrchestrator):
         # addestrato prima di questa modifica, o modello non-classificatore),
         # ricadiamo sulla soglia della baseline (comportamento storico, invariato).
         decision_threshold = None
-        threshold_path = self._resolve_threshold_path(job_id)
-        if self.checkpoint_dao.exists(threshold_path):
-            try:
-                thr_data = self.checkpoint_dao.load(threshold_path)
-                decision_threshold = thr_data.get("decision_threshold")
-                print(f"[{self.orchestrator_name}] Soglia FEDERATA calibrata trovata per questo job: "
-                      f"{decision_threshold:.4f} (calcolata su {thr_data.get('n_val_samples')} "
-                      f"campioni di validation, F1={thr_data.get('f1_score')}).")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [WARN] Soglia federata presente ma illeggibile "
-                      f"({e}): ricado sulla soglia della baseline.")
-
-        if decision_threshold is None:
-            # Vedi VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py:
-            # stesso pattern di feature_selezionate sopra. read_decision_threshold_from_config
-            # passa per checkpoint_dao (locale o S3, vedi BaseOrchestrator._resolve_baseline_config_path)
-            # quindi si comporta identicamente in ogni ambiente, incluso 'aws' -- se il
-            # manifesto non è stato caricato su S3 da run_baseline.py, ritorna semplicemente
-            # None (come in locale se il file non esiste) e ogni worker ricade sul
-            # comportamento di default (argmax/soglia implicita 0.50), vedi
-            # FederatedWorker.exposed_predict_subset_forest.
-            decision_threshold = self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
-            if decision_threshold is not None:
-                print(f"[{self.orchestrator_name}] [FALLBACK] Nessuna soglia federata calibrata "
-                      f"disponibile per questo job: uso quella della baseline ({decision_threshold}).")
-
-        # SOGLIE PER-WORKER (vedi _calibrate_federated_threshold): con
-        # partizionamento non-IID la soglia unica sopra può essere lontana
-        # dall'ottimo per un worker la cui distribuzione locale delle
-        # probabilità è spostata rispetto al pool. Se disponibili, ogni
-        # worker riceve la PROPRIA soglia invece di quella broadcast a tutti
-        # -- fallback su 'decision_threshold' (sopra) per qualunque worker
-        # senza una soglia individuale salvata (validation locale
-        # insufficiente, o job addestrato prima di questa modifica).
         per_worker_thresholds = {}
-        per_worker_threshold_path = self._resolve_per_worker_threshold_path(job_id)
-        if self.checkpoint_dao.exists(per_worker_threshold_path):
-            try:
-                per_worker_thresholds = self.checkpoint_dao.load(per_worker_threshold_path)
-                print(f"[{self.orchestrator_name}] Soglie per-worker trovate per {len(per_worker_thresholds)} "
-                      f"worker: {sorted(per_worker_thresholds.keys())}. Gli altri useranno la soglia globale "
-                      f"({decision_threshold}).")
-            except Exception as e:
-                print(f"[{self.orchestrator_name}] [WARN] Soglie per-worker presenti ma illeggibili "
-                      f"({e}): tutti i worker useranno la soglia globale.")
-                per_worker_thresholds = {}
+        # GUARDIA tree_type: la decision_threshold (soglia sulla probabilità
+        # della classe positiva) è un concetto puramente di classificazione.
+        # Per un regressore non esiste una 'classe positiva' su cui calibrare
+        # nulla, quindi saltiamo del tutto il lookup (niente I/O su
+        # checkpoint_dao inutile) e i worker riceveranno decision_threshold=None,
+        # che è già gestito correttamente lato FederatedWorker (ramo
+        # tree_type=='regressor' di exposed_predict_subset_forest ignora
+        # comunque questo campo).
+        if tree_type == "classifier":
+            threshold_path = self._resolve_threshold_path(job_id)
+            if self.checkpoint_dao.exists(threshold_path):
+                try:
+                    thr_data = self.checkpoint_dao.load(threshold_path)
+                    decision_threshold = thr_data.get("decision_threshold")
+                    print(f"[{self.orchestrator_name}] Soglia FEDERATA calibrata trovata per questo job: "
+                          f"{decision_threshold:.4f} (calcolata su {thr_data.get('n_val_samples')} "
+                          f"campioni di validation, F1={thr_data.get('f1_score')}).")
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [WARN] Soglia federata presente ma illeggibile "
+                          f"({e}): ricado sulla soglia della baseline.")
+
+            if decision_threshold is None:
+                # Vedi VALIDATION_SIZE_FOR_THRESHOLD/decision_threshold in run_baseline.py:
+                # stesso pattern di feature_selezionate sopra. read_decision_threshold_from_config
+                # passa per checkpoint_dao (locale o S3, vedi BaseOrchestrator._resolve_baseline_config_path)
+                # quindi si comporta identicamente in ogni ambiente, incluso 'aws' -- se il
+                # manifesto non è stato caricato su S3 da run_baseline.py, ritorna semplicemente
+                # None (come in locale se il file non esiste) e ogni worker ricade sul
+                # comportamento di default (argmax/soglia implicita 0.50), vedi
+                # FederatedWorker.exposed_predict_subset_forest.
+                decision_threshold = self.read_decision_threshold_from_config(self._resolve_dataset_type(payload))
+                if decision_threshold is not None:
+                    print(f"[{self.orchestrator_name}] [FALLBACK] Nessuna soglia federata calibrata "
+                          f"disponibile per questo job: uso quella della baseline ({decision_threshold}).")
+
+            # SOGLIE PER-WORKER (vedi _calibrate_federated_threshold): con
+            # partizionamento non-IID la soglia unica sopra può essere lontana
+            # dall'ottimo per un worker la cui distribuzione locale delle
+            # probabilità è spostata rispetto al pool. Se disponibili, ogni
+            # worker riceve la PROPRIA soglia invece di quella broadcast a tutti
+            # -- fallback su 'decision_threshold' (sopra) per qualunque worker
+            # senza una soglia individuale salvata (validation locale
+            # insufficiente, o job addestrato prima di questa modifica).
+            per_worker_threshold_path = self._resolve_per_worker_threshold_path(job_id)
+            if self.checkpoint_dao.exists(per_worker_threshold_path):
+                try:
+                    per_worker_thresholds = self.checkpoint_dao.load(per_worker_threshold_path)
+                    print(f"[{self.orchestrator_name}] Soglie per-worker trovate per {len(per_worker_thresholds)} "
+                          f"worker: {sorted(per_worker_thresholds.keys())}. Gli altri useranno la soglia globale "
+                          f"({decision_threshold}).")
+                except Exception as e:
+                    print(f"[{self.orchestrator_name}] [WARN] Soglie per-worker presenti ma illeggibili "
+                          f"({e}): tutti i worker useranno la soglia globale.")
+                    per_worker_thresholds = {}
+        else:
+            print(f"[{self.orchestrator_name}] tree_type='regressor': decision_threshold non applicabile, skip "
+                  f"del lookup soglia (globale e per-worker).")
 
         # Accumulo per-worker (non più liste piatte): la chiave è il worker_index
         # STABILE (lega worker<->shard, vedi _infer_worker_index), così la ripresa
@@ -1208,8 +1220,16 @@ class FederatedOrchestrator(BaseOrchestrator):
         metrics_per_worker = {}
         for w_idx, r in results_by_worker.items():
             y_true_arr = np.array(r["y_true"], dtype=y_true_dtype)
-            classes, counts = np.unique(y_true_arr, return_counts=True)
-            class_counts = dict(zip(classes.tolist(), counts.tolist()))
+            # GUARDIA tree_type: 'class_counts' ha senso solo per un target
+            # categoriale. Su un target continuo (regressore) quasi ogni
+            # valore sarebbe unico, quindi il conteggio non porterebbe
+            # nessuna informazione utile: lo saltiamo del tutto invece di
+            # calcolarlo e riportarlo come campo fuorviante nell'output.
+            if tree_type == "classifier":
+                classes, counts = np.unique(y_true_arr, return_counts=True)
+                class_counts = dict(zip(classes.tolist(), counts.tolist()))
+            else:
+                class_counts = None
 
             y_probs_w = np.array(r["y_probs"], dtype=np.float64) if r.get("y_probs") is not None else None
             try:
@@ -1225,18 +1245,34 @@ class FederatedOrchestrator(BaseOrchestrator):
                 continue  # niente entry per questo worker: meglio assente che un crash dell'intera inferenza
 
             m["n_samples"] = r["n_samples"]
-            m["class_counts"] = class_counts
+            if class_counts is not None:
+                m["class_counts"] = class_counts
             metrics_per_worker[w_idx] = m
-        MIN_SAMPLES_PER_CLASS = 30  # da tarare
-        def _reliable_for_macro(m):
-            counts = m.get("class_counts", {})
-            return bool(counts) and min(counts.values()) >= MIN_SAMPLES_PER_CLASS
+        # GUARDIA tree_type: 'class_counts' (popolato poche righe sopra via
+        # np.unique su y_true) ha senso solo per un target categoriale. Su un
+        # target continuo (regressore) ogni valore tende ad essere unico, quindi
+        # il filtro per-classe escluderebbe di fatto TUTTI i worker dalla
+        # macro-average (min(counts.values()) quasi sempre pari a 1). Per il
+        # regressore il criterio di affidabilità è quindi solo dimensionale:
+        # numero minimo di campioni nello shard, senza alcun concetto di classe.
+        MIN_SAMPLES_PER_CLASS = 30  # da tarare (solo classificatore)
+        MIN_SAMPLES_FOR_MACRO_REGRESSOR = 30  # da tarare (solo regressore)
+
+        if tree_type == "classifier":
+            def _reliable_for_macro(m):
+                counts = m.get("class_counts", {})
+                return bool(counts) and min(counts.values()) >= MIN_SAMPLES_PER_CLASS
+            exclusion_reason = f"< {MIN_SAMPLES_PER_CLASS} campioni in almeno una classe"
+        else:
+            def _reliable_for_macro(m):
+                return m.get("n_samples", 0) >= MIN_SAMPLES_FOR_MACRO_REGRESSOR
+            exclusion_reason = f"< {MIN_SAMPLES_FOR_MACRO_REGRESSOR} campioni nello shard"
 
         reliable = {k: v for k, v in metrics_per_worker.items() if _reliable_for_macro(v)}
         excluded = set(metrics_per_worker) - set(reliable)
         if excluded:
             print(f"[{self.orchestrator_name}] [WARN] Worker esclusi dalla macro-average "
-                f"(< {MIN_SAMPLES_PER_CLASS} campioni in almeno una classe): {sorted(excluded)}")
+                f"({exclusion_reason}): {sorted(excluded)}")
 
         numeric_keys = [k for k, v in next(iter(reliable.values()), {}).items() if isinstance(v, (int, float))] if reliable else []
         metrics_macro = {
