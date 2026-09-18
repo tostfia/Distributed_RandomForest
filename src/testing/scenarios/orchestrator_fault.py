@@ -354,8 +354,6 @@ class OrchestratorFailoverScenario(BaseTestScenario):
             "hyperparameters": hp
             }
 
-
-        # 4. Invio del Job sulla coda standard gestita da Sofia
         print(f"[TEST] Invio del Job {job_id[:8]} alla coda '{orch_leader.queue_name}'...")
         try:
             orch_leader.sqs_queue.send_message(orch_leader.queue_name, payload)
